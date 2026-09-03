@@ -10,9 +10,9 @@ import sys
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from gazefix.camera.environment import apply_capture_environment
 from gazefix.config import AppSettings
 from gazefix.logging_config import configure_logging
-from gazefix.ui.main_window import MainWindow
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +27,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument(
+        "--msmf-hw-transforms",
+        type=int,
+        choices=(0, 1),
+        default=None,
+        help=(
+            "Windows only: 1 lets OpenCV's Media Foundation backend negotiate "
+            "hardware transforms during camera open (OpenCV's own default), 0 "
+            "skips them (GazeFix default; avoids multi-second MSMF opens)"
+        ),
+    )
     parser.add_argument(
         "--auto-exit-ms",
         type=int,
@@ -46,6 +57,11 @@ def main(argv: list[str] | None = None) -> int:
             capture_height=args.height,
             target_fps=args.fps,
             log_level=args.log_level,
+            msmf_hw_transforms=(
+                AppSettings().msmf_hw_transforms
+                if args.msmf_hw_transforms is None
+                else bool(args.msmf_hw_transforms)
+            ),
         ).validated()
     except ValueError as exc:
         print(f"Invalid settings: {exc}", file=sys.stderr)
@@ -53,6 +69,16 @@ def main(argv: list[str] | None = None) -> int:
 
     log_path = configure_logging(settings.log_directory, settings.log_level)
     logger = logging.getLogger(__name__)
+    # Must precede the OpenCV import below: a statically linked OpenCV runtime
+    # snapshots the environment when it loads.
+    exported = apply_capture_environment(settings)
+    if exported:
+        logger.info(
+            "Capture environment applied",
+            extra={"event": "capture_environment", **exported},
+        )
+    from gazefix.ui.main_window import MainWindow  # noqa: E402  (after env)
+
     logger.info(
         "Application starting",
         extra={

@@ -24,6 +24,9 @@ def test_default_settings_are_valid() -> None:
         ("camera_probe_limit", 33),
         ("transient_read_failures", 0),
         ("discovery_validation_reads", 0),
+        ("stalled_read_s", 0),
+        ("open_validation_timeout_s", 0),
+        ("reconnect_delay_max_s", 0.5),
     ],
 )
 def test_invalid_settings_are_rejected(field: str, value: int) -> None:
