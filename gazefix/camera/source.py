@@ -138,19 +138,29 @@ class PreparedCameraCloser:
 
         with self._condition:
             self._queue.append(prepared)
-            if self._thread is None:
-                thread = Thread(target=self._run, name=self._name, daemon=True)
-                try:
-                    thread.start()
-                except RuntimeError:
-                    # Out of threads: the token stays queued and counted as
-                    # outstanding, and the next submit tries again.
-                    logger.exception(
-                        "Prepared camera cleanup thread could not start",
-                        extra={"event": "prepared_camera_closer_start_error"},
-                    )
-                    return
-                self._thread = thread
+            self._ensure_thread()
+
+    def _ensure_thread(self) -> None:
+        """Launch the thread if work is queued and none is running (condition held).
+
+        A launch can fail when the process is out of threads. The token then
+        stays queued and counted as outstanding, and both the next ``submit``
+        and the next ``join`` try the launch again, so a transient failure
+        never strands a token silently.
+        """
+
+        if self._thread is not None or not self._queue:
+            return
+        thread = Thread(target=self._run, name=self._name, daemon=True)
+        try:
+            thread.start()
+        except RuntimeError:
+            logger.exception(
+                "Prepared camera cleanup thread could not start",
+                extra={"event": "prepared_camera_closer_start_error"},
+            )
+            return
+        self._thread = thread
 
     @property
     def outstanding(self) -> int:
@@ -163,6 +173,7 @@ class PreparedCameraCloser:
         """Wait at most ``timeout`` seconds for every submitted token to be released."""
 
         with self._condition:
+            self._ensure_thread()
             return self._condition.wait_for(self._idle, timeout=max(0.0, timeout))
 
     def _idle(self) -> bool:

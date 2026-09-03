@@ -371,3 +371,61 @@ def test_stop_returns_false_only_when_owned_work_is_alive_at_the_final_check(cap
     settle(runtime)
     assert runtime.state is RuntimeState.STOPPED
     assert runtime.stop() is True
+
+
+def test_a_release_overlaps_the_worker_joins_instead_of_waiting_for_them(caplog: pytest.LogCaptureFixture) -> None:  # type: ignore[no-untyped-def]
+    """A token whose release is instantaneous must not be reported as outstanding
+    just because the abandoned worker consumed the whole deadline first."""
+
+    caplog.set_level(logging.INFO, logger="gazefix.pipeline.runtime")
+    gate = Event()
+    sources: list[FakeCameraSource] = []
+    runtime = PipelineRuntime(
+        settings(worker_join_timeout_s=0.5), source_factory=lambda _s: GatedOpenSource(sources, gate)
+    )
+    runtime.start()
+    runtime.select_camera(CameraDevice(0))
+    assert wait_until(lambda: bool(sources) and sources[0].open_started.is_set())
+    warm = FakeCameraSource()
+    device = CameraDevice(5)
+    prepared = PreparedCamera(device, warm, warm.open(device))
+    runtime.select_camera(device, prepared)  # pending: the worker is inside the driver open
+    try:
+        assert runtime.stop() is False  # the worker is still inside the open...
+        assert warm.closed and warm.close_calls == 1  # ...but the release ran during the joins
+        record = events(caplog, "pipeline_shutdown_timeout")[-1]
+        assert record.capture_alive is True and record.cleanup_outstanding == 0  # type: ignore[attr-defined]
+        assert runtime.prepared_closer.outstanding == 0
+    finally:
+        gate.set()
+    settle(runtime)
+    assert runtime.stop() is True
+
+
+def test_closer_retries_a_failed_thread_launch_on_join(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:  # type: ignore[no-untyped-def]
+    """Out of threads at submit time: the token stays counted, and join launches later."""
+
+    from threading import Thread
+
+    from gazefix.camera import source as source_module
+
+    caplog.set_level(logging.ERROR, logger="gazefix.camera.source")
+    attempts: list[int] = []
+
+    class FlakyThread(Thread):
+        def start(self) -> None:
+            attempts.append(len(attempts))
+            if len(attempts) == 1:
+                raise RuntimeError("can't start new thread")
+            super().start()
+
+    monkeypatch.setattr(source_module, "Thread", FlakyThread)
+    closer = PreparedCameraCloser()
+    warm = FakeCameraSource()
+    device = CameraDevice(0)
+    closer.submit(PreparedCamera(device, warm, warm.open(device)))
+    assert closer.outstanding == 1 and not warm.closed  # counted, not released, not dropped
+    assert events(caplog, "prepared_camera_closer_start_error")
+    assert closer.join(2.0)  # the retry inside join launches the thread
+    assert warm.closed and warm.close_calls == 1 and closer.outstanding == 0
+    assert attempts == [0, 1]

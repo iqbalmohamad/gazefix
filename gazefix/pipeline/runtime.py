@@ -279,6 +279,11 @@ class PipelineRuntime:
         deadline = time.perf_counter() + timeout
         self._capture.stop()
         self._processor.stop()
+        # Hand unadopted prepared cameras to the cleanup thread now, so their
+        # release overlaps the worker joins instead of starting only once the
+        # joins have used up the deadline (a release that would have finished
+        # in a millisecond was otherwise reported as still outstanding).
+        self._submit_pending_prepared()
         # A normal webcam read returns promptly; letting the owning thread
         # close the source avoids backend deadlocks caused by concurrent
         # release/read.
@@ -295,20 +300,28 @@ class PipelineRuntime:
         processor_joined = self._processor.join(
             max(0.0, deadline - time.perf_counter())
         )
-        # Prepared cameras the worker will never adopt: after ``stop`` the
-        # worker has either exited (its own cleanup already ran and left
-        # nothing here) or is abandoned inside a driver call and may never
-        # reach that cleanup. Taking the tokens swaps them out under the
-        # worker's request lock, and the cleanup thread releases them, so the
-        # caller never blocks on a driver and no token is released twice. A
-        # token the worker already adopted has an owner and no source left to
-        # release; handing it over would only inflate ``outstanding`` with a
-        # no-op, so only tokens that are still unclaimed count as cleanup.
+        # Second sweep for a token the worker orphaned while it was winding
+        # down, then wait, still within the deadline, for the releases.
+        self._submit_pending_prepared()
+        cleanup_done = self._closer.join(max(0.0, deadline - time.perf_counter()))
+        return capture_joined, processor_joined, cleanup_done
+
+    def _submit_pending_prepared(self) -> None:
+        """Hand the prepared cameras the worker will never adopt to the cleanup thread.
+
+        After ``stop`` the worker has either exited (its own cleanup already
+        ran and left nothing here) or is abandoned inside a driver call and
+        may never reach that cleanup. Taking the tokens swaps them out under
+        the worker's request lock, and the cleanup thread releases them, so
+        the caller never blocks on a driver and no token is released twice. A
+        token the worker already adopted has an owner and no source left to
+        release; handing it over would only inflate ``outstanding`` with a
+        no-op, so only tokens that are still unclaimed count as cleanup.
+        """
+
         for prepared in self._capture.take_pending_prepared():
             if prepared.is_pending:
                 self._closer.submit(prepared)
-        cleanup_done = self._closer.join(max(0.0, deadline - time.perf_counter()))
-        return capture_joined, processor_joined, cleanup_done
 
     def _finish_shutdown(
         self, waits: tuple[bool, bool, bool], *, first_call: bool
@@ -329,7 +342,8 @@ class PipelineRuntime:
             self._stop_finalized = self._stop_finalized or stopped
         if not stopped:
             logger.error(
-                "Pipeline shutdown incomplete; owned work is still alive",
+                "Pipeline shutdown incomplete; a worker or a prepared-camera "
+                "release is still outstanding",
                 extra={
                     "event": "pipeline_shutdown_timeout",
                     "capture_alive": capture_alive,

@@ -172,7 +172,9 @@ NEW       no worker thread started, stop() not requested
 RUNNING   a worker thread started, stop() not requested
 STOPPING  stop() requested; a worker thread is alive or a handed-off release
           is still outstanding
-STOPPED   stop() requested; nothing owned is alive or outstanding
+STOPPED   stop() requested; no worker thread is alive and the cleanup thread the
+          runtime uses (shared with discovery when the window wires it so) has
+          no release outstanding
 ```
 
 **Transactional start.** `start()` launches the processing worker and then the
@@ -183,10 +185,12 @@ error. A caller never inherits a live thread from a failed `start()`; if the
 started worker outlives that deadline, `state` reads `STOPPING` (never `NEW`)
 and `stop()` keeps tracking it. Joining a worker that never started is a no-op.
 
-**Truthful stop.** `stop()` signals both workers, joins them against one
-deadline (`worker_join_timeout_s`), hands the prepared cameras the worker can no
-longer adopt to the cleanup thread, and waits, still within the same deadline,
-for those releases. Then it reconciles: after every wait and immediately before
+**Truthful stop.** `stop()` signals both workers, hands the prepared cameras the
+worker can no longer adopt to the cleanup thread at once (so their release
+overlaps the joins rather than starting after them), joins the workers against
+one deadline (`worker_join_timeout_s`), sweeps once more for a token the worker
+orphaned while winding down, and waits, still within the same deadline, for
+those releases. Then it reconciles: after every wait and immediately before
 returning it reads whether either worker thread is alive and whether any release
 is outstanding, and that final check is both the return value and what `state`
 reports. Two things are deliberately kept apart: whether the deadline ran out
