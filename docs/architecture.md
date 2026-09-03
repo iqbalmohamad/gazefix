@@ -76,4 +76,22 @@ camera names.
 `PassthroughProcessor` returns the input unchanged. Later milestones can replace
 this object with tracking and gaze pipeline work on the existing processor thread;
 camera capture, latest-frame behavior, UI polling, and lifecycle ownership remain
-unchanged. No future-milestone algorithm or dependency is included now.
+unchanged. The live runtime remains the Milestone 0 passthrough implementation.
+
+## Standalone tracking boundary
+
+Milestone 1 introduces `gazefix.tracking` without changing the capture or worker
+lifecycle. `FaceTracker.track` consumes one immutable BGR frame and returns only
+application-owned tracking metadata. The MediaPipe adapter converts into private
+RGB storage, and provider objects do not cross the package boundary. Debug overlay
+rendering is an explicit development-only operation that creates a detached frame.
+
+Runtime wiring into `FrameProcessor` is deliberately deferred until the parallel
+Milestone 0 camera-hardening work is reviewed. The intended integration is a
+processor implementation that retains the original frame, invokes one initialized
+tracker on the existing processor thread, publishes/stores the latest
+`TrackingResult`, and returns either the original frame or an opt-in debug-overlay
+copy. Tracker loss or exceptions must never stop frame publication.
+
+See [tracking.md](tracking.md) for topology, failure semantics, metrics, and the
+dependency decision.

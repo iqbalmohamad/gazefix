@@ -1,24 +1,28 @@
-# GazeFix — Milestone 0
+# GazeFix — Milestone 0 with standalone Milestone 1 tracking
 
 GazeFix Milestone 0 is a local Windows desktop prototype that discovers validated
 OpenCV camera candidates, lets the user select and switch cameras, and displays a
-responsive live preview. It contains no gaze correction, tracking, ML inference,
-virtual-camera output, telemetry, or cloud processing.
+responsive live preview. The repository also contains an isolated Milestone 1
+face/eye/iris tracking foundation, which is not yet wired into the live preview.
+It contains no gaze estimation, gaze correction, calibration, virtual-camera
+output, or cloud inference.
 
 ## Requirements
 
 - Windows 10 or 11
-- Python 3.11 or newer (64-bit recommended)
+- Python 3.11 or 3.12 (64-bit)
 - A webcam allowed by **Windows Settings → Privacy & security → Camera**
 
-The M0 runtime dependencies are PySide6, OpenCV, and NumPy. pytest is installed
-only by the `dev` optional dependency.
+The M0 runtime uses PySide6, OpenCV, and NumPy. Milestone 1 adds the pinned
+MediaPipe Face Landmarker package. pytest is installed only by the `dev` optional
+dependency.
 
-| Dependency | Declared range | M0 purpose | Package license metadata |
+| Dependency | Declared range | Purpose | Package license metadata |
 | --- | --- | --- | --- |
 | PySide6 | `>=6.7,<7` | Windows desktop UI and thread-safe signals | LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only |
-| opencv-python | `>=4.10,<5` | Webcam capture and Windows backend access | Apache-2.0 |
+| opencv-contrib-python | `>=4.10,<5` | Webcam capture and development overlay drawing; selected as the single OpenCV distribution required by MediaPipe | Apache-2.0 |
 | NumPy | `>=1.26,<3` | Typed frame-array representation | BSD-3-Clause and bundled component licenses |
+| MediaPipe | `==0.10.35` | CPU face, eye, and iris landmark inference | Apache-2.0 |
 | pytest (development only) | `>=8,<10` | Hardware-independent automated tests | MIT |
 
 ## Environment setup
@@ -31,8 +35,9 @@ py -3.12 -m venv .venv
 .venv\Scripts\python -m pip install -e ".[dev]"
 ```
 
-Python 3.11 can be substituted for 3.12. The application declares compatibility
-with Python `>=3.11`.
+Python 3.11 can be substituted for 3.12. The application intentionally caps
+Python below 3.13 to match the MediaPipe package versions verified for this
+milestone.
 
 ## Run the application
 
@@ -57,6 +62,33 @@ restarting, or **Refresh** after connecting a camera or changing privacy setting
 ```
 
 The automated suite uses fake camera sources and does not require webcam hardware.
+
+## Standalone face tracking foundation
+
+`gazefix.tracking` provides provider-neutral immutable results, an injectable
+`FaceTracker` protocol, a CPU MediaPipe adapter, deterministic primary-face
+selection, tracking diagnostics, and an opt-in debug overlay. The tracker accepts
+BGR `uint8` frames and returns metadata without modifying the frame.
+
+The MediaPipe model is intentionally not committed. Obtain the versioned official
+model and verify its digest before local experiments:
+
+```powershell
+New-Item -ItemType Directory -Force .models | Out-Null
+Invoke-WebRequest `
+  -Uri "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task" `
+  -OutFile ".models\face_landmarker.task"
+Get-FileHash -Algorithm SHA256 ".models\face_landmarker.task"
+```
+
+Expected SHA-256:
+
+```text
+64184E229B263107BC2B804C6625DB1341FF2BB731874B0BCC2FE6544E0BC9FF
+```
+
+See [docs/tracking.md](docs/tracking.md) for the API, coordinate semantics,
+failure states, dependency decision, and deferred integration contract.
 
 ## Run camera diagnostics
 
@@ -104,8 +136,9 @@ Structured JSON-line logs rotate locally at:
 %LOCALAPPDATA%\GazeFix\logs\gazefix.jsonl
 ```
 
-Logs contain lifecycle and diagnostic metadata, never raw frames. Webcam frames
-remain in local process memory and are never transmitted.
+Logs contain lifecycle and diagnostic metadata, never raw frames. GazeFix code
+passes frames only to local OpenCV/MediaPipe APIs and contains no frame-upload or
+cloud-inference path.
 
 See [docs/architecture.md](docs/architecture.md) for the pipeline and shutdown
 details.
