@@ -1,839 +1,359 @@
-You are the software engineer responsible for implementing **GazeFix**.
+# GazeFix — Current Engineering Assignment
 
-The Product Manager is ChatGPT.
+You are the primary Software Engineer for **GazeFix**.
 
-I am the product owner/user.
+ChatGPT is the Product Manager. The user is the Product Owner.
 
-The attached **GazeFix Product Requirements Document v1.1** is the source of truth for product requirements, product scope, constraints, milestone definitions, and acceptance criteria.
+The attached **GazeFix Product Requirements Document v1.1** remains the unchanged source of truth for product requirements, product scope, constraints, milestone definitions, and acceptance criteria. This file is the source of truth for the engineering work that is currently active.
 
-Your responsibility is **engineering execution**.
+Do not edit the PRD as part of this assignment. If this assignment materially conflicts with the PRD, stop and escalate the conflict instead of silently changing product behavior.
 
-Do not redesign the product unless a technical issue materially conflicts with the PRD. If that happens, escalate it instead of silently changing product behavior.
+# Active Assignment
 
-# Current Assignment
+Complete **M0 Follow-up Hardening** only.
 
-Implement **Milestone 0 — Technical Foundation** only.
+Milestone 0 has already passed, and PR #2 was merged into `milestone-0` at merge commit:
 
-The objective of Milestone 0 is:
+```text
+a636d890284dd9c36231c45727990c06af77f6f1
+```
 
-> Prove that the foundational real-time Windows camera pipeline is stable enough to support later computer-vision processing.
+Before Milestone 1 begins, resolve both remaining M0 carry-forward issues:
 
-Do **not** implement:
+1. Truthful shutdown-state bookkeeping.
+2. Diagnostic-versus-production camera timing fidelity.
 
-- face detection,
-- face tracking,
-- eye tracking,
-- iris tracking,
-- gaze estimation,
-- gaze correction,
+This is a focused M0 hardening assignment. It does not reopen the completed Milestone 0 feature scope and does not authorize Milestone 1 work.
+
+---
+
+# Repository and Git Rules
+
+Start from the latest remote `milestone-0`.
+
+Before modifying code:
+
+1. Fetch the latest remote state.
+2. Confirm that `origin/milestone-0` contains merge commit `a636d890284dd9c36231c45727990c06af77f6f1` or a later expected commit.
+3. Inspect the repository structure, current status, relevant history, affected implementation, and existing tests.
+4. Preserve unrelated work and do not rewrite history.
+
+Create and work only on:
+
+```text
+claude/m0-followup-hardening
+```
+
+Create the branch from the latest:
+
+```text
+origin/milestone-0
+```
+
+The pull request target must be:
+
+```text
+milestone-0
+```
+
+Do not modify, merge into, or push to `main`.
+
+Commit and push the completed work to `claude/m0-followup-hardening`, then open a pull request into `milestone-0`.
+
+Do **not** merge the pull request. It must remain available for independent review.
+
+---
+
+# Scope Boundaries
+
+Do not begin Milestone 1.
+
+Do not implement or introduce:
+
+- face detection or tracking,
+- eye or iris tracking,
+- head-pose estimation,
+- gaze estimation or correction,
 - calibration,
-- machine-learning inference,
-- ONNX inference,
-- MediaPipe tracking,
-- virtual-camera output,
-- OBS integration,
-- neural models.
+- ML, ONNX, or MediaPipe inference,
+- compositing changes for future gaze correction,
+- virtual-camera output or OBS integration,
+- future product controls,
+- unrelated architecture or repository restructuring.
 
-Do not install dependencies for those future milestones unless Milestone 0 genuinely requires them.
+Also:
 
-Stop after Milestone 0.
-
----
-
-# Repository / Git Rules
-
-You are working inside an existing Git repository.
-
-Before modifying anything:
-
-1. inspect the repository structure,
-2. inspect `git status`,
-3. inspect the current branch,
-4. inspect recent relevant git history if useful,
-5. inspect existing configuration and documentation,
-6. identify existing implementation that should be preserved,
-7. identify Python/runtime constraints available in your environment.
-
-Do not overwrite unrelated existing work.
-
-Do not delete existing files merely because you prefer another structure.
-
-Prefer incremental changes over unnecessary repository restructuring.
-
-Do not:
-
-- push to a remote,
-- merge branches,
-- force-reset the repository,
-- rewrite git history,
-- open a pull request,
-
-unless explicitly instructed by the product owner.
-
-Do not create commits unless explicitly requested.
-
-If the working tree already contains unrelated modifications, preserve them.
+- add no new major dependency,
+- add no cloud functionality,
+- preserve Python 3.11+ and Windows 10/11 compatibility,
+- preserve the no-CUDA/no-NVIDIA/no-NPU requirement,
+- keep all waits bounded,
+- keep camera and worker ownership explicit,
+- preserve latest-frame semantics,
+- keep changes focused on the affected lifecycle and camera-opening/diagnostic areas.
 
 ---
 
-# Required Deliverables
+# Issue 1 — Truthful Shutdown-State Bookkeeping
 
-Implement:
+## Problem
 
-1. Clean Python project/repository structure.
-2. Python 3.11+ compatibility.
-3. Windows 10/11 compatibility.
-4. PySide6 desktop UI.
-5. Webcam device discovery.
-6. Camera-selection control.
-7. Live webcam preview.
-8. Camera capture outside the Qt UI thread.
-9. Capture FPS measurement.
-10. Display/output FPS measurement.
-11. Basic frame-processing latency measurement.
-12. Graceful handling of camera disconnect/failure.
-13. Clean application shutdown.
-14. Structured logging.
-15. Central configuration/settings abstraction.
-16. pytest test infrastructure.
-17. Small command-line camera diagnostic tool.
-18. README instructions for installation, execution, testing, and diagnostics.
+`gazefix/pipeline/runtime.py` currently clears `_started` after `stop()` even when the shutdown deadline expires and one or more workers may still be alive.
 
-CPU and memory metrics may also be included if they can be added without complicating the architecture.
+That can make the runtime claim it is stopped when it is not. A later `stop()` can then take the early-success path even though the earlier shutdown did not fully terminate the runtime.
 
----
+Logging the timeout is not sufficient; the internal lifecycle state and subsequent behavior must remain truthful.
 
-# Architectural Requirement
+## Required Behavior
 
-Milestone 0 must establish the foundation for this eventual pipeline:
+Review the actual runtime, capture-worker, processing-worker, and UI shutdown lifecycle. Implement a robust state model such that:
 
-```text
-Camera Capture
-      │
-      ▼
-Latest Frame
-      │
-      ▼
-Tracking
-      │
-      ▼
-Gaze Estimation
-      │
-      ▼
-Gaze Correction
-      │
-      ▼
-Compositing
-      │
-      ├────────► Preview
-      │
-      ▼
-Virtual Camera
-```
+1. A shutdown timeout never causes the runtime to represent live workers as fully stopped.
+2. The boolean result of `stop()` accurately reflects whether every owned worker has terminated.
+3. Repeated `stop()` calls after a timeout continue to report and act on the real worker state; they must not return success solely because an earlier call cleared a bookkeeping flag.
+4. If a worker remains alive after a timeout, subsequent lifecycle operations are deterministic and safe.
+5. If the worker later terminates, a later `stop()` can observe and finalize the stopped state without leaking resources.
+6. A successful shutdown leaves the runtime fully stopped and preserves any currently supported restart/reuse behavior. Do not invent restart support if the architecture does not support it.
+7. Joins and waits remain bounded by explicit deadlines. Do not add an unbounded join or block the Qt UI thread indefinitely.
+8. Existing ownership rules remain intact: a blocked OpenCV call is not made unsafe by releasing its capture concurrently from another thread.
+9. Pending prepared-camera resources are closed safely and exactly as lifecycle ownership requires.
+10. Existing clean-shutdown, camera-switch, interrupt, and latest-frame behavior is preserved.
+11. Timeout and recovery paths emit useful, truthful local logging without hiding failure state.
 
-Milestone 0 implements only the foundation required before `Tracking`.
+## Required Regression Tests
 
-The architecture must allow later processing stages to be inserted without rewriting camera capture or UI lifecycle management.
+Add meaningful hardware-independent tests covering at least:
 
-A reasonable conceptual separation is:
+- successful shutdown,
+- shutdown timeout while a worker remains alive,
+- repeated `stop()` after that timeout,
+- eventual worker termination and truthful finalization, where applicable to the implemented state model,
+- preservation of bounded waits,
+- no false stopped/success state while any owned worker is still alive.
 
-```text
-Frame Source
-    ↓
-Latest-Frame Buffer
-    ↓
-Frame Processor
-    ↓
-Frame Consumers
-```
+Prefer deterministic fakes/events over wall-clock-sensitive tests. Use the architecture already present rather than adding an unnecessary lifecycle framework.
 
-where future processing can later become:
+## Acceptance Criteria
 
-```text
-Capture
-  ↓
-Tracking
-  ↓
-Gaze
-  ↓
-Correction
-  ↓
-Compositing
-```
+This issue is accepted only when all of the following are true:
 
-This is a conceptual requirement, not permission to build an unnecessary framework.
-
-Prefer simple, focused interfaces.
-
-Avoid premature abstraction.
+- Runtime lifecycle state agrees with actual worker liveness after every `stop()` outcome.
+- A timed-out shutdown cannot be converted into a false success by calling `stop()` again.
+- A later call can safely recognize eventual termination if a timed-out worker subsequently exits.
+- No unbounded wait, unsafe cross-thread camera release, race-prone cleanup, or UI-thread deadlock is introduced.
+- Existing normal shutdown behavior remains passing.
+- Focused regression tests demonstrate the timeout and repeated-stop cases.
 
 ---
 
-# Real-Time / Buffering Requirement
+# Issue 2 — Diagnostic-versus-Production Timing Fidelity
 
-Freshness is more important than processing every frame.
+## Problem
 
-Future gaze processing may occasionally take longer than the camera frame interval.
+`gazefix/camera/diagnostics.py` currently opens and configures cameras differently from the production path in `gazefix/camera/source.py`.
 
-The application must therefore avoid accumulating stale frames.
+The diagnostic currently constructs `cv2.VideoCapture(index, backend)`, then unconditionally sets width, height, FPS, and buffer size. Production uses different DirectShow open parameters, conditional format application, fallback/validation behavior, and shared application settings. As a result, the diagnostic timings are useful for A/B comparison but are not necessarily representative of production startup behavior.
 
-Prefer:
+## Required Behavior
 
-```text
-latest frame wins
-```
+Review the production open/configure flow and diagnostic probe flow. Refactor at the appropriate lower-level seam so the diagnostic shares or faithfully exercises the production camera-opening and configuration behavior needed for meaningful timing data.
 
-rather than:
+The result must satisfy all of the following:
 
-```text
-capture → queue → queue → queue → process every frame
-```
+1. Requested backend behavior is explicit and consistent between diagnostic and production use where equivalence is intended.
+2. MSMF and DirectShow opening/configuration semantics match production behavior, including DirectShow open parameters and conditional width/height/FPS application.
+3. Hardware-transform behavior remains configurable and testable for MSMF A/B runs.
+4. Timing fields remain correctly defined and useful. At minimum, preserve meaningful measurements for open, configure, first-frame validation/read, sampling, and release where technically possible.
+5. Reported backend, negotiated width, negotiated height, negotiated FPS, observed FPS, successful reads, failed reads, and errors remain accurate.
+6. Every opened or partially opened camera resource is released on success, failure, interruption, and exception paths.
+7. The diagnostic remains CLI-friendly, local-only, and safe to run against physical hardware.
+8. The diagnostic is not coupled to PySide6 or the Qt UI.
+9. Production code does not depend on the diagnostic module.
+10. Duplicated camera-open/configuration logic is removed or reduced where it can be shared safely.
+11. The existing diagnostic CLI remains compatible unless a small backward-compatible extension is needed.
+12. Any remaining intentional difference from production is documented precisely, including its effect on interpreting timing results.
 
-Do not use an unbounded frame queue.
+Do not claim exact production equivalence unless the code path and measurement boundaries justify that claim.
 
-A bounded queue of size one, overwrite buffer, or equivalent latest-frame mechanism is acceptable.
+## Required Regression Tests
 
-Document:
+Add or update hardware-independent tests covering at least:
 
-- how frames move from capture to consumer,
-- what happens if the consumer is slower than capture,
-- how stale frames are discarded,
-- whether frame ownership/copying is required for thread safety.
+- reuse of the intended production opening/configuration primitives,
+- backend-specific behavior for MSMF and DirectShow,
+- width/height/FPS configuration semantics,
+- timing-field meaning at the chosen measurement boundaries,
+- first-frame validation/read behavior,
+- release on success and all relevant failure paths,
+- hardware-transform configuration propagation,
+- any documented intentional distinction from production.
 
----
+Physical-camera verification may supplement these tests but must not replace them.
 
-# Threading Requirement
+## Acceptance Criteria
 
-Qt's main/UI thread must not perform blocking webcam reads.
+This issue is accepted only when all of the following are true:
 
-Camera capture must occur outside the Qt UI thread.
-
-The implementation must make lifecycle behavior explicit for:
-
-```text
-start
-running
-temporary capture failure
-camera change
-disconnect
-stop
-application shutdown
-```
-
-Do not leave worker threads running after the application exits.
-
-Avoid unsafe cross-thread UI access.
-
-Use Qt signals/slots or another safe mechanism for communicating with the UI.
-
----
-
-# Hardware Constraint
-
-Target development hardware is approximately:
-
-```text
-Windows laptop
-Intel Core i7
-Intel Iris Xe
-No NVIDIA GPU
-```
-
-The implementation must not require:
-
-- CUDA,
-- NVIDIA libraries,
-- RTX hardware,
-- Windows Studio Effects,
-- Copilot+ hardware,
-- an NPU,
-- cloud services.
-
-All webcam data must remain local.
+- Diagnostic results are generated through the production-equivalent open/configuration behavior claimed by the implementation.
+- Backend selection, requested format behavior, first-frame behavior, and hardware-transform settings are consistent where intended.
+- Timing labels accurately describe what is measured and are not presented as production timings if a material distinction remains.
+- Camera ownership and release are correct on every path.
+- The CLI remains usable without a Qt dependency.
+- Production runtime does not depend on diagnostic code.
+- Focused hardware-independent regression tests demonstrate the shared behavior.
 
 ---
 
-# Dependencies
-
-Expected Milestone 0 dependencies are approximately:
-
-```text
-PySide6
-OpenCV
-NumPy
-pytest
-```
-
-`psutil` may be added for diagnostics if useful.
-
-Do not install future-milestone dependencies such as MediaPipe, ONNX Runtime, or pyvirtualcam merely because they appear in the full PRD.
-
-Before adding a significant dependency:
-
-1. verify Windows support,
-2. verify Python 3.11+ compatibility,
-3. prefer mature and actively maintained packages,
-4. avoid unnecessary dependencies,
-5. record its purpose,
-6. record its license if material.
-
-If proposing a significant technology change, first document:
-
-```text
-Problem
-Alternative
-Trade-off
-Recommendation
-```
-
-and only make the change when it does not conflict with the PRD.
-
----
-
-# Windows Camera Backend
-
-Investigate the appropriate OpenCV camera backend for Windows.
-
-At minimum consider:
-
-```text
-cv2.CAP_MSMF
-cv2.CAP_DSHOW
-```
-
-Choose a sensible Windows default and implement documented fallback behavior when appropriate.
-
-Do not hard-code the architecture around camera index `0`.
-
-Camera selection must be represented independently from source-code edits.
-
-Be careful when describing camera discovery.
-
-OpenCV probing of numerical indexes does not necessarily provide authoritative Windows device enumeration.
-
-If the implementation uses index probing, document that limitation accurately rather than claiming true OS-level enumeration.
-
-Do not claim a camera exists unless opening/validation supports that conclusion.
-
----
-
-# UI
-
-The Milestone 0 UI should be intentionally simple.
-
-Minimum conceptual layout:
-
-```text
-┌─────────────────────────────────────┐
-│ GazeFix                             │
-├─────────────────────────────────────┤
-│                                     │
-│            Camera Preview           │
-│                                     │
-├─────────────────────────────────────┤
-│ Camera: [ device selector ▼ ]       │
-│                                     │
-│ Capture FPS: xx.x                   │
-│ Display FPS: xx.x                   │
-│ Processing: xx.x ms                 │
-│                                     │
-│ Status: Running                     │
-└─────────────────────────────────────┘
-```
-
-UI responsiveness is more important than visual polish.
-
-Do not implement future product controls such as:
-
-- correction strength,
-- calibration,
-- Eye Contact ON/OFF,
-- virtual-camera controls.
-
-Those belong to later milestones.
-
----
-
-# Camera Switching
-
-Changing the selected camera must not require restarting the application.
-
-The lifecycle should safely:
-
-```text
-stop old capture
-release old camera
-open selected camera
-resume capture
-update status
-```
-
-Failures should leave the application in a recoverable state rather than crashing.
-
----
-
-# Error Handling
-
-Handle at least:
-
-- no camera available,
-- invalid camera selection,
-- selected camera cannot be opened,
-- camera disconnects,
-- individual frame read temporarily fails,
-- repeated frame-read failure,
-- application closes while capture is active,
-- camera changes while capture is active.
-
-Do not allow camera failures to terminate the process without a useful error message.
-
-Temporary capture failure should not immediately destroy the application state.
-
-Avoid infinite high-CPU retry loops.
-
----
-
-# Instrumentation
-
-At minimum measure:
-
-```text
-capture FPS
-display FPS
-frame-processing time
-```
-
-If practical, also expose:
-
-```text
-CPU usage
-memory usage
-dropped/replaced frames
-```
-
-Clearly define what each metric measures.
-
-For example:
-
-```text
-capture FPS
-= successfully captured frames per second
-
-display FPS
-= frames actually presented to the UI per second
-
-processing latency
-= time spent in the current processing stage,
-  excluding arbitrary queue wait time
-```
-
-Do not report theoretical values as measured performance.
-
-No telemetry may leave the machine.
-
----
-
-# Processing Stage
-
-Milestone 0 has no actual computer-vision processing.
-
-However, create a lightweight place in the pipeline where later processing can be inserted.
-
-For Milestone 0, the processor may effectively behave like:
-
-```python
-output_frame = input_frame
-```
-
-Do not create placeholder implementations for gaze algorithms.
-
-The purpose is only to verify data flow and measure basic pipeline overhead.
-
----
-
-# Testing
-
-Create meaningful automated tests for components that do not require webcam hardware.
-
-Good candidates include:
-
-- configuration,
-- latest-frame buffering behavior,
-- lifecycle/state logic where separated from hardware,
-- metric calculations,
-- utility functions.
-
-Test the important real-time invariant:
-
-> When producers outrun consumers, old frames do not accumulate indefinitely.
-
-Do not create fake or trivial tests merely to increase test count.
-
-Hardware-dependent functionality belongs in:
-
-- the diagnostic script,
-- documented manual verification,
-- runtime verification.
-
-Tests must not fail simply because CI has no webcam.
-
----
-
-# Camera Diagnostic Tool
-
-Provide:
-
-```text
-python scripts/camera_test.py
-```
-
-or an equivalent documented command.
-
-It should help diagnose, where technically possible:
-
-- candidate camera indexes/devices,
-- whether each candidate opens,
-- backend requested,
-- backend actually reported by OpenCV,
-- negotiated width,
-- negotiated height,
-- negotiated FPS,
-- observed FPS over a short capture sample,
-- frame-read failures.
-
-If true Windows camera names cannot be reliably retrieved using the chosen mechanism, report candidates accurately instead of inventing device names.
-
-The tool should exit cleanly and release cameras.
-
----
-
-# Logging
-
-Use standard structured/local logging appropriate for a desktop prototype.
-
-Logs should include enough context to diagnose:
-
-- camera open/close,
-- backend selection,
-- camera switch,
-- capture failure,
-- worker lifecycle,
-- shutdown errors.
-
-Do not log raw webcam frames.
-
-Do not introduce cloud logging.
-
----
-
-# Configuration
-
-Create a central settings/configuration abstraction.
-
-It should be suitable for future settings such as:
-
-```text
-camera
-resolution
-FPS target
-processing options
-development diagnostics
-```
-
-Do not build a complex configuration framework.
-
-Milestone 0 only needs enough structure to avoid scattering magic constants throughout the code.
-
----
-
-# Repository Quality
-
-Keep modules focused.
-
-Do not place the entire application in `main.py`.
-
-Use type hints where they improve clarity.
-
-Use docstrings where behavior is non-obvious.
-
-Keep platform-specific behavior localized where practical.
-
-Avoid:
-
-- enterprise architecture,
-- unnecessary dependency injection frameworks,
-- generic plugin frameworks,
-- speculative abstractions for future ML models.
-
-We need clean seams for future CV stages, not maximum abstraction.
-
----
-
-# Documentation
-
-Update `README.md` with exact instructions for:
-
-```text
-environment setup
-dependency installation
-running the application
-running tests
-running camera diagnostics
-```
-
-Document any Windows-specific notes.
-
-If architectural behavior is non-obvious, add a concise architecture document under:
-
-```text
-docs/
-```
-
-Short ADRs may be added under:
-
-```text
-docs/decisions/
-```
-
-for decisions that materially affect future milestones.
-
-Do not create ADRs for trivial implementation choices.
-
----
-
-# Execution Procedure
-
-Work directly in the repository.
-
-Follow this sequence:
-
-1. inspect repository and git state,
-2. inspect existing code/configuration,
-3. identify available Python version,
-4. identify execution-platform limitations,
-5. identify missing dependencies,
-6. implement Milestone 0,
-7. run automated tests,
-8. run static/import validation where useful,
-9. launch the application where the environment permits,
-10. run camera diagnostics where the environment permits,
-11. fix defects discovered during verification,
-12. inspect the final diff,
-13. verify no unrelated files were unintentionally modified,
-14. produce the engineering report.
-
-Do not stop after proposing code if you have repository/file access.
-
-Actually modify the repository and execute verification commands.
+# Required Engineering Workflow
+
+1. Fetch and branch from the latest `origin/milestone-0`.
+2. Inspect the current lifecycle, camera source, diagnostic code, configuration, and relevant tests before editing.
+3. Implement both carry-forward fixes without expanding scope.
+4. Add focused regression tests for both issues.
+5. Run the focused tests while iterating.
+6. Run the complete automated test suite.
+7. Run static, import, or CLI-help validation where useful.
+8. If the environment permits, run the diagnostic safely; distinguish code verification from Windows/physical-camera verification.
+9. Self-review the complete diff, including surrounding code, for:
+   - concurrency and race conditions,
+   - worker lifecycle truthfulness,
+   - bounded shutdown behavior,
+   - camera ownership and release,
+   - production/diagnostic equivalence,
+   - timing-definition accuracy,
+   - backward compatibility,
+   - test quality,
+   - scope compliance.
+10. Fix issues found during self-review.
+11. Confirm no unrelated files or future-milestone functionality were introduced.
+12. Commit and push the branch.
+13. Open a pull request from `claude/m0-followup-hardening` into `milestone-0`.
+14. Do not merge the pull request.
+
+Do not stop after proposing code when repository access is available. Complete the implementation, verification, self-review, commit, push, and PR creation unless a genuine blocker prevents them.
 
 ---
 
 # Verification Policy
 
-Distinguish carefully between:
+Report evidence precisely and distinguish:
 
 ```text
 CODE VERIFIED
-```
-
-and:
-
-```text
 RUNTIME VERIFIED
-```
-
-and:
-
-```text
 PHYSICAL HARDWARE VERIFIED
 ```
 
-Examples:
+Automated tests with fakes do not verify a physical webcam. Import or CLI-help success does not verify real camera timing. If Windows GUI or physical-camera verification is unavailable, state `NOT VERIFIED`; do not infer or fabricate a result.
 
-A unit test proving latest-frame-buffer behavior does **not** verify webcam capture.
-
-Successful module import does **not** verify the GUI launches.
-
-Successful GUI launch on Linux does **not** verify Windows behavior.
-
-Mock camera tests do **not** verify a physical webcam.
-
-Do not infer verification.
-
-If your environment cannot access:
-
-- Windows,
-- a graphical desktop,
-- or physical webcam hardware,
-
-state that limitation explicitly.
-
-A limitation of your execution environment does not automatically mean the implementation failed.
+The complete test suite must pass before reporting `READY FOR REVIEW`. If an unrelated environmental limitation prevents a test from running, report it explicitly with the evidence gathered; do not silently omit it.
 
 ---
 
-# Completion Gate
+# Pull Request Requirements
 
-Milestone 0 may be marked **PASS** only when sufficient evidence exists that:
+The pull request must:
 
-- the application launches,
-- UI remains responsive,
-- camera capture is asynchronous,
-- camera selection does not require source-code changes,
-- live preview works with physical webcam hardware,
-- application shutdown is clean,
-- automated tests pass,
-- architecture does not assume NVIDIA hardware.
+- use source branch `claude/m0-followup-hardening`,
+- target `milestone-0`,
+- contain both fixes and their tests,
+- describe the previous failure modes and the implemented behavior,
+- state focused and full-suite test results,
+- identify any Windows or physical-hardware items not verified,
+- confirm that no M1 functionality was introduced,
+- remain unmerged for independent Codex review.
 
-If physical webcam or Windows GUI verification cannot actually be performed, use:
-
-```text
-PASS WITH LIMITATIONS
-```
-
-when the implementation and non-hardware verification are otherwise satisfactory.
-
-Do not mark:
-
-```text
-Physical webcam capture: VERIFIED
-```
-
-unless you actually observed frames from physical webcam hardware.
-
-Do not fabricate benchmark results.
+Do not modify or merge into `main`.
 
 ---
 
-# Final Engineering Report
+# Required Final Engineering Report
 
-When Milestone 0 work is complete, stop and return exactly the following report structure.
+When the work is complete, return exactly this report structure, then stop.
 
-## Milestone Status
-
-PASS / PASS WITH LIMITATIONS / FAIL
-
-## What Was Implemented
-
-Concise summary.
-
-## Repository Changes
-
-List important files/modules created or modified.
-
-## Architecture
-
-Explain:
-
-- camera capture lifecycle,
-- thread model,
-- frame buffering strategy,
-- processing-stage seam,
-- UI update path,
-- camera-switch behavior.
-
-## Dependencies
-
-For each important dependency:
-
-```text
-name
-version/range
-purpose
-license if material
-```
-
-## How to Run
-
-Exact setup and execution commands.
-
-## Tests
-
-Report:
-
-```text
-tests executed
-tests passed
-tests failed
-```
-
-Include relevant failure details.
-
-## Runtime Verification
-
-Report separately:
-
-```text
-Application launch:
-Camera discovery:
-Physical webcam capture:
-Preview:
-Camera switching:
-Clean shutdown:
-```
-
-For each use:
-
-```text
-VERIFIED
-NOT VERIFIED
-FAILED
-```
-
-Do not infer successful verification.
-
-## Performance
-
-Report only measurements actually observed:
-
-```text
-resolution
-capture FPS
-display FPS
-frame processing latency
-CPU usage
-memory usage
-```
-
-Use:
-
-```text
-NOT MEASURED
-```
-
-for unavailable metrics.
-
-Do not fabricate values.
-
-## Known Limitations
-
-List real limitations.
-
-## Technical Risks for Milestone 1
-
-Identify anything that may affect face/eye tracking.
-
-Pay particular attention to:
-
-- frame format,
-- frame ownership/copying,
-- camera backend behavior,
-- resolution stability,
-- threading,
-- performance headroom.
-
-## Recommendation
+## Status
 
 Choose exactly one:
 
 ```text
-PROCEED TO MILESTONE 1
-ITERATE ON MILESTONE 0
-CHANGE TECHNICAL APPROACH
+READY FOR REVIEW
+BLOCKED
 ```
 
-Explain why in a few sentences.
+## Branch
 
-Then stop.
+Report:
 
-Do not begin Milestone 1 until the Product Manager provides the next assignment.
+- base branch and starting SHA,
+- working branch,
+- final HEAD SHA,
+- pull request number and link.
+
+## Shutdown-State Fix
+
+Explain:
+
+- the previous failure mode,
+- the new lifecycle/state behavior,
+- how timeout, repeated `stop()`, and eventual termination behave,
+- regression tests added.
+
+## Diagnostic Fidelity Fix
+
+Explain:
+
+- the previous difference from production,
+- which production primitives or behavior are now shared,
+- the exact timing boundaries,
+- any remaining intentional distinction,
+- regression tests added.
+
+## Repository Changes
+
+List the important files modified and why.
+
+## Verification
+
+Report:
+
+- focused test commands and results,
+- complete test-suite command and result,
+- static/import/CLI checks run,
+- Windows runtime status,
+- physical-camera status,
+- any failures or limitations.
+
+Use `NOT VERIFIED` for unavailable runtime or hardware checks.
+
+## Self-Review
+
+Summarize the concurrency, lifecycle, ownership, timing-fidelity, regression, and scope review. List any remaining meaningful risks or non-blocking notes.
+
+## Scope Confirmation
+
+Confirm all of the following:
+
+- no Milestone 1 functionality,
+- no face/eye/iris tracking,
+- no gaze estimation or correction,
+- no calibration, ML inference, or virtual-camera work,
+- no new major dependencies,
+- no changes pushed or merged to `main`.
+
+## Merge State
+
+State exactly:
+
+```text
+PR NOT MERGED
+```
+
+## Next Step
+
+State exactly:
+
+```text
+Ready for independent Codex review.
+```
+
+Do not begin Milestone 1. Do not merge the pull request.
