@@ -93,5 +93,11 @@ tracker on the existing processor thread, publishes/stores the latest
 `TrackingResult`, and returns either the original frame or an opt-in debug-overlay
 copy. Tracker loss or exceptions must never stop frame publication.
 
+`gazefix.tracking.offline_validation` is a separate file-only diagnostic seam. It
+owns a tracker only for the duration of one still-image or prerecorded-video run,
+uses OpenCV only to decode/encode files, and cannot accept a camera index. It does
+not alter `PipelineRuntime`, `FrameProcessor`, capture workers, latest-frame
+buffers, camera recovery, or application shutdown wiring.
+
 See [tracking.md](tracking.md) for topology, failure semantics, metrics, and the
 dependency decision.

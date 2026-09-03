@@ -164,6 +164,32 @@ def test_tracker_represents_initial_no_face_and_temporary_loss() -> None:
     assert expired.face_landmarks == ()
 
 
+def test_tracker_restarts_temporary_loss_window_after_each_recovery() -> None:
+    backend = FakeBackend()
+    face = (_BackendFace(make_landmarks()),)
+    backend.responses.extend([face, (), face, (), (), (), face])
+    tracker = make_tracker(backend)
+    tracker.initialize()
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+
+    states = [tracker.track(frame).state for _ in range(7)]
+
+    assert states == [
+        TrackingState.TRACKED,
+        TrackingState.TEMPORARILY_LOST,
+        TrackingState.TRACKED,
+        TrackingState.TEMPORARILY_LOST,
+        TrackingState.TEMPORARILY_LOST,
+        TrackingState.NO_FACE,
+        TrackingState.TRACKED,
+    ]
+    snapshot = tracker.metrics_snapshot()
+    assert snapshot.frames_seen == 7
+    assert snapshot.tracked_frames == 3
+    assert snapshot.temporary_losses == 3
+    assert snapshot.no_face_frames == 1
+
+
 @pytest.mark.parametrize(
     "invalid_frame",
     [
@@ -227,6 +253,28 @@ def test_tracker_exception_is_metadata_not_video_pipeline_failure() -> None:
     assert tracker.metrics_snapshot().tracker_errors == 1
 
 
+@pytest.mark.parametrize(
+    "malformed_response",
+    [
+        None,
+        (_BackendFace((object(),)),),
+    ],
+)
+def test_malformed_backend_results_become_tracker_errors(
+    malformed_response: object,
+) -> None:
+    backend = FakeBackend()
+    backend.responses.append(malformed_response)  # type: ignore[arg-type]
+    tracker = make_tracker(backend)
+    tracker.initialize()
+
+    result = tracker.track(np.zeros((4, 4, 3), dtype=np.uint8))
+
+    assert result.state is TrackingState.TRACKER_ERROR
+    assert not result.face_detected
+    assert result.error
+
+
 def test_tracker_uses_private_rgb_copy_and_monotonic_backend_timestamps() -> None:
     class MutatingBackend(FakeBackend):
         def detect(
@@ -248,6 +296,24 @@ def test_tracker_uses_private_rgb_copy_and_monotonic_backend_timestamps() -> Non
     assert np.array_equal(frame, original)
     assert tuple(backend.received_frames[0][1, 1]) == (30, 20, 10)
     assert backend.received_timestamps == [5, 6]
+
+
+def test_tracker_accepts_read_only_noncontiguous_input_without_mutation() -> None:
+    backend = FakeBackend()
+    backend.responses.append(())
+    tracker = make_tracker(backend)
+    tracker.initialize()
+    backing = np.full((4, 8, 3), (10, 20, 30), dtype=np.uint8)
+    frame = backing[:, ::2]
+    frame.flags.writeable = False
+    original = backing.copy()
+
+    result = tracker.track(frame)
+
+    assert result.state is TrackingState.NO_FACE
+    assert np.array_equal(backing, original)
+    assert backend.received_frames[0].flags.c_contiguous
+    assert not np.shares_memory(backend.received_frames[0], frame)
 
 
 def test_low_confidence_is_explicit_and_landmarks_are_not_fabricated() -> None:
@@ -292,3 +358,36 @@ def test_real_backend_fails_cleanly_when_model_file_is_missing(tmp_path: Path) -
 
     with pytest.raises(TrackerInitializationError, match="model not found"):
         tracker.initialize()
+
+
+def test_real_backend_rejects_model_with_wrong_digest(tmp_path: Path) -> None:
+    model_path = tmp_path / "face_landmarker.task"
+    model_path.write_bytes(b"not the approved bundle")
+    tracker = MediaPipeFaceTracker(MediaPipeTrackerConfig(model_path=model_path))
+
+    with pytest.raises(TrackerInitializationError, match="integrity check failed"):
+        tracker.initialize()
+
+
+def test_initialization_failure_closes_backend_and_can_be_retried() -> None:
+    class FailingBackend(FakeBackend):
+        def initialize(self) -> None:
+            super().initialize()
+            raise RuntimeError("initialization failed")
+
+    failing = FailingBackend()
+    succeeding = FakeBackend()
+    backends = iter((failing, succeeding))
+    tracker = MediaPipeFaceTracker(
+        MediaPipeTrackerConfig(model_path=Path("unused-by-fake.task")),
+        backend_factory=lambda _config: next(backends),
+    )
+
+    with pytest.raises(RuntimeError, match="initialization failed"):
+        tracker.initialize()
+    tracker.initialize()
+    tracker.shutdown()
+
+    assert failing.close_calls == 1
+    assert succeeding.initialize_calls == 1
+    assert succeeding.close_calls == 1

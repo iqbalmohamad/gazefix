@@ -71,7 +71,14 @@ selection, tracking diagnostics, and an opt-in debug overlay. The tracker accept
 BGR `uint8` frames and returns metadata without modifying the frame.
 
 The MediaPipe model is intentionally not committed. Obtain the versioned official
-model and verify its digest before local experiments:
+model and verify its digest before local experiments. The tracking validator can
+perform this explicit, integrity-checked provisioning step:
+
+```powershell
+.venv\Scripts\gazefix-tracking-validate.exe portrait.jpg --download-model
+```
+
+To provision it manually instead:
 
 ```powershell
 New-Item -ItemType Directory -Force .models | Out-Null
@@ -87,8 +94,23 @@ Expected SHA-256:
 64184E229B263107BC2B804C6625DB1341FF2BB731874B0BCC2FE6544E0BC9FF
 ```
 
+Run the real tracker without opening a webcam:
+
+```powershell
+.venv\Scripts\gazefix-tracking-validate.exe portrait.jpg
+.venv\Scripts\gazefix-tracking-validate.exe recording.mp4 `
+  --input-kind video `
+  --overlay-output .tracking-output\recording-overlay.mp4
+```
+
+The JSON report separates tracking latency from file-processing throughput.
+Offline throughput includes file decode and any requested overlay/write work; it
+must not be reported as live webcam FPS.
+
 See [docs/tracking.md](docs/tracking.md) for the API, coordinate semantics,
-failure states, dependency decision, and deferred integration contract.
+failure states, model provenance, offline validator, and deferred integration
+contract. See [docs/m1-physical-verification.md](docs/m1-physical-verification.md)
+for the checklist to execute after live pipeline integration exists.
 
 ## Run camera diagnostics
 

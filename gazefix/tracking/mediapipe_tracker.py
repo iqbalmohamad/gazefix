@@ -14,6 +14,10 @@ from typing import Protocol
 import numpy as np
 from numpy.typing import NDArray
 
+from gazefix.tracking.model_asset import (
+    ModelAssetError,
+    verify_face_landmarker_model,
+)
 from gazefix.tracking.metrics import TrackingMetrics, TrackingMetricsSnapshot
 from gazefix.tracking.models import (
     NormalizedLandmark,
@@ -135,6 +139,12 @@ class _MediaPipeBackend:
             raise TrackerInitializationError(
                 f"MediaPipe model not found: {self._config.model_path}"
             )
+        try:
+            verify_face_landmarker_model(self._config.model_path)
+        except ModelAssetError as exc:
+            raise TrackerInitializationError(
+                f"MediaPipe model integrity check failed: {exc}"
+            ) from exc
         try:
             import mediapipe as mp
         except ImportError as exc:

@@ -95,6 +95,15 @@ def test_primary_face_selection_prefers_area_then_center_independent_of_order() 
     assert select_primary_face((same_size_far, same_size_center)) == 1
 
 
+def test_primary_face_selection_uses_source_index_for_exact_geometric_ties() -> None:
+    later_source = face(9, 0.2, 0.2, 0.8, 0.8)
+    earlier_source = face(2, 0.2, 0.2, 0.8, 0.8)
+
+    selected = select_primary_face((later_source, earlier_source))
+
+    assert selected == 1
+
+
 def test_tracking_result_rejects_invalid_primary_face_index() -> None:
     with pytest.raises(ValueError, match="Primary face index"):
         TrackingResult(

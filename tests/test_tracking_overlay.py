@@ -80,3 +80,35 @@ def test_overlay_rejects_result_for_a_different_frame_size() -> None:
 
     with pytest.raises(ValueError, match="dimensions"):
         DebugOverlayRenderer().render(source, tracked_result())
+
+
+def test_overlay_accepts_read_only_source_and_clips_out_of_frame_landmarks() -> None:
+    source = np.zeros((80, 100, 3), dtype=np.uint8)
+    source.flags.writeable = False
+    original = source.copy()
+    result = tracked_result()
+    face = result.faces[0]
+    outside_face = TrackedFace(
+        source_index=face.source_index,
+        landmarks=(
+            NormalizedLandmark(0, -0.5, -0.5, 0.0),
+            NormalizedLandmark(1, 1.5, 1.5, 0.0),
+        ),
+    )
+    outside_result = TrackingResult(
+        state=TrackingState.TRACKED,
+        frame_sequence=1,
+        timestamp_ns=1,
+        frame_width=100,
+        frame_height=80,
+        faces=(outside_face,),
+        primary_face_index=0,
+        reliability=TrackingReliability(ReliabilityStatus.ACCEPTED),
+        processing_time_ms=1.0,
+    )
+
+    output = DebugOverlayRenderer().render(source, outside_result)
+
+    assert np.array_equal(source, original)
+    assert output.flags.writeable
+    assert np.count_nonzero(output) > 0

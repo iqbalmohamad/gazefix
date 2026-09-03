@@ -23,6 +23,7 @@ dev = [
 [project.scripts]
 gazefix = "gazefix.main:main"
 gazefix-camera-test = "gazefix.camera.diagnostics:main"
+gazefix-tracking-validate = "gazefix.tracking.offline_validation:main"
 
 [tool.setuptools.packages.find]
 include = ["gazefix*"]
