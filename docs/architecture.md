@@ -159,6 +159,39 @@ What can and cannot be cancelled:
 
 Timeouts are logged explicitly rather than silently hiding a stuck camera driver.
 
+### Runtime state is derived from worker liveness
+
+`PipelineRuntime` keeps only two facts of its own: whether `start()` launched the
+workers and whether `stop()` has been requested. Everything else is read from the
+worker threads when it is asked for (`PipelineRuntime.state`):
+
+```text
+NEW       start() not yet called
+RUNNING   workers started, stop() not requested
+STOPPING  stop() requested and at least one worker thread is still alive
+STOPPED   stop() requested and no worker thread is alive
+```
+
+`stop()` returns `True` only when every owned worker has actually terminated by
+the time it returns. A shutdown that runs out its deadline while a worker sits in
+an uncancellable driver call returns `False`, logs `pipeline_shutdown_timeout`
+with which worker survived, and leaves the runtime `STOPPING`. Calling `stop()`
+again joins the surviving worker against a fresh, equally bounded deadline and
+returns `True` only once the thread has exited; there is no flag a repeated call
+can clear to manufacture a success. Every `stop()` closes the prepared cameras
+the worker can no longer adopt, on the caller's thread, because the worker may
+never reach its own cleanup: the token hands its source to exactly one closer,
+and nobody reads an unclaimed source, so this is the same rule discovery applies.
+The terminal `pipeline_stopped` line is written exactly once, on the call that
+first observes every worker gone.
+
+After `stop()` has been requested the runtime accepts no further camera
+requests: `select_camera` publishes nothing, returns the current generation, and
+closes a prepared camera it was handed (the capture worker enforces the same rule
+for requests that reach it directly after its stop event is set). A runtime is
+single-use because Python threads cannot be restarted; `start()` after `stop()`
+raises instead of pretending, and a fresh `PipelineRuntime` is the restart path.
+
 ## Backend and discovery policy
 
 On Windows the default preference is Media Foundation (`CAP_MSMF`) followed by
@@ -202,9 +235,39 @@ this pipeline, and Milestone 0 is designed to perform it as rarely as possible:
 Every open, release, and probe logs its duration (`open_ms`, `configure_ms`,
 `first_frame_ms`, `release_ms`, `probe_ms`, `discovery_ms`) together with the
 backend requested and reported and the value of the hardware-transform switch, so a
-run on physical hardware shows where the time goes without extra tooling. The
-diagnostic tool reports the same timings per index and backend and accepts
-`--msmf-hw-transforms 0|1` for an A/B comparison on the same machine.
+run on physical hardware shows where the time goes without extra tooling.
+
+### One open path for production and the diagnostic
+
+`open_validated_backend` in `gazefix/camera/source.py` is the only code that
+opens, configures, and first-frame validates a `VideoCapture` on one backend. It
+returns a `BackendOpenOutcome` whose timing boundaries are fixed there:
+
+```text
+open_ms         VideoCapture.open alone (DirectShow gets width/height as open
+                parameters and builds its graph inside this call)
+configure_ms    the conditional width/height/FPS set calls plus the buffer hint;
+                format_sets_applied counts the sets that actually ran
+first_frame_ms  the bounded validation reads including the retry delays between
+                them; validation_reads counts the attempts
+```
+
+`OpenCVCameraSource` runs it per backend and owns the fallback decision and the
+release; the capture worker never sees a capture that did not validate. The
+command-line diagnostic (`gazefix/camera/diagnostics.py`) runs the same function
+per index and backend with the same `AppSettings`, so its `open_ms`,
+`configure_ms`, and `first_frame_ms` mean exactly what the `camera_opened` log
+event means, and `--msmf-hw-transforms 0|1` exports the same environment switch
+before OpenCV loads for an A/B comparison on the same machine. The diagnostic
+imports the source module; nothing in production imports the diagnostic, and the
+diagnostic does not import Qt.
+
+The diagnostic still differs from the running application on purpose, and the
+differences are documented in its module docstring and the README: it probes each
+backend alone without fallback, it does not sample a backend that failed
+validation, its sampling loop is not the capture worker's read loop, and it
+releases on its own thread. Its numbers are therefore per-backend production open
+costs, not a prediction of application start-up time.
 
 ## Processing seam
 

@@ -88,22 +88,43 @@ class CameraCaptureWorker:
         ownership passes to the worker here; a prepared camera belonging to a
         request that is superseded before it is applied is closed on the worker
         thread, never on the caller's.
+
+        The worker owns prepared cameras only while it is running. Once
+        ``stop()`` has been called the loop will never apply another request
+        and the thread may already have run its cleanup, so a request that
+        arrives afterwards is refused: nothing is published, the current
+        generation is returned unchanged, and the prepared camera is closed on
+        the caller's thread (nobody is reading it, so that release is safe).
         """
 
         # Publish, wake, and abort under one lock: the worker consumes requests
         # under the same lock, so a wake-up can never go stale and the abort can
-        # never hit the open the worker starts for this very request.
+        # never hit the open the worker starts for this very request. ``stop``
+        # sets the stop event before taking this lock, so a request that sees
+        # it clear here is guaranteed to be found by the final cleanup.
         with self._request_lock:
-            self._request_id += 1
-            request_id = self._request_id
-            self._requested_device = device
-            previous = self._requested_prepared
-            self._requested_prepared = prepared
-            if previous is not None:
-                self._orphaned_prepared.append(previous)
-            self._command_event.set()
-            self._abort_open_in_progress(
-                wanted=device, stopping=False, request_id=request_id
+            if self._stop_event.is_set():
+                refused, request_id = prepared, self._request_id
+            else:
+                refused = None
+                self._request_id += 1
+                request_id = self._request_id
+                self._requested_device = device
+                previous = self._requested_prepared
+                self._requested_prepared = prepared
+                if previous is not None:
+                    self._orphaned_prepared.append(previous)
+                self._command_event.set()
+                self._abort_open_in_progress(
+                    wanted=device, stopping=False, request_id=request_id
+                )
+        if refused is not None and refused.close_if_unclaimed():
+            logger.info(
+                "Closed prepared camera of a request that arrived after stop",
+                extra={
+                    "event": "prepared_camera_discarded",
+                    "camera_index": refused.device.index,
+                },
             )
         return request_id
 

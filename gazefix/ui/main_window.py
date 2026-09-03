@@ -334,9 +334,16 @@ class MainWindow(QMainWindow):
                 extra={"event": "discovery_shutdown_timeout"},
             )
         if not pipeline_stopped:
+            # The runtime stays STOPPING while the abandoned worker is alive;
+            # it is a daemon thread and ends with the process. Nothing here
+            # waits on it further, so the window never blocks the UI thread
+            # beyond the single join deadline above.
             logger.error(
                 "Pipeline worker did not stop before timeout",
-                extra={"event": "pipeline_shutdown_timeout"},
+                extra={
+                    "event": "pipeline_shutdown_timeout",
+                    "runtime_state": self._runtime.state.value,
+                },
             )
         event.accept()
 

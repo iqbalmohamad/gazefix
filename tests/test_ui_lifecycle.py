@@ -117,3 +117,41 @@ def test_refresh_keeps_the_selected_camera_and_reuses_its_probe(qapp) -> None:  
     finally:
         window.close()
         assert all(s.closed for s in sources)
+
+
+def test_close_with_a_blocked_camera_read_is_bounded_and_reports_the_live_worker(qapp, caplog) -> None:  # type: ignore[no-untyped-def]
+    """The window must never wait on a stuck driver beyond one join deadline,
+    and must not claim the pipeline stopped while its worker is still alive."""
+
+    import logging
+    from threading import Event
+
+    from camera_fakes import wait_until
+    from gazefix.pipeline.runtime import RuntimeState
+
+    caplog.set_level(logging.ERROR, logger="gazefix.ui.main_window")
+    sources: list[FakeCameraSource] = []
+    cfg = settings(1)
+    window = MainWindow(cfg, "log", source_factory=factory_for(sources))
+    gate = Event()
+    try:
+        assert pump_until(lambda: window._first_frame_presented)
+        live = sources[0]
+        live.read_started.clear()
+        live.read_gate = gate
+        assert live.read_started.wait(1.0)  # the worker is now inside a "driver" read
+
+        started = time.perf_counter()
+        window.close()
+        elapsed = time.perf_counter() - started
+        assert elapsed < cfg.worker_join_timeout_s + 0.5, elapsed
+        assert window._runtime.state is RuntimeState.STOPPING
+        assert window._runtime.workers_alive
+        assert not live.closed  # never released from the UI thread
+        records = [r for r in caplog.records if getattr(r, "event", None) == "pipeline_shutdown_timeout"]
+        assert records and records[-1].runtime_state == "stopping"  # type: ignore[attr-defined]
+    finally:
+        gate.set()
+        assert wait_until(lambda: not window._runtime.workers_alive, timeout=3.0)
+        assert all(s.closed for s in sources)
+        assert window._runtime.state is RuntimeState.STOPPED

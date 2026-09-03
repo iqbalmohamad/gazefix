@@ -91,9 +91,39 @@ To measure the Media Foundation open cost with and without hardware transforms:
 ```
 
 The tool reports one JSON object per index/backend combination, including whether
-it opened, requested and reported backend, negotiated size/FPS, observed sample
-FPS, successful reads, failed reads, and the measured `open_ms`, `configure_ms`,
-`first_frame_ms`, and `release_ms`. It releases every camera before exiting.
+it opened and validated, requested and reported backend, negotiated size/FPS,
+observed sample FPS, successful reads, failed reads, and the measured `open_ms`,
+`configure_ms` (with `format_sets_applied`), `first_frame_ms` (with
+`validation_reads`), and `release_ms`. It releases every camera before exiting,
+also when interrupted with Ctrl+C (exit code 130). Exit code 0 means at least one
+index/backend combination validated, 1 means none did, 2 means bad arguments.
+
+Each probe opens, configures, and first-frame validates the camera through the
+same code path and settings the application uses (`open_validated_backend` in
+`gazefix/camera/source.py`), so `open_ms`, `configure_ms`, and `first_frame_ms`
+have the same meaning as the `camera_opened` log fields written at runtime:
+DirectShow receives the requested size as open parameters, width/height/FPS are
+set only where the camera reports a different value, and FPS is never set on a
+backend that does not report one. `--width`, `--height`, `--fps`, and
+`--msmf-hw-transforms` feed the same settings object the application would use.
+
+What the diagnostic intentionally does differently from the running application,
+and what that means when reading the numbers:
+
+- It probes every backend on its own and never falls back to the other one, so
+  MSMF and DirectShow can be compared side by side. At runtime a backend that
+  fails is followed by the next one, so a runtime open that falls back costs the
+  failed attempt(s) plus the successful one.
+- A backend that opens but delivers no validation frame is reported with
+  `validated: false` and released without sampling, which is exactly what the
+  application does with it.
+- Sampling (`sample_seconds`, `successful_reads`, `failed_reads`, `observed_fps`)
+  is a plain read loop that exists only in the tool; the application's capture
+  worker adds degraded/retry handling on top of the same reads.
+- `release_ms` is measured on the tool's thread; at runtime the capture worker
+  thread releases. The application can also adopt the camera that discovery
+  already validated instead of opening it again, so an application start may
+  cost one open less than the sum of the probes.
 
 ## Windows camera behavior
 

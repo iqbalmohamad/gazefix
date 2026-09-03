@@ -1,12 +1,20 @@
-"""OpenCV camera source with Windows backend fallback."""
+"""OpenCV camera source with Windows backend fallback.
+
+``open_validated_backend`` is the single open/configure/validate path for one
+backend. ``OpenCVCameraSource`` runs it per backend and decides on fallback;
+the camera diagnostic (``gazefix.camera.diagnostics``) runs it per index and
+backend to time the production behaviour. Nothing in this module depends on
+the diagnostic.
+"""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 import os
 from threading import Event, Lock
 import time
-from typing import Protocol
+from typing import Callable, Protocol
 
 import cv2
 import numpy as np
@@ -94,6 +102,200 @@ class PreparedCamera:
             return self._source is not None
 
 
+@dataclass(frozen=True, slots=True)
+class BackendOpenOutcome:
+    """What one production open of one backend did and how long each step took.
+
+    Produced by ``open_validated_backend`` for the capture source and for the
+    camera diagnostic alike, so both report the same measurement boundaries
+    (all wall clock on the calling thread):
+
+    - ``open_ms``: the ``VideoCapture.open`` call alone. DirectShow receives
+      width and height as open parameters and builds its capture graph inside
+      this call; Media Foundation negotiates its source reader here.
+    - ``configure_ms``: the conditional width/height/FPS ``set`` calls plus the
+      buffer-size hint. ``format_sets_applied`` is how many ``set`` calls of
+      width, height, or FPS actually ran (each one renegotiates the stream on
+      Media Foundation and rebuilds the graph on DirectShow).
+    - ``first_frame_ms``: the bounded first-frame validation reads, including
+      the retry delays between them; ``validation_reads`` counts the attempts.
+
+    ``result`` holds the negotiated backend name, size, and FPS as read after
+    configuration. It is present whenever the backend opened and configuration
+    ran (also when validation then failed) and ``None`` otherwise.
+    ``interrupted`` reports that the caller's interrupt was seen at a
+    checkpoint; the remaining steps were skipped and the caller must discard
+    the capture regardless of the other fields.
+    """
+
+    backend: CameraBackend
+    opened: bool
+    validated: bool
+    interrupted: bool
+    result: CameraOpenResult | None
+    open_ms: float
+    configure_ms: float | None
+    first_frame_ms: float | None
+    format_sets_applied: int
+    validation_reads: int
+
+
+def open_validated_backend(
+    capture: cv2.VideoCapture,
+    index: int,
+    backend: CameraBackend,
+    settings: AppSettings,
+    interrupted: Callable[[], bool] | None = None,
+) -> BackendOpenOutcome:
+    """Open, configure, and first-frame validate ``capture`` on one backend.
+
+    This is the production open path. ``interrupted`` is polled at the same
+    checkpoints the capture source honours (right after the open call returns
+    and between validation reads); once it reports True the remaining steps
+    are skipped and the outcome is flagged. The capture is never released here:
+    the caller owns it and decides between keeping it, discarding it, or
+    falling back to another backend.
+    """
+
+    is_interrupted = interrupted or (lambda: False)
+    started = time.perf_counter()
+    opened = _open_capture(capture, index, backend, settings)
+    open_ms = _elapsed_ms(started)
+    # Read the flag once: ``reinstate`` can clear it from another thread, and
+    # the decision to skip the remaining steps and the flag reported to the
+    # caller must agree.
+    interrupted_after_open = is_interrupted()
+    if not opened or interrupted_after_open:
+        return BackendOpenOutcome(
+            backend=backend,
+            opened=opened,
+            validated=False,
+            interrupted=interrupted_after_open,
+            result=None,
+            open_ms=open_ms,
+            configure_ms=None,
+            first_frame_ms=None,
+            format_sets_applied=0,
+            validation_reads=0,
+        )
+
+    started = time.perf_counter()
+    applied = _apply_format(capture, settings)
+    configure_ms = _elapsed_ms(started)
+    result = CameraOpenResult(
+        backend=backend,
+        reported_backend=_reported_backend(capture),
+        width=round(capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
+        height=round(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        fps=float(capture.get(cv2.CAP_PROP_FPS)),
+    )
+
+    started = time.perf_counter()
+    validated, reads = _validate_first_frame(capture, settings, is_interrupted)
+    first_frame_ms = _elapsed_ms(started)
+    return BackendOpenOutcome(
+        backend=backend,
+        opened=True,
+        validated=validated,
+        interrupted=is_interrupted(),
+        result=result,
+        open_ms=open_ms,
+        configure_ms=configure_ms,
+        first_frame_ms=first_frame_ms,
+        format_sets_applied=applied,
+        validation_reads=reads,
+    )
+
+
+def _open_capture(
+    capture: cv2.VideoCapture, index: int, backend: CameraBackend, settings: AppSettings
+) -> bool:
+    """Open the backend, handing DirectShow its frame size up front.
+
+    DirectShow builds its capture graph inside ``open`` and rebuilds it for
+    every later ``set`` of width/height/FPS. Its constructor honours only
+    width, height, and FOURCC as open parameters (``cap_dshow.cpp``), so
+    those are passed there and the graph is built at the right size; FPS
+    can only be applied by ``set`` afterwards and costs one rebuild when the
+    camera's reported rate differs. Media Foundation applies open parameters
+    through the same per-property renegotiation as ``set``, so it gains
+    nothing from them and is configured afterwards, skipping properties the
+    camera already reports at the requested value.
+    """
+
+    if backend.api_preference == cv2.CAP_DSHOW:
+        params = [
+            cv2.CAP_PROP_FRAME_WIDTH, settings.capture_width,
+            cv2.CAP_PROP_FRAME_HEIGHT, settings.capture_height,
+        ]
+        try:
+            return capture.open(index, backend.api_preference, params)
+        except TypeError:
+            # OpenCV builds without the parameters overload
+            pass
+    return capture.open(index, backend.api_preference)
+
+
+def _apply_format(capture: cv2.VideoCapture, settings: AppSettings) -> int:
+    """Set width, height, and FPS only where the camera differs from the request.
+
+    On Media Foundation every ``set`` of these properties renegotiates the
+    stream even when the value is unchanged (``cap_msmf.cpp`` ``setProperty``
+    -> ``configureVideoOutput``), so an unconditional triple costs three
+    format negotiations per open. Returns the number of ``set`` calls made.
+    """
+
+    wanted = (
+        (cv2.CAP_PROP_FRAME_WIDTH, float(settings.capture_width)),
+        (cv2.CAP_PROP_FRAME_HEIGHT, float(settings.capture_height)),
+        (cv2.CAP_PROP_FPS, float(settings.target_fps)),
+    )
+    applied = 0
+    for prop, value in wanted:
+        current = capture.get(prop)
+        if abs(current - value) < 0.5:
+            continue
+        if prop == cv2.CAP_PROP_FPS and current <= 0:
+            # The backend does not report a rate (common on DirectShow);
+            # setting one would only force a graph rebuild for a guess.
+            continue
+        capture.set(prop, value)
+        applied += 1
+    # Not honoured by MSMF or DirectShow; kept as a hint for other backends.
+    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return applied
+
+
+def _validate_first_frame(
+    capture: cv2.VideoCapture,
+    settings: AppSettings,
+    is_interrupted: Callable[[], bool],
+) -> tuple[bool, int]:
+    """Read until a frame arrives; returns (validated, read attempts).
+
+    Bounded by count and by wall clock: one failed Media Foundation read
+    already waits up to 10 s internally, so a stalled backend must not be
+    given that patience three times over before the next backend is tried.
+    """
+
+    started = time.perf_counter()
+    reads = 0
+    for attempt in range(settings.discovery_validation_reads):
+        if is_interrupted():
+            return False, reads
+        if attempt and (
+            time.perf_counter() - started >= settings.open_validation_timeout_s
+        ):
+            return False, reads
+        reads += 1
+        success, frame = capture.read()
+        if success and frame is not None and frame.size > 0:
+            return True, reads
+        if attempt + 1 < settings.discovery_validation_reads:
+            time.sleep(settings.read_retry_delay_s)
+    return False, reads
+
+
 class OpenCVCameraSource:
     """Own a single VideoCapture and try recoverable backend fallbacks.
 
@@ -149,17 +351,19 @@ class OpenCVCameraSource:
             if self._interrupted.is_set():
                 raise CameraOpenInterrupted("Camera open interrupted")
             self._capture = capture
-        # This is the call that a driver can hold for many seconds. OpenCV only
-        # attaches the backend object after it returns, so nothing another thread
-        # does to this VideoCapture can shorten it; ``interrupt`` only sets a
-        # flag and this thread discards the capture as soon as it returns.
-        started = time.perf_counter()
-        opened = self._open_capture(capture, device.index, backend)
-        open_ms = _elapsed_ms(started)
-        if not opened or self._interrupted.is_set():
+        # The open inside is the call that a driver can hold for many seconds.
+        # OpenCV only attaches the backend object after it returns, so nothing
+        # another thread does to this VideoCapture can shorten it; ``interrupt``
+        # only sets a flag and this thread discards the capture as soon as the
+        # shared open path reports the flag at one of its checkpoints.
+        outcome = open_validated_backend(
+            capture, device.index, backend, self._settings, self._interrupted.is_set
+        )
+        if outcome.interrupted:
             self._discard(capture)
-            if self._interrupted.is_set():
-                raise CameraOpenInterrupted("Camera open interrupted")
+            raise CameraOpenInterrupted("Camera open interrupted")
+        if not outcome.opened:
+            self._discard(capture)
             failures.append(backend.name)
             logger.warning(
                 "Camera backend did not open",
@@ -167,29 +371,13 @@ class OpenCVCameraSource:
                     "event": "camera_open_failed",
                     "camera_index": device.index,
                     "backend_requested": backend.name,
-                    "open_ms": open_ms,
+                    "open_ms": outcome.open_ms,
                 },
             )
             return None
 
-        started = time.perf_counter()
-        applied = self._apply_format(capture, backend)
-        configure_ms = _elapsed_ms(started)
-        result = CameraOpenResult(
-            backend=backend,
-            reported_backend=_reported_backend(capture),
-            width=round(capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
-            height=round(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-            fps=float(capture.get(cv2.CAP_PROP_FPS)),
-        )
-
-        started = time.perf_counter()
-        validated = self._validate_first_frame(capture)
-        first_frame_ms = _elapsed_ms(started)
-        if self._interrupted.is_set():
-            self._discard(capture)
-            raise CameraOpenInterrupted("Camera open interrupted")
-        if not validated:
+        result = outcome.result
+        if result is None or not outcome.validated:
             self._discard(capture)
             failures.append(f"{backend.name} (opened but produced no frame)")
             logger.warning(
@@ -198,10 +386,11 @@ class OpenCVCameraSource:
                     "event": "camera_open_no_frame",
                     "camera_index": device.index,
                     "backend_requested": backend.name,
-                    "backend_reported": result.reported_backend,
-                    "open_ms": open_ms,
-                    "configure_ms": configure_ms,
-                    "validation_ms": first_frame_ms,
+                    "backend_reported": result.reported_backend if result else None,
+                    "open_ms": outcome.open_ms,
+                    "configure_ms": outcome.configure_ms,
+                    "validation_ms": outcome.first_frame_ms,
+                    "validation_reads": outcome.validation_reads,
                 },
             )
             return None
@@ -216,90 +405,15 @@ class OpenCVCameraSource:
                 "width": result.width,
                 "height": result.height,
                 "fps": result.fps,
-                "open_ms": open_ms,
-                "configure_ms": configure_ms,
-                "format_sets_applied": applied,
-                "first_frame_ms": first_frame_ms,
+                "open_ms": outcome.open_ms,
+                "configure_ms": outcome.configure_ms,
+                "format_sets_applied": outcome.format_sets_applied,
+                "first_frame_ms": outcome.first_frame_ms,
+                "validation_reads": outcome.validation_reads,
                 "msmf_hw_transforms": os.environ.get(MSMF_HW_TRANSFORMS_ENV),
             },
         )
         return result
-
-    def _open_capture(
-        self, capture: cv2.VideoCapture, index: int, backend: CameraBackend
-    ) -> bool:
-        """Open the backend, handing DirectShow its frame size up front.
-
-        DirectShow builds its capture graph inside ``open`` and rebuilds it for
-        every later ``set`` of width/height/FPS. Its constructor honours only
-        width, height, and FOURCC as open parameters (``cap_dshow.cpp``), so
-        those are passed there and the graph is built at the right size; FPS
-        can only be applied by ``set`` afterwards and costs one rebuild when the
-        camera's reported rate differs. Media Foundation applies open parameters
-        through the same per-property renegotiation as ``set``, so it gains
-        nothing from them and is configured afterwards, skipping properties the
-        camera already reports at the requested value.
-        """
-
-        if backend.api_preference == cv2.CAP_DSHOW:
-            params = [
-                cv2.CAP_PROP_FRAME_WIDTH, self._settings.capture_width,
-                cv2.CAP_PROP_FRAME_HEIGHT, self._settings.capture_height,
-            ]
-            try:
-                return capture.open(index, backend.api_preference, params)
-            except TypeError:
-                # OpenCV builds without the parameters overload
-                pass
-        return capture.open(index, backend.api_preference)
-
-    def _apply_format(self, capture: cv2.VideoCapture, backend: CameraBackend) -> int:
-        """Set width, height, and FPS only where the camera differs from the request.
-
-        On Media Foundation every ``set`` of these properties renegotiates the
-        stream even when the value is unchanged (``cap_msmf.cpp`` ``setProperty``
-        -> ``configureVideoOutput``), so an unconditional triple costs three
-        format negotiations per open. Returns the number of ``set`` calls made.
-        """
-
-        wanted = (
-            (cv2.CAP_PROP_FRAME_WIDTH, float(self._settings.capture_width)),
-            (cv2.CAP_PROP_FRAME_HEIGHT, float(self._settings.capture_height)),
-            (cv2.CAP_PROP_FPS, float(self._settings.target_fps)),
-        )
-        applied = 0
-        for prop, value in wanted:
-            current = capture.get(prop)
-            if abs(current - value) < 0.5:
-                continue
-            if prop == cv2.CAP_PROP_FPS and current <= 0:
-                # The backend does not report a rate (common on DirectShow);
-                # setting one would only force a graph rebuild for a guess.
-                continue
-            capture.set(prop, value)
-            applied += 1
-        # Not honoured by MSMF or DirectShow; kept as a hint for other backends.
-        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        return applied
-
-    def _validate_first_frame(self, capture: cv2.VideoCapture) -> bool:
-        # Bounded by count and by wall clock: one failed Media Foundation read
-        # already waits up to 10 s internally, so a stalled backend must not be
-        # given that patience three times over before the next backend is tried.
-        started = time.perf_counter()
-        for attempt in range(self._settings.discovery_validation_reads):
-            if self._interrupted.is_set():
-                return False
-            if attempt and (
-                time.perf_counter() - started >= self._settings.open_validation_timeout_s
-            ):
-                return False
-            success, frame = capture.read()
-            if success and frame is not None and frame.size > 0:
-                return True
-            if attempt + 1 < self._settings.discovery_validation_reads:
-                time.sleep(self._settings.read_retry_delay_s)
-        return False
 
     def _discard(self, capture: cv2.VideoCapture) -> None:
         with self._capture_lock:
