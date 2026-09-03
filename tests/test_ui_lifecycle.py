@@ -189,7 +189,7 @@ def test_close_never_releases_a_pending_prepared_camera_on_the_ui_thread(qapp, c
         window.close()
         elapsed = time.perf_counter() - started
         assert elapsed < cfg.worker_join_timeout_s + 0.5, elapsed
-        assert window._runtime.prepared_closer.outstanding == 1  # runtime-owned hand-off
+        assert window._runtime.cleanup_outstanding == 1  # runtime-owned hand-off
         assert wait_until(lambda: warm.close_calls == 1) and not warm.closed  # in flight, off the UI thread
         assert window._runtime.state is RuntimeState.STOPPING
         assert {r.event for r in caplog.records} >= {"pipeline_shutdown_timeout", "prepared_cleanup_timeout"}  # type: ignore[attr-defined]
@@ -234,7 +234,7 @@ def test_blocked_discovery_cleanup_is_accounted_at_close_without_blocking_the_ui
         elapsed = time.perf_counter() - started
         assert elapsed < cfg.worker_join_timeout_s + 0.5, elapsed
         assert window._runtime.state is RuntimeState.STOPPED  # runtime unaffected
-        assert window._runtime.prepared_closer.outstanding == 0
+        assert window._runtime.cleanup_outstanding == 0
         assert window._discovery_closer.outstanding == 1
         records = [r for r in caplog.records if getattr(r, "event", None) == "prepared_cleanup_timeout"]
         assert records, [getattr(r, "event", None) for r in caplog.records]

@@ -86,7 +86,7 @@ def test_runtime_stays_stopped_when_discovery_later_hands_off_its_own_token() ->
     service.request_stop()
     assert service.join(1.0)  # hands the unadopted token to discovery's closer
     assert discovery_closer.outstanding == 1  # tracked by its owner...
-    assert runtime.prepared_closer.outstanding == 0  # ...never by the runtime
+    assert runtime.cleanup_outstanding == 0  # ...never by the runtime
     assert runtime.state is RuntimeState.STOPPED  # no STOPPED -> STOPPING
     assert runtime.stop() is True  # and stop() stays True
 
@@ -107,7 +107,7 @@ def test_no_stopped_to_stopping_transition_under_any_later_submission() -> None:
         runtime._capture.request_camera(CameraDevice(index + 10), None)  # worker-level refusal
         observed.append(runtime.state)
         assert wait_until(lambda: warm.closed)  # never leaked
-    assert runtime.prepared_closer.join(2.0)
+    assert runtime.join_cleanup(2.0)
     observed.append(runtime.state)
     assert observed == [RuntimeState.STOPPED] * len(observed)
     assert runtime.stop() is True
@@ -128,7 +128,7 @@ def test_refused_token_registered_before_the_final_check_denies_success(monkeypa
 
     runtime = PipelineRuntime(settings(), source_factory=factory_for([]))
     runtime.start()
-    closer = runtime.prepared_closer
+    closer = runtime._closer  # test seam: the private cleanup thread
     gate = Event()
     warm, token = prepared_token(7, gate)
     at_final_wait, refusal_done = Event(), Event()
@@ -174,9 +174,9 @@ def test_refused_token_after_the_latch_is_disposed_without_reviving_the_lifecycl
     runtime.select_camera(CameraDevice(3), token)
     assert runtime.state is RuntimeState.STOPPED  # latched
     assert runtime.stop() is True  # still True with a disposal in flight
-    assert runtime.prepared_closer.outstanding == 1  # app accounting still sees it
+    assert runtime.cleanup_outstanding == 1  # app accounting still sees it
     gate.set()
-    assert runtime.prepared_closer.join(2.0) and warm.closed and warm.close_calls == 1
+    assert runtime.join_cleanup(2.0) and warm.closed and warm.close_calls == 1
 
 
 # --- 5 + 7: independent, owner-scoped accounting --------------------------------
@@ -195,11 +195,11 @@ def test_runtime_and_discovery_cleanup_are_accounted_independently() -> None:
 
     assert runtime.stop() is False  # runtime-owned release blocked: STOPPING/False
     assert runtime.state is RuntimeState.STOPPING
-    assert runtime.prepared_closer.outstanding == 1
+    assert runtime.cleanup_outstanding == 1
     assert discovery_closer.outstanding == 1  # counted by its own owner only
 
     runtime_gate.set()
-    assert runtime.prepared_closer.join(2.0) and warm_r.closed
+    assert runtime.join_cleanup(2.0) and warm_r.closed
     assert runtime.stop() is True and runtime.state is RuntimeState.STOPPED
     assert discovery_closer.outstanding == 1  # still blocked; runtime unaffected
     discovery_gate.set()
@@ -228,3 +228,187 @@ def test_an_already_claimed_token_is_dropped_at_submit_and_never_counted() -> No
     assert closer.outstanding == 0  # dropped on the spot, not a queued no-op
     assert closer.join(0.5)
     assert warm.close_calls == 0  # the claimant owns the source
+
+
+# --- The hand-off accounting barrier (Cases A-D of the final review) -------------
+
+
+def gated_take(runtime: PipelineRuntime, *, before: bool) -> tuple[Event, Event]:
+    """Pause the first slot-to-closer transfer, before or after the slot swap.
+
+    Returns ``(paused, resume)``. Later calls (a second stop's own sweep, the
+    second sweep of the same stop) pass through untouched.
+    """
+
+    paused, resume = Event(), Event()
+    original = runtime._capture.take_pending_prepared
+
+    def take():  # type: ignore[no-untyped-def]
+        if paused.is_set():
+            return original()
+        if before:
+            paused.set()
+            assert resume.wait(5.0)
+            return original()
+        result = original()
+        paused.set()
+        assert resume.wait(5.0)
+        return result
+
+    runtime._capture.take_pending_prepared = take  # type: ignore[method-assign]
+    return paused, resume
+
+
+@pytest.mark.parametrize("pause_before_take", [False, True], ids=["mid-transfer", "pre-sweep"])
+def test_case_a_finalization_is_denied_while_a_pre_existing_token_is_in_handoff(pause_before_take: bool) -> None:
+    """Case A: stop-before-start with an accepted token, paused in the hand-off.
+
+    The reviewer's reproduction: the token has left (or not yet left) the
+    worker's slots and has not reached the cleanup thread. Neither a state
+    read nor a second stop() may finalize during that window, and with the
+    release blocked the runtime stays STOPPING/False until cleanup completes.
+    """
+
+    runtime = PipelineRuntime(settings(), source_factory=factory_for([]))
+    close_gate = Event()
+    warm, token = prepared_token(0, close_gate)
+    runtime.select_camera(CameraDevice(0), token)  # accepted: runtime-owned work
+    paused, resume = gated_take(runtime, before=pause_before_take)
+
+    first_stop: dict[str, bool] = {}
+    stopper = Thread(target=lambda: first_stop.setdefault("result", runtime.stop()))
+    stopper.start()
+    assert paused.wait(2.0)
+    # The accounting gap of the old code: token in neither container.
+    assert runtime.state is RuntimeState.STOPPING  # a state read cannot latch
+    assert runtime.stop() is False  # a concurrent second stop cannot latch
+    assert runtime.state is RuntimeState.STOPPING
+    resume.set()
+    stopper.join(3.0)
+    assert not stopper.is_alive()
+
+    assert first_stop["result"] is False  # release blocked: no success
+    assert runtime.state is RuntimeState.STOPPING
+    assert runtime.cleanup_outstanding == 1
+    assert wait_until(lambda: warm.close_calls == 1) and not warm.closed
+
+    close_gate.set()
+    assert runtime.join_cleanup(2.0) and warm.closed
+    assert runtime.stop() is True and runtime.state is RuntimeState.STOPPED
+    assert warm.close_calls == 1  # exactly one release; never reclassified away
+
+
+def test_case_b_second_stop_cannot_latch_during_another_stops_handoff() -> None:
+    """Case B: two concurrent stop() calls; one is inside the hand-off.
+
+    With an unblocked release, the paused stop() itself must still finish as
+    True only after the token is really released: pre-existing runtime-owned
+    work is never reported successful while merely in transfer.
+    """
+
+    runtime = PipelineRuntime(settings(worker_join_timeout_s=1.0), source_factory=factory_for([]))
+    warm, token = prepared_token(1)
+    runtime.select_camera(CameraDevice(1), token)
+    paused, resume = gated_take(runtime, before=False)
+
+    first_stop: dict[str, bool] = {}
+    stopper = Thread(target=lambda: first_stop.setdefault("result", runtime.stop()))
+    stopper.start()
+    assert paused.wait(2.0)
+    assert runtime.stop() is False  # the accounting gap is closed
+    assert runtime.state is RuntimeState.STOPPING
+    resume.set()
+    stopper.join(3.0)
+    assert not stopper.is_alive()
+
+    # The paused stop() resumed, registered the token, and waited for its
+    # release within its own deadline; True therefore implies released.
+    assert first_stop["result"] is True
+    assert warm.closed and warm.close_calls == 1
+    assert runtime.state is RuntimeState.STOPPED
+    assert runtime.stop() is True
+
+
+def test_case_c_worker_death_alone_cannot_finalize_past_an_in_handoff_token() -> None:
+    """Case C: a real started capture worker exits mid-shutdown while a
+    pre-existing token is still in hand-off; its death must not open the latch."""
+
+    from camera_fakes import fake_open_result
+    from gazefix.camera.models import CameraOpenResult
+
+    open_gate = Event()
+    sources: list[FakeCameraSource] = []
+
+    class GatedOpenSource(FakeCameraSource):
+        def __init__(self, registry: list[FakeCameraSource]) -> None:
+            super().__init__(registry)
+
+        def open(self, device: CameraDevice) -> CameraOpenResult:
+            self.open_calls += 1
+            self.open_started.set()
+            open_gate.wait(10.0)
+            self.index = device.index
+            self.closed = False
+            return fake_open_result()
+
+        def interrupt(self) -> None:
+            self.interrupt_calls += 1  # flag only
+
+    runtime = PipelineRuntime(settings(), source_factory=lambda _s: GatedOpenSource(sources))
+    runtime.start()
+    runtime.select_camera(CameraDevice(0))
+    assert wait_until(lambda: bool(sources) and sources[0].open_started.is_set())
+    close_gate = Event()
+    warm, token = prepared_token(5, close_gate)
+    runtime.select_camera(CameraDevice(5), token)  # lands in the slots; worker is stuck
+    paused, resume = gated_take(runtime, before=False)
+
+    first_stop: dict[str, bool] = {}
+    stopper = Thread(target=lambda: first_stop.setdefault("result", runtime.stop()))
+    stopper.start()
+    assert paused.wait(2.0)  # token taken from the slots, not yet with the closer
+    open_gate.set()  # the driver returns; the worker sees stop and dies
+    assert wait_until(lambda: not runtime.workers_alive, timeout=3.0)
+    assert sources[0].closed  # it released its own camera on its own thread
+    # Worker death alone must not finalize: the token is still in hand-off.
+    assert runtime.state is RuntimeState.STOPPING
+    assert runtime.stop() is False
+    resume.set()
+    stopper.join(3.0)
+    assert not stopper.is_alive()
+
+    assert first_stop["result"] is False  # its release is gated
+    assert runtime.state is RuntimeState.STOPPING and runtime.cleanup_outstanding == 1
+    close_gate.set()
+    assert runtime.join_cleanup(2.0) and warm.closed and warm.close_calls == 1
+    assert runtime.stop() is True and runtime.state is RuntimeState.STOPPED
+
+
+def test_case_d_pre_existing_work_and_post_latch_disposals_are_distinguished() -> None:
+    """Case D: the same runtime shows both contracts, in order.
+
+    A token accepted before shutdown blocks finalization until released; a
+    genuinely new token refused after finalization is disposed asynchronously
+    without reopening the lifecycle.
+    """
+
+    pre_gate = Event()
+    runtime = PipelineRuntime(settings(), source_factory=factory_for([]))
+    warm_pre, token_pre = prepared_token(1, pre_gate)
+    runtime.select_camera(CameraDevice(1), token_pre)  # pre-existing runtime-owned work
+
+    assert runtime.stop() is False  # blocked release: never True while it lives
+    assert runtime.state is RuntimeState.STOPPING
+    pre_gate.set()
+    assert runtime.join_cleanup(2.0) and warm_pre.closed
+    assert runtime.stop() is True and runtime.state is RuntimeState.STOPPED
+
+    post_gate = Event()
+    warm_post, token_post = prepared_token(2, post_gate)
+    runtime.select_camera(CameraDevice(2), token_post)  # genuinely new, post-latch
+    assert runtime.state is RuntimeState.STOPPED  # asynchronous disposal, no reopen
+    assert runtime.stop() is True
+    assert runtime.cleanup_outstanding == 1  # still visible to app accounting
+    post_gate.set()
+    assert runtime.join_cleanup(2.0) and warm_post.closed and warm_post.close_calls == 1
+    assert runtime.state is RuntimeState.STOPPED

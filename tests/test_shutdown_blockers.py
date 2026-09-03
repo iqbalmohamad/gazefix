@@ -49,7 +49,7 @@ def settle(runtime: PipelineRuntime, timeout: float = 3.0) -> None:
     """Wait, bounded, until nothing the runtime owns is alive or outstanding."""
 
     assert wait_until(lambda: not runtime.workers_alive, timeout=timeout)
-    assert runtime.prepared_closer.join(timeout)
+    assert runtime.join_cleanup(timeout)
 
 
 def gated_prepared(index: int, close_gate: Event) -> tuple[FakeCameraSource, PreparedCamera]:
@@ -159,7 +159,7 @@ def test_partial_start_hands_a_pending_prepared_camera_to_cleanup(monkeypatch) -
         runtime.start()
     assert time.perf_counter() - started < DEADLINE_S + SLACK_S
     assert runtime.state is RuntimeState.STOPPING  # release still outstanding
-    assert runtime.prepared_closer.outstanding == 1
+    assert runtime.cleanup_outstanding == 1
     gate.set()
     assert wait_until(lambda: warm.closed)
     settle(runtime)
@@ -184,14 +184,14 @@ def test_stop_with_a_blocked_prepared_release_stays_bounded_and_tracks_the_clean
         assert runtime.stop() is False
         assert time.perf_counter() - started < DEADLINE_S + SLACK_S
         assert runtime.state is RuntimeState.STOPPING
-        assert runtime.prepared_closer.outstanding == 1
+        assert runtime.cleanup_outstanding == 1
         assert wait_until(lambda: warm.close_calls == 1) and not warm.closed  # in flight, off this thread
     record = events(caplog, "pipeline_shutdown_timeout")[-1]
     assert record.cleanup_outstanding == 1 and record.deadline_exhausted is True  # type: ignore[attr-defined]
     assert record.capture_alive is False and record.processor_alive is False  # type: ignore[attr-defined]
 
     gate.set()
-    assert runtime.prepared_closer.join(2.0)
+    assert runtime.join_cleanup(2.0)
     assert warm.closed and warm.close_calls == 1 and not prepared.is_pending
     assert runtime.state is RuntimeState.STOPPED
     assert runtime.stop() is True
@@ -212,7 +212,7 @@ def test_stop_takes_pending_tokens_from_an_abandoned_worker_without_blocking() -
         assert runtime.stop() is False
         assert time.perf_counter() - started < DEADLINE_S + SLACK_S
         assert runtime._capture.take_pending_prepared() == []  # taken by stop()
-        assert runtime.prepared_closer.outstanding == 1
+        assert runtime.cleanup_outstanding == 1
         assert wait_until(lambda: warm.close_calls == 1) and not warm.closed
     finally:
         open_gate.set()
@@ -240,13 +240,13 @@ def test_a_token_refused_after_finalized_stop_is_a_disposal_not_runtime_work() -
     runtime.select_camera(CameraDevice(3), prepared)
     assert time.perf_counter() - started < SLACK_S  # returned while the release still blocks
     assert runtime.state is RuntimeState.STOPPED  # the latch holds; no STOPPED -> STOPPING
-    assert runtime.prepared_closer.outstanding == 1  # visible to app-level accounting
+    assert runtime.cleanup_outstanding == 1  # visible to app-level accounting
     assert wait_until(lambda: warm.close_calls == 1) and not warm.closed  # off this thread
     started = time.perf_counter()
     assert runtime.stop() is True  # finalized stays final; bounded, no re-wind-down
     assert time.perf_counter() - started < SLACK_S
     gate.set()
-    assert runtime.prepared_closer.join(2.0) and warm.closed  # never leaked
+    assert runtime.join_cleanup(2.0) and warm.closed  # never leaked
     assert runtime.state is RuntimeState.STOPPED
     assert warm.close_calls == 1  # exactly one release
 
@@ -330,7 +330,7 @@ def test_stop_returns_true_when_the_worker_exits_after_its_join_timed_out(caplog
     runtime.select_camera(CameraDevice(0))
     assert wait_until(lambda: bool(sources) and sources[0].open_started.is_set())
 
-    closer = runtime.prepared_closer
+    closer = runtime._closer  # test seam: the private cleanup thread
     original_join = closer.join
     observed: dict[str, bool] = {}
 
@@ -351,7 +351,7 @@ def test_stop_returns_true_when_the_worker_exits_after_its_join_timed_out(caplog
     assert runtime.state is RuntimeState.STOPPED and not runtime.workers_alive
     assert sources[0].closed
     assert events(caplog, "pipeline_shutdown_timeout") == []
-    assert runtime.prepared_closer.outstanding == 0
+    assert runtime.cleanup_outstanding == 0
     stopped = events(caplog, "pipeline_stopped")
     assert len(stopped) == 1 and stopped[0].deadline_exhausted is True  # type: ignore[attr-defined]
     assert runtime.stop() is True  # and it stays consistent
@@ -399,7 +399,7 @@ def test_a_release_overlaps_the_worker_joins_instead_of_waiting_for_them(caplog:
         assert warm.closed and warm.close_calls == 1  # ...but the release ran during the joins
         record = events(caplog, "pipeline_shutdown_timeout")[-1]
         assert record.capture_alive is True and record.cleanup_outstanding == 0  # type: ignore[attr-defined]
-        assert runtime.prepared_closer.outstanding == 0
+        assert runtime.cleanup_outstanding == 0
     finally:
         gate.set()
     settle(runtime)

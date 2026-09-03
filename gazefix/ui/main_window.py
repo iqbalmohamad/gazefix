@@ -338,7 +338,7 @@ class MainWindow(QMainWindow):
         discovery_stopped = self._discovery.join(
             max(0.0, deadline - time.perf_counter())
         )
-        runtime_cleanup_done = self._runtime.prepared_closer.join(
+        runtime_cleanup_done = self._runtime.join_cleanup(
             max(0.0, deadline - time.perf_counter())
         )
         discovery_cleanup_done = self._discovery_closer.join(
@@ -367,7 +367,7 @@ class MainWindow(QMainWindow):
                 "Prepared camera release still outstanding at close",
                 extra={
                     "event": "prepared_cleanup_timeout",
-                    "runtime_cleanup_outstanding": self._runtime.prepared_closer.outstanding,
+                    "runtime_cleanup_outstanding": self._runtime.cleanup_outstanding,
                     "discovery_cleanup_outstanding": self._discovery_closer.outstanding,
                 },
             )

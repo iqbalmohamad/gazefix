@@ -40,8 +40,12 @@ class RuntimeState(str, Enum):
     has been requested, and, once nothing owned is left, that shutdown is
     final. ``STOPPED`` is a latch: it is entered exactly once, under the
     lifecycle lock, when no owned worker is alive and no runtime-owned
-    release is outstanding, and it is never left. Work that reaches the
-    runtime's cleanup thread after that point (a refused request's token) is
+    release is outstanding, and it is never left. Runtime-owned releases are
+    counted along the whole shutdown chain, including while a token is in
+    hand-off between the capture worker and the cleanup thread, so the latch
+    can never slip in while pre-existing work is merely in transfer. Work
+    that reaches the runtime's cleanup thread after the latch (a refused
+    request's token, which registers under the same lock the latch uses) is
     a detached disposal owned by the cleanup thread, not runtime lifecycle
     work, so no later event can move the state back to ``STOPPING``.
     A shutdown that timed out with a worker still inside a driver call keeps
@@ -120,17 +124,39 @@ class PipelineRuntime:
         # observed by the latch decision or lands after it as a disposal.
         self._stop_finalized = False
         self._stop_logged = False
+        # Shutdown-accounting barrier: the number of hand-offs currently
+        # moving tokens from the capture worker to the cleanup thread.
+        # Incremented under the lifecycle lock before the tokens leave the
+        # worker's slots and decremented only after every one of them has
+        # been registered with the cleanup thread, so a pre-existing token is
+        # counted by the finalization check at every instant of the chain
+        # worker slots -> hand-off -> cleanup queue/in-flight release.
+        self._handoff_in_progress = 0
 
     @property
-    def prepared_closer(self) -> PreparedCameraCloser:
-        """The runtime-owned cleanup thread; exposed for application shutdown accounting.
+    def cleanup_outstanding(self) -> int:
+        """Prepared-camera cleanup the runtime is responsible for, right now.
 
-        Only the runtime submits work to it. After the runtime has finalized,
-        anything still (or newly) on it is a detached disposal, invisible to
-        ``state`` but joinable here by the application within its deadline.
+        Counts tokens still in the capture worker's slots, tokens in hand-off
+        between the worker and the cleanup thread, and releases queued or in
+        flight on the cleanup thread; after finalization the same number
+        covers detached disposals. For application shutdown accounting; the
+        cleanup thread itself is private, so nothing outside the runtime can
+        submit work to it.
         """
 
-        return self._closer
+        with self._lifecycle_lock:
+            return self._runtime_cleanup_locked()
+
+    def join_cleanup(self, timeout: float) -> bool:
+        """Bounded wait for the cleanup thread to drain; never touches a driver.
+
+        Meant for application shutdown after ``stop()`` has returned (every
+        hand-off inside ``stop()`` completes before it returns, and a refused
+        request registers its token before ``select_camera`` returns).
+        """
+
+        return self._closer.join(timeout)
 
     def start(self) -> None:
         """Start both workers exactly once, or leave nothing running.
@@ -367,26 +393,56 @@ class PipelineRuntime:
         no source left to release), so only real work counts as outstanding.
         """
 
-        for prepared in self._capture.take_pending_prepared():
-            self._closer.submit(prepared)
+        with self._lifecycle_lock:
+            # Raised before any token leaves the worker's slots, so the
+            # finalization check never sees a moment in which a pre-existing
+            # token is in neither container. Only the counter update happens
+            # under the lock; the transfer itself runs without it.
+            self._handoff_in_progress += 1
+        try:
+            for prepared in self._capture.take_pending_prepared():
+                self._closer.submit(prepared)
+        finally:
+            with self._lifecycle_lock:
+                self._handoff_in_progress -= 1
+
+    def _runtime_cleanup_locked(self) -> int:
+        """All runtime-owned prepared cleanup; lifecycle lock held.
+
+        The three counters cover the whole chain a token travels at shutdown:
+        still in the worker's slots, in hand-off, or with the cleanup thread.
+        A token accepted before finalization is in exactly one of them at any
+        instant, so the finalization decision can never miss it.
+        """
+
+        return (
+            self._capture.pending_prepared_count()
+            + self._handoff_in_progress
+            + self._closer.outstanding
+        )
 
     def _latch_if_stopped_locked(self) -> tuple[bool, bool, bool, int]:
         """Read owned work and latch STOPPED if none is left; lifecycle lock held.
 
-        Returns ``(stopped, capture_alive, processor_alive, cleanup_outstanding)``.
-        The latch decision and the refused-token registration in
-        ``select_camera`` share the lifecycle lock, so a registration is
-        either counted here (no latch until it drains) or happens after the
-        latch, where it can no longer change the lifecycle. Thread liveness
-        only ever moves from alive to exited, so a latch taken here can never
-        be contradicted later.
+        Returns ``(stopped, capture_alive, processor_alive, cleanup_outstanding)``,
+        where the count spans worker slots, hand-off, and the cleanup thread.
+        The latch decision, the refused-token registration in
+        ``select_camera``, and the hand-off counter updates all share the
+        lifecycle lock, so runtime-owned cleanup is either counted here (no
+        latch until it drains) or was registered after the latch, where it is
+        a detached disposal that can no longer change the lifecycle. A token
+        accepted before shutdown can never take the second path: it is
+        continuously counted while it moves from the worker's slots through
+        the hand-off to the cleanup thread. Thread liveness only ever moves
+        from alive to exited, and workers can only shed slot tokens by
+        releasing them, so a latch taken here can never be contradicted later.
         """
 
         if self._stop_finalized:
             return True, False, False, 0
         capture_alive = self._capture.is_alive
         processor_alive = self._processor.is_alive
-        cleanup_outstanding = self._closer.outstanding
+        cleanup_outstanding = self._runtime_cleanup_locked()
         stopped = not (capture_alive or processor_alive or cleanup_outstanding)
         if stopped:
             self._stop_finalized = True

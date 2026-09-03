@@ -178,6 +178,22 @@ class CameraCaptureWorker:
 
         return self._thread.ident is not None
 
+    def pending_prepared_count(self) -> int:
+        """How many unclaimed prepared cameras are still held in the request slots.
+
+        Shutdown accounting: a token accepted before shutdown is runtime-owned
+        work while it sits here, so the runtime's finalization check counts it
+        until ``take_pending_prepared`` moves it towards the cleanup thread.
+        The snapshot is taken under the request lock; the claim state is read
+        afterwards so no token lock nests inside it.
+        """
+
+        with self._request_lock:
+            tokens = list(self._orphaned_prepared)
+            if self._requested_prepared is not None:
+                tokens.append(self._requested_prepared)
+        return sum(1 for token in tokens if token.is_pending)
+
     def take_pending_prepared(self) -> list[PreparedCamera]:
         """Hand over every prepared camera the worker has not applied.
 

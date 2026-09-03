@@ -185,20 +185,41 @@ STOPPED   stop() requested; nothing runtime-owned is alive or outstanding.
 `STOPPED` is monotonic by construction: it is reported only after the latch is
 set, the latch is set only under the lifecycle lock when no owned worker is
 alive and no runtime-owned release is outstanding, and it is never cleared.
-Worker threads only move from alive to exited, and the two ways runtime-owned
-cleanup is registered are serialized with the latch: the shutdown path submits
-before its final check inside the same `stop()` call, and a refused
-`select_camera` submits under the lifecycle lock itself. A registration
-therefore either lands before the latch decision (it is counted, `stop()`
-returns `False`, and the state stays `STOPPING` until the release returns) or
-after it, in which case the token becomes a detached disposal: the cleanup
-thread still releases it (never on the caller's thread, never leaked, the
-claim-once handover still rules out a double close), it is visible to
-application-level accounting through `prepared_closer.outstanding`, but it is
-no longer lifecycle work and the latched `STOPPED` holds. `STOPPED` can never
-transition back to `STOPPING`, and `stop() == True` can never race with new
-runtime-owned cleanup appearing afterwards. A `stop()` called after the latch
-returns `True` immediately.
+
+Runtime-owned cleanup is counted along the whole chain a prepared camera
+travels at shutdown, so the latch decision can never miss one in transfer:
+
+```text
+capture-worker slots        pending_prepared_count(): unclaimed tokens still
+                            held in the worker's request/orphan slots
+hand-off                    a counter raised, under the lifecycle lock, before
+                            any token leaves the slots and lowered only after
+                            every taken token is registered with the cleanup
+                            thread
+cleanup thread              queued tokens plus the release in flight
+```
+
+At every instant a token accepted before finalization is in at least one of
+the three counts (transitions overlap conservatively rather than gap), and
+the finalization check sums all three under the lifecycle lock. Worker
+threads only move from alive to exited, and the two ways runtime-owned
+cleanup is registered are serialized with the latch: the shutdown path raises
+the hand-off counter under the lifecycle lock before touching the worker's
+slots, and a refused `select_camera` submits under the lifecycle lock itself.
+A pre-existing token therefore always denies the latch until its release has
+returned; only a token registered after the latch (a genuinely new refused
+request) becomes a detached disposal: the cleanup thread still releases it
+(never on the caller's thread, never leaked, the claim-once handover still
+rules out a double close), it is visible to application-level accounting
+through `cleanup_outstanding`, but it is no longer lifecycle work and the
+latched `STOPPED` holds. `STOPPED` can never transition back to `STOPPING`,
+and `stop() == True` can never race with runtime-owned cleanup appearing
+afterwards. A `stop()` called after the latch returns `True` immediately.
+
+The cleanup thread itself is private to the runtime; the public surface is
+`cleanup_outstanding` (the summed count above) and `join_cleanup(timeout)`
+(a bounded drain wait for application shutdown), so no caller can submit
+work into the runtime's accounting.
 
 **Transactional start.** `start()` launches the processing worker and then the
 capture worker. If the second launch raises, the runtime marks itself spent,
@@ -245,11 +266,13 @@ its own thread, and only there. Prepared cameras that nobody adopted are handed
 to a `PreparedCameraCloser`, a daemon thread with a condition-guarded queue,
 and every closer has exactly one owner:
 
-- The **runtime's closer** is created inside `PipelineRuntime` and is not
-  injectable, so only the runtime ever submits to it: the tokens `stop()`
-  takes from the capture worker, and the token of a `select_camera` refused
-  after shutdown began. Its `outstanding` count is therefore runtime-owned
-  work by construction (or, after the `STOPPED` latch, detached disposals).
+- The **runtime's closer** is created inside `PipelineRuntime`, is not
+  injectable, and is not exposed (the runtime offers only `cleanup_outstanding`
+  and `join_cleanup`), so only the runtime ever submits to it: the tokens
+  `stop()` takes from the capture worker, and the token of a `select_camera`
+  refused after shutdown began. Its `outstanding` count is therefore
+  runtime-owned work by construction (or, after the `STOPPED` latch, detached
+  disposals).
 - The **discovery closer** is created by the window and given to the
   discovery service, which hands it the unadopted token its `join` would
   otherwise release on the calling thread. Its work is discovery-owned and

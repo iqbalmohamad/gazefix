@@ -238,7 +238,7 @@ def test_camera_requests_after_stop_are_refused_and_their_prepared_cameras_close
     warm, prepared = prepared_camera(4)  # STOPPED: refused just the same
     assert runtime.select_camera(CameraDevice(4), prepared) == first
     assert wait_until(lambda: warm.closed) and not prepared.is_pending
-    assert runtime.prepared_closer.join(2.0)
+    assert runtime.join_cleanup(2.0)
     assert runtime.select_camera(None) == first
     assert len(sources) == 1  # nothing was ever opened for a refused request
     refused = events(caplog, "camera_switch_refused")
