@@ -539,3 +539,94 @@ def test_uninterruptible_open_bounds_shutdown_and_reports_it_honestly() -> None:
     # ...and the worker still winds down by itself once the driver returns.
     assert wait_until(lambda: not runtime.workers_alive, timeout=3.0)
     assert sources[0].closed
+
+
+class CheckpointOpenSource(FakeCameraSource):
+    """Mirrors OpenCVCameraSource: the driver call cannot be cancelled, the
+    interrupt flag is honoured at the checkpoint after it returns, and
+    ``reinstate`` withdraws the flag."""
+
+    driver_open_s = 0.3
+
+    def open(self, device: CameraDevice) -> CameraOpenResult:
+        self.open_calls += 1
+        self.open_started.set()
+        time.sleep(self.driver_open_s)  # the un-cancellable driver call
+        if self.interrupted.is_set():
+            self.closed = True
+            raise RuntimeError("Camera open interrupted")
+        self.index = device.index
+        self.closed = False
+        return fake_open_result()
+
+    def interrupt(self) -> None:
+        self.interrupt_calls += 1
+        self.interrupted.set()
+
+    def reinstate(self) -> None:
+        self.interrupted.clear()
+
+
+def test_flipping_away_and_back_during_open_keeps_the_completed_open() -> None:
+    """A completed slow open of X must not be thrown away when the newest
+    request is X again."""
+
+    sources: list[CheckpointOpenSource] = []
+    statuses: list[CaptureStatus] = []
+
+    def create(_settings: AppSettings) -> CheckpointOpenSource:
+        return CheckpointOpenSource(sources)
+
+    runtime = PipelineRuntime(fast_settings(), on_status=statuses.append, source_factory=create)
+    runtime.start()
+    try:
+        runtime.select_camera(CameraDevice(0))
+        assert wait_until(lambda: bool(sources) and sources[0].open_started.is_set())
+        runtime.select_camera(CameraDevice(1))  # away...
+        final = runtime.select_camera(CameraDevice(0))  # ...and back while still opening
+        wait_for_pixel(runtime, 0, timeout=3.0)
+
+        assert [s.open_calls for s in sources] == [1]  # one driver open, kept
+        assert sources[0].interrupt_calls == 1 and not sources[0].interrupted.is_set()
+        assert any(s.state is CaptureState.RUNNING and s.request_id == final for s in statuses)
+        assert not any(s.camera == CameraDevice(1) for s in statuses)  # camera 1 never touched
+    finally:
+        assert runtime.stop()
+
+
+def test_switching_to_another_camera_during_open_still_abandons_it() -> None:
+    sources: list[CheckpointOpenSource] = []
+
+    def create(_settings: AppSettings) -> CheckpointOpenSource:
+        return CheckpointOpenSource(sources)
+
+    runtime = PipelineRuntime(fast_settings(), source_factory=create)
+    runtime.start()
+    try:
+        runtime.select_camera(CameraDevice(0))
+        assert wait_until(lambda: bool(sources) and sources[0].open_started.is_set())
+        runtime.select_camera(CameraDevice(1))
+        wait_for_pixel(runtime, 1, timeout=3.0)
+        assert sources[0].interrupt_calls == 1 and sources[0].closed
+        assert [s.index for s in sources if not s.closed] == [1]
+    finally:
+        assert runtime.stop()
+
+
+def test_reselecting_the_running_camera_keeps_its_source() -> None:
+    sources: list[FakeCameraSource] = []
+    statuses: list[CaptureStatus] = []
+    runtime = PipelineRuntime(
+        fast_settings(), on_status=statuses.append, source_factory=factory_for(sources)
+    )
+    runtime.start()
+    try:
+        runtime.select_camera(CameraDevice(3))
+        wait_for_pixel(runtime, 3)
+        again = runtime.select_camera(CameraDevice(3))
+        wait_for_pixel(runtime, 3)
+        assert wait_until(lambda: any(
+            s.state is CaptureState.RUNNING and s.request_id == again for s in statuses))
+        assert len(sources) == 1 and not sources[0].closed
+    finally:
+        assert runtime.stop()

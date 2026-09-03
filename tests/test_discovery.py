@@ -238,3 +238,30 @@ def test_service_falls_back_to_first_candidate_when_requested_index_is_gone() ->
     assert results[0].prepared is None  # nothing kept open: the UI opens index 0 itself
     assert all(s.closed for s in sources)
     assert service.stop(1.0)
+
+
+def test_service_accepts_a_restart_as_soon_as_the_result_is_delivered() -> None:
+    """A Refresh landing while the previous thread is still exiting must not be dropped."""
+
+    sources: list[FakeCameraSource] = []
+    restarted: list[bool] = []
+    service: CameraDiscoveryService
+
+    def on_finished(result: DiscoveryResult) -> None:
+        # Called on the discovery thread itself, which is still alive here.
+        assert not service.is_running
+        if not restarted:
+            restarted.append(service.start())
+
+    service = CameraDiscoveryService(
+        AppSettings(camera_probe_limit=1),
+        on_finished=on_finished,
+        on_error=lambda _message: None,
+        source_factory=factory_for(sources),
+    )
+    assert service.start()
+    assert wait_until(lambda: len(sources) == 2)
+    assert restarted == [True]
+    assert wait_until(lambda: not service.is_running)
+    assert service.stop(1.0)
+    assert all(s.closed for s in sources)

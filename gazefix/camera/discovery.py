@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import logging
-from threading import Event, Lock, Thread
+from threading import Event, Lock, Thread, current_thread
 import time
 from typing import Callable
 
@@ -149,11 +149,26 @@ class CameraDiscoveryService:
         self._active_source: CameraSource | None = None
         self._prepared: PreparedCamera | None = None
         self._keep_open_index: int | None = None
+        self._delivered = True
 
     def start(self, keep_open_index: int | None = None) -> bool:
+        """Start a run; returns False only while a run has not yet delivered.
+
+        A thread that has already called ``on_finished``/``on_error`` and is
+        merely exiting is waited out, so a Refresh that lands right after the
+        previous result is honoured instead of silently ignored.
+        """
+
         with self._lock:
-            if self._thread is not None and self._thread.is_alive():
+            previous = self._thread
+            if previous is not None and previous.is_alive() and not self._delivered:
                 return False
+        if previous is not None and previous is not current_thread():
+            previous.join(1.0)  # only its trailing log line remains
+        with self._lock:
+            if self._thread is not previous:
+                return False  # another caller restarted meanwhile
+            self._delivered = False
             self._keep_open_index = keep_open_index
             self._stop_event = Event()
             self._thread = Thread(
@@ -185,8 +200,14 @@ class CameraDiscoveryService:
 
     @property
     def is_running(self) -> bool:
+        """True from ``start`` until the result or error has been delivered."""
+
         with self._lock:
-            return self._thread is not None and self._thread.is_alive()
+            return (
+                self._thread is not None
+                and self._thread.is_alive()
+                and not self._delivered
+            )
 
     def _run(self) -> None:
         logger.info(
@@ -205,6 +226,7 @@ class CameraDiscoveryService:
                 return
             with self._lock:
                 prepared = self._prepared
+                self._delivered = True
             self._on_finished(DiscoveryResult(devices, prepared))
         except Exception as exc:
             logger.exception(
@@ -212,9 +234,13 @@ class CameraDiscoveryService:
                 extra={"event": "camera_discovery_error"},
             )
             self._close_unclaimed_prepared()
+            with self._lock:
+                self._delivered = True
             if not self._stop_event.is_set():
                 self._on_error(str(exc))
         finally:
+            with self._lock:
+                self._delivered = True
             logger.info(
                 "Camera discovery worker stopped",
                 extra={"event": "camera_discovery_stopped"},

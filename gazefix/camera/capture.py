@@ -67,6 +67,7 @@ class CameraCaptureWorker:
         self._active_source_lock = Lock()
         self._active_source: CameraSource | None = None
         self._active_phase = _PHASE_IDLE
+        self._active_device: CameraDevice | None = None
         self._status_lock = Lock()
         self._last_status: CaptureStatus | None = None
         self._thread = Thread(
@@ -88,6 +89,9 @@ class CameraCaptureWorker:
         thread, never on the caller's.
         """
 
+        # Publish, wake, and abort under one lock: the worker consumes requests
+        # under the same lock, so a wake-up can never go stale and the abort can
+        # never hit the open the worker starts for this very request.
         with self._request_lock:
             self._request_id += 1
             request_id = self._request_id
@@ -96,16 +100,17 @@ class CameraCaptureWorker:
             self._requested_prepared = prepared
             if previous is not None:
                 self._orphaned_prepared.append(previous)
-        self._command_event.set()
-        self._abort_open_in_progress()
+            self._command_event.set()
+            self._abort_open_in_progress(wanted=device, stopping=False)
         return request_id
 
     def stop(self) -> None:
         # Flags first, so a read that lands while STOPPING is being published
         # cannot re-emit RUNNING after it.
         self._stop_event.set()
-        self._command_event.set()
-        self._abort_open_in_progress()
+        with self._request_lock:
+            self._command_event.set()
+            self._abort_open_in_progress(wanted=None, stopping=True)
         self._emit(CaptureState.STOPPING, "Stopping camera worker")
 
     def interrupt(self) -> None:
@@ -146,18 +151,55 @@ class CameraCaptureWorker:
         with self._request_lock:
             return self._request_id, self._requested_device, self._requested_prepared
 
+    def _take_request(
+        self,
+    ) -> tuple[int, CameraDevice | None, PreparedCamera | None]:
+        """Read the newest request and consume its wake-up atomically."""
+
+        with self._request_lock:
+            self._command_event.clear()
+            return self._request_id, self._requested_device, self._requested_prepared
+
     def _superseded(self, request_id: int) -> bool:
         if self._stop_event.is_set():
             return True
         with self._request_lock:
             return self._request_id != request_id
 
-    def _abort_open_in_progress(self) -> None:
-        # Held across the call so the worker cannot move the source into the
-        # reading phase underneath us; an interrupt during open is flag-only.
+    def _abort_open_in_progress(
+        self, wanted: CameraDevice | None, stopping: bool
+    ) -> None:
+        """Interrupt an in-flight open unless the newest request wants that camera.
+
+        A user who switches away and back while a slow open is in flight would
+        otherwise pay for the open twice: the in-flight one is discarded and the
+        same camera is opened again. Sources that support ``reinstate`` get the
+        interrupt withdrawn instead; the loop then keeps the camera under the new
+        generation. Called with ``_request_lock`` held; takes the source lock so
+        the worker cannot change phase underneath. Both calls are flag-only.
+        """
+
         with self._active_source_lock:
-            if self._active_phase == _PHASE_OPENING and self._active_source is not None:
-                self._active_source.interrupt()
+            if self._active_phase != _PHASE_OPENING or self._active_source is None:
+                return
+            same_camera = (
+                not stopping
+                and wanted is not None
+                and self._active_device is not None
+                and wanted.index == self._active_device.index
+            )
+            reinstate = getattr(self._active_source, "reinstate", None)
+            if same_camera and callable(reinstate):
+                reinstate()
+                return
+            self._active_source.interrupt()
+
+    def _same_camera_requested(self, device: CameraDevice) -> bool:
+        if self._stop_event.is_set():
+            return False
+        with self._request_lock:
+            wanted = self._requested_device
+        return wanted is not None and wanted.index == device.index
 
     def _run(self) -> None:
         logger.info(
@@ -177,11 +219,41 @@ class CameraCaptureWorker:
                 self._close_orphaned_prepared()
                 request_id, requested_device, prepared = self._current_request()
                 if request_id != applied_request_id:
-                    # Consume the wake-up for this request before re-reading it,
-                    # so a stale event cannot shorten a later retry wait while a
-                    # request arriving after the re-read still sets it again.
-                    self._command_event.clear()
-                    request_id, requested_device, prepared = self._current_request()
+                    # Re-read and consume the wake-up atomically so a stale event
+                    # cannot shorten a later retry wait, while a request that
+                    # lands afterwards still sets it again.
+                    request_id, requested_device, prepared = self._take_request()
+                    if (
+                        source is not None
+                        and requested_device is not None
+                        and active_device is not None
+                        and requested_device.index == active_device.index
+                    ):
+                        # Same camera requested again: keep the open source and
+                        # only move it to the new generation.
+                        if prepared is not None:
+                            prepared.close_if_unclaimed()
+                        applied_request_id = request_id
+                        consecutive_failures = 0
+                        open_failures = 0
+                        self._output.clear()
+                        logger.info(
+                            "Camera request re-used the open camera",
+                            extra={
+                                "event": "camera_request_reused",
+                                "camera_index": active_device.index,
+                                "request_id": applied_request_id,
+                            },
+                        )
+                        if open_result is not None:
+                            self._emit(
+                                CaptureState.RUNNING,
+                                _running_message(open_result),
+                                active_device,
+                                open_result,
+                                applied_request_id,
+                            )
+                        continue
                     source = self._release_source(source)
                     open_result = None
                     active_device = requested_device
@@ -345,7 +417,7 @@ class CameraCaptureWorker:
             if self._superseded(request_id):
                 self._safe_close(source)
                 return None, None
-            self._set_active_source(source, _PHASE_READING)
+            self._set_active_source(source, _PHASE_READING, device)
             logger.info(
                 "Adopted validated camera from discovery",
                 extra={
@@ -376,7 +448,7 @@ class CameraCaptureWorker:
             source = self._source_factory(self._settings)
         except Exception as exc:
             return self._open_failed(device, request_id, exc, open_failures)
-        self._set_active_source(source, _PHASE_OPENING)
+        self._set_active_source(source, _PHASE_OPENING, device)
         if self._superseded(request_id):
             self._set_active_source(None)
             self._safe_close(source)
@@ -398,10 +470,15 @@ class CameraCaptureWorker:
                 return None, None
             return self._open_failed(device, request_id, exc, open_failures)
         if self._superseded(request_id):
+            if self._same_camera_requested(device):
+                # The newest request is for this very camera: keep the freshly
+                # opened source; the loop moves it to the new generation.
+                self._set_active_source(source, _PHASE_READING, device)
+                return source, open_result
             self._set_active_source(None)
             self._safe_close(source)
             return None, None
-        self._set_active_source(source, _PHASE_READING)
+        self._set_active_source(source, _PHASE_READING, device)
         self._emit(
             CaptureState.RUNNING,
             _running_message(open_result),
@@ -481,11 +558,15 @@ class CameraCaptureWorker:
                 )
 
     def _set_active_source(
-        self, source: CameraSource | None, phase: str = _PHASE_IDLE
+        self,
+        source: CameraSource | None,
+        phase: str = _PHASE_IDLE,
+        device: CameraDevice | None = None,
     ) -> None:
         with self._active_source_lock:
             self._active_source = source
             self._active_phase = phase if source is not None else _PHASE_IDLE
+            self._active_device = device if source is not None else None
 
     def _wait_for_command(self, timeout: float) -> None:
         self._command_event.wait(timeout)

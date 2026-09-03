@@ -332,6 +332,17 @@ class OpenCVCameraSource:
 
         self._interrupted.set()
 
+    def reinstate(self) -> None:
+        """Withdraw an interrupt because the owner wants this camera after all.
+
+        Used when a newer request returns to the camera whose open is still in
+        flight: if the open has not yet reached its checkpoint it completes
+        normally and the worker keeps the camera; if it already gave up, the
+        worker simply opens the camera again. Either outcome is correct.
+        """
+
+        self._interrupted.clear()
+
     def close(self) -> None:
         with self._capture_lock:
             capture = self._capture
