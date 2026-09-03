@@ -630,3 +630,18 @@ def test_reselecting_the_running_camera_keeps_its_source() -> None:
         assert len(sources) == 1 and not sources[0].closed
     finally:
         assert runtime.stop()
+
+
+def test_terminal_statuses_arrive_in_order_from_the_worker() -> None:
+    for _ in range(5):
+        statuses: list[CaptureStatus] = []
+        runtime = PipelineRuntime(
+            fast_settings(), on_status=statuses.append, source_factory=factory_for([])
+        )
+        runtime.start()
+        runtime.select_camera(CameraDevice(1))
+        wait_for_pixel(runtime, 1)
+        assert runtime.stop()
+        tail = [s.state for s in statuses[-2:]]
+        assert tail == [CaptureState.STOPPING, CaptureState.STOPPED], [s.state for s in statuses]
+        assert CaptureState.RUNNING not in [s.state for s in statuses[statuses.index(statuses[-2]):]]

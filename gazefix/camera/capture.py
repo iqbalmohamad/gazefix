@@ -68,6 +68,7 @@ class CameraCaptureWorker:
         self._active_source: CameraSource | None = None
         self._active_phase = _PHASE_IDLE
         self._active_device: CameraDevice | None = None
+        self._active_request_id = 0
         self._status_lock = Lock()
         self._last_status: CaptureStatus | None = None
         self._thread = Thread(
@@ -101,17 +102,18 @@ class CameraCaptureWorker:
             if previous is not None:
                 self._orphaned_prepared.append(previous)
             self._command_event.set()
-            self._abort_open_in_progress(wanted=device, stopping=False)
+            self._abort_open_in_progress(
+                wanted=device, stopping=False, request_id=request_id
+            )
         return request_id
 
     def stop(self) -> None:
-        # Flags first, so a read that lands while STOPPING is being published
-        # cannot re-emit RUNNING after it.
         self._stop_event.set()
         with self._request_lock:
             self._command_event.set()
-            self._abort_open_in_progress(wanted=None, stopping=True)
-        self._emit(CaptureState.STOPPING, "Stopping camera worker")
+            self._abort_open_in_progress(wanted=None, stopping=True, request_id=None)
+        # STOPPING and STOPPED are both emitted by the worker thread itself, so
+        # consumers always see them in that order and never RUNNING after either.
 
     def interrupt(self) -> None:
         """Flag the active source so its next checkpoint gives up.
@@ -167,7 +169,10 @@ class CameraCaptureWorker:
             return self._request_id != request_id
 
     def _abort_open_in_progress(
-        self, wanted: CameraDevice | None, stopping: bool
+        self,
+        wanted: CameraDevice | None,
+        stopping: bool,
+        request_id: int | None,
     ) -> None:
         """Interrupt an in-flight open unless the newest request wants that camera.
 
@@ -182,6 +187,8 @@ class CameraCaptureWorker:
         with self._active_source_lock:
             if self._active_phase != _PHASE_OPENING or self._active_source is None:
                 return
+            if request_id is not None and self._active_request_id == request_id:
+                return  # never interrupt the open that serves this very request
             same_camera = (
                 not stopping
                 and wanted is not None
@@ -385,6 +392,7 @@ class CameraCaptureWorker:
             )
             self._emit(CaptureState.ERROR, "Unexpected camera worker error")
         finally:
+            self._emit(CaptureState.STOPPING, "Stopping camera worker")
             self._release_source(source)
             self.close_pending_prepared()
             self._emit(CaptureState.STOPPED, "Camera worker stopped")
@@ -417,7 +425,7 @@ class CameraCaptureWorker:
             if self._superseded(request_id):
                 self._safe_close(source)
                 return None, None
-            self._set_active_source(source, _PHASE_READING, device)
+            self._set_active_source(source, _PHASE_READING, device, request_id)
             logger.info(
                 "Adopted validated camera from discovery",
                 extra={
@@ -448,7 +456,7 @@ class CameraCaptureWorker:
             source = self._source_factory(self._settings)
         except Exception as exc:
             return self._open_failed(device, request_id, exc, open_failures)
-        self._set_active_source(source, _PHASE_OPENING, device)
+        self._set_active_source(source, _PHASE_OPENING, device, request_id)
         if self._superseded(request_id):
             self._set_active_source(None)
             self._safe_close(source)
@@ -473,12 +481,12 @@ class CameraCaptureWorker:
             if self._same_camera_requested(device):
                 # The newest request is for this very camera: keep the freshly
                 # opened source; the loop moves it to the new generation.
-                self._set_active_source(source, _PHASE_READING, device)
+                self._set_active_source(source, _PHASE_READING, device, request_id)
                 return source, open_result
             self._set_active_source(None)
             self._safe_close(source)
             return None, None
-        self._set_active_source(source, _PHASE_READING, device)
+        self._set_active_source(source, _PHASE_READING, device, request_id)
         self._emit(
             CaptureState.RUNNING,
             _running_message(open_result),
@@ -562,11 +570,13 @@ class CameraCaptureWorker:
         source: CameraSource | None,
         phase: str = _PHASE_IDLE,
         device: CameraDevice | None = None,
+        request_id: int = 0,
     ) -> None:
         with self._active_source_lock:
             self._active_source = source
             self._active_phase = phase if source is not None else _PHASE_IDLE
             self._active_device = device if source is not None else None
+            self._active_request_id = request_id if source is not None else 0
 
     def _wait_for_command(self, timeout: float) -> None:
         self._command_event.wait(timeout)

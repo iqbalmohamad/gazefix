@@ -287,8 +287,9 @@ def test_directshow_receives_its_format_as_open_parameters(fake_cv, monkeypatch)
     cfg = AppSettings(capture_width=1280, capture_height=720, target_fps=30.0, discovery_validation_reads=1)
     result = OpenCVCameraSource(cfg).open(CameraDevice(3))
     assert result.backend == dshow
+    # FPS is deliberately absent: OpenCV's DirectShow constructor ignores it.
     assert seen == [(3, cv2.CAP_DSHOW, [
-        cv2.CAP_PROP_FRAME_WIDTH, 1280, cv2.CAP_PROP_FRAME_HEIGHT, 720, cv2.CAP_PROP_FPS, 30,
+        cv2.CAP_PROP_FRAME_WIDTH, 1280, cv2.CAP_PROP_FRAME_HEIGHT, 720,
     ])]
 
 
@@ -321,3 +322,33 @@ def test_entry_points_do_not_import_opencv_before_the_environment_is_applied(mod
     completed = subprocess.run([_sys.executable, "-c", code], capture_output=True, text=True,
                                env={**__import__("os").environ, "QT_QPA_PLATFORM": "offscreen"})
     assert completed.returncode == 0, completed.stderr
+
+
+def test_directshow_open_passes_size_only_and_skips_unreported_fps(fake_cv, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    dshow = CameraBackend(cv2.CAP_DSHOW, "DSHOW")
+    monkeypatch.setattr(source_module, "ordered_backends_for_device", lambda _b: (dshow,))
+    fake_cv.behaviours = {cv2.CAP_DSHOW: "opens"}
+    seen_params: list[object] = []
+    original_open = fake_cv.open
+
+    def open_with_params(self, index, api, params=None):  # type: ignore[no-untyped-def]
+        seen_params.append(params)
+        return original_open(self, index, api)
+
+    def get_zero_fps(self, prop):  # type: ignore[no-untyped-def]
+        return 0.0 if prop == cv2.CAP_PROP_FPS else {cv2.CAP_PROP_FRAME_WIDTH: 1280.0, cv2.CAP_PROP_FRAME_HEIGHT: 720.0}.get(prop, 0.0)
+
+    monkeypatch.setattr(fake_cv, "open", open_with_params)
+    monkeypatch.setattr(fake_cv, "get", get_zero_fps)
+    OpenCVCameraSource(AppSettings(discovery_validation_reads=1)).open(CameraDevice(0))
+    assert seen_params == [[cv2.CAP_PROP_FRAME_WIDTH, 1280, cv2.CAP_PROP_FRAME_HEIGHT, 720]]
+    assert cv2.CAP_PROP_FPS not in fake_cv.instances[0].props  # no graph rebuild for a guess
+
+
+def test_supports_thread_handoff_policy() -> None:
+    from gazefix.camera.backends import supports_thread_handoff
+
+    msmf, dshow = default_camera_backends("win32")
+    assert supports_thread_handoff(msmf)
+    assert not supports_thread_handoff(dshow)
+    assert supports_thread_handoff(default_camera_backends("linux")[0])

@@ -8,6 +8,7 @@ from threading import Event, Lock, Thread, current_thread
 import time
 from typing import Callable
 
+from gazefix.camera.backends import supports_thread_handoff
 from gazefix.camera.models import CameraDevice
 from gazefix.camera.source import CameraSource, OpenCVCameraSource, PreparedCamera
 from gazefix.config import AppSettings
@@ -126,8 +127,10 @@ class CameraDiscoveryService:
     With ``keep_first_open`` one validated camera stays open and travels to
     ``on_finished`` inside ``DiscoveryResult.prepared`` so the selection that
     follows discovery does not pay for a second driver open. ``start`` accepts
-    the index the caller intends to select (the camera in use before a refresh);
-    that candidate is the one kept open when it validates, otherwise the first.
+    the index the caller intends to select (the camera in use before a refresh):
+    the first validated candidate is kept provisionally and replaced by the
+    preferred index when that validates. Backends whose captures must be created
+    and destroyed on one thread (DirectShow) are never handed over.
     """
 
     def __init__(
@@ -248,11 +251,10 @@ class CameraDiscoveryService:
 
     def _probe(self, index: int) -> CameraDevice | None:
         with self._lock:
-            wanted = self._keep_open_index
-            keep_open = (
-                self._keep_first_open
-                and self._prepared is None
-                and (wanted is None or wanted == index)
+            # Keep the first validated candidate provisionally; when the caller's
+            # preferred index validates later it replaces the provisional one.
+            keep_open = self._keep_first_open and (
+                self._prepared is None or self._keep_open_index == index
             )
         return probe_camera(
             index,
@@ -264,8 +266,30 @@ class CameraDiscoveryService:
         )
 
     def _accept_prepared(self, prepared: PreparedCamera) -> None:
+        if not supports_thread_handoff(prepared.open_result.backend):
+            # DirectShow captures pair CoInitialize/CoUninitialize on the thread
+            # that creates and destroys them; they are released here instead.
+            prepared.close_if_unclaimed()
+            logger.info(
+                "Validated camera released; its backend is not handed across threads",
+                extra={
+                    "event": "prepared_camera_not_handed_over",
+                    "camera_index": prepared.device.index,
+                    "backend": prepared.open_result.backend.name,
+                },
+            )
+            return
         with self._lock:
+            previous = self._prepared
             self._prepared = prepared
+        if previous is not None and previous.close_if_unclaimed():
+            logger.info(
+                "Provisional prepared camera replaced by the preferred one",
+                extra={
+                    "event": "prepared_camera_replaced",
+                    "camera_index": previous.device.index,
+                },
+            )
 
     def _close_unclaimed_prepared(self) -> None:
         with self._lock:

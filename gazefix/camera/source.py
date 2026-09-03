@@ -228,21 +228,23 @@ class OpenCVCameraSource:
     def _open_capture(
         self, capture: cv2.VideoCapture, index: int, backend: CameraBackend
     ) -> bool:
-        """Open the backend, handing DirectShow its format up front.
+        """Open the backend, handing DirectShow its frame size up front.
 
         DirectShow builds its capture graph inside ``open`` and rebuilds it for
-        every later ``set`` of width/height/FPS, so the requested format is passed
-        as open parameters there and the graph is built once. Media Foundation
-        applies open parameters through the same per-property renegotiation as
-        ``set``, so it gains nothing from them and is configured afterwards,
-        skipping properties the camera already reports at the requested value.
+        every later ``set`` of width/height/FPS. Its constructor honours only
+        width, height, and FOURCC as open parameters (``cap_dshow.cpp``), so
+        those are passed there and the graph is built at the right size; FPS
+        can only be applied by ``set`` afterwards and costs one rebuild when the
+        camera's reported rate differs. Media Foundation applies open parameters
+        through the same per-property renegotiation as ``set``, so it gains
+        nothing from them and is configured afterwards, skipping properties the
+        camera already reports at the requested value.
         """
 
         if backend.api_preference == cv2.CAP_DSHOW:
             params = [
                 cv2.CAP_PROP_FRAME_WIDTH, self._settings.capture_width,
                 cv2.CAP_PROP_FRAME_HEIGHT, self._settings.capture_height,
-                cv2.CAP_PROP_FPS, int(round(self._settings.target_fps)),
             ]
             try:
                 return capture.open(index, backend.api_preference, params)
@@ -269,6 +271,10 @@ class OpenCVCameraSource:
         for prop, value in wanted:
             current = capture.get(prop)
             if abs(current - value) < 0.5:
+                continue
+            if prop == cv2.CAP_PROP_FPS and current <= 0:
+                # The backend does not report a rate (common on DirectShow);
+                # setting one would only force a graph rebuild for a guess.
                 continue
             capture.set(prop, value)
             applied += 1

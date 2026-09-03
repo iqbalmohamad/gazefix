@@ -57,15 +57,30 @@ worker produces for that request carries the id:
   interrupts that open. The worker checks for supersession before and after every
   open, and a superseded open ends silently: no ERROR, RUNNING, or retry delay is
   produced for a camera the user has already left.
+- A request for the camera that is already open, or whose open is in flight, does
+  not reopen it. The worker keeps the source and moves it to the new generation;
+  an interrupt raised by an intermediate request is withdrawn (`reinstate`) when
+  the newest request returns to the same camera, so flipping away and back during
+  a slow open costs one driver open, not two.
+- Publishing a request, waking the worker, and interrupting an in-flight open
+  happen under one lock, the interrupt is bound to the generation that owns the
+  open, and the worker consumes a request with its wake-up under the same lock.
+  A wake-up therefore never goes stale and an interrupt never hits the open that
+  serves the request being published.
+- The terminal `STOPPING` and `STOPPED` statuses are both emitted by the worker
+  thread, so consumers always see them in order.
 
 The worker releases the old source on its own thread, opens the newest request, and
 resumes publishing. Applying a request also consumes the wake-up event that
 carried it, so a request that landed during a read cannot shorten a later retry
 wait. A discovery refresh waits for the capture worker's idle signal before
 probing, so it does not race the camera that is being released; the UI reports
-"releasing camera" until probing actually starts. The refresh remembers the
-camera that was selected: discovery keeps that index open when it validates, and
-the selection returns to it instead of always falling back to the first entry.
+"releasing camera" until probing actually starts. The discovery service counts as
+running only until it has delivered its result, so a Refresh that lands while the
+previous discovery thread is still exiting is honoured rather than dropped. The
+refresh remembers the camera that was selected: discovery keeps the first
+validated candidate open provisionally, replaces it with the remembered index when
+that validates, and the selection returns to whichever was kept.
 
 ### Warm handoff from discovery
 
@@ -84,7 +99,11 @@ already-open source instead of opening the camera a second time. Ownership rules
 
 The OpenCV source object is created on the discovery thread and read on the
 capture thread, never concurrently; that is the same ownership pattern as creating
-a `VideoCapture` on a main thread and reading it on a worker.
+a `VideoCapture` on a main thread and reading it on a worker. Only Media
+Foundation captures are handed over: OpenCV's DirectShow capture pairs
+`CoInitialize` and `CoUninitialize` on the thread that creates and destroys it, so
+a DirectShow-validated candidate is released by discovery and reopened by the
+capture worker (a fast open on that backend).
 
 ### Failure handling
 
@@ -171,8 +190,9 @@ this pipeline, and Milestone 0 is designed to perform it as rarely as possible:
   format even when the value is unchanged. The source now reads each property first
   and sets only those that differ from the request, so a camera whose default
   format already matches costs no renegotiation. DirectShow instead rebuilds its
-  capture graph on every such `set`, so it receives the format as open parameters
-  and builds the graph once.
+  capture graph on every such `set`; it honours width and height (not FPS) as
+  open parameters, so it receives the size up front and pays at most one rebuild
+  for FPS, and none when the camera does not report a rate.
 - A backend that opens but never streams costs one bounded validation instead of
   three full backend waits before the next backend is tried.
 - The warm handoff above removes the second open of the selected camera at startup

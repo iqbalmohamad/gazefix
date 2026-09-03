@@ -235,8 +235,57 @@ def test_service_falls_back_to_first_candidate_when_requested_index_is_gone() ->
     assert service.start(keep_open_index=1)
     assert wait_until(lambda: bool(results))
     assert [d.index for d in results[0].devices] == [0]
-    assert results[0].prepared is None  # nothing kept open: the UI opens index 0 itself
-    assert all(s.closed for s in sources)
+    prepared = results[0].prepared
+    assert prepared is not None and prepared.device.index == 0  # kept provisionally
+    assert not sources[0].closed
+    assert service.stop(1.0)
+    assert sources[0].closed
+
+
+def test_service_replaces_provisional_candidate_with_the_preferred_index() -> None:
+    sources: list[FakeCameraSource] = []
+    results: list[DiscoveryResult] = []
+    service = CameraDiscoveryService(
+        AppSettings(camera_probe_limit=3),
+        on_finished=results.append,
+        on_error=lambda _message: None,
+        source_factory=factory_for(sources),
+    )
+    assert service.start(keep_open_index=1)
+    assert wait_until(lambda: bool(results))
+    prepared = results[0].prepared
+    assert prepared is not None and prepared.device.index == 1
+    by_index = {s.index: s for s in sources}
+    assert by_index[0].closed and not by_index[1].closed and by_index[2].closed
+    assert service.stop(1.0)
+
+
+def test_directshow_validated_camera_is_not_handed_across_threads() -> None:
+    import cv2
+
+    from gazefix.camera.models import CameraBackend
+
+    dshow = CameraBackend(cv2.CAP_DSHOW, "DSHOW")
+
+    class DirectShowSource(FakeCameraSource):
+        def open(self, device: CameraDevice) -> CameraOpenResult:
+            from dataclasses import replace
+
+            return replace(super().open(device), backend=dshow)
+
+    sources: list[DirectShowSource] = []
+    results: list[DiscoveryResult] = []
+    service = CameraDiscoveryService(
+        AppSettings(camera_probe_limit=1),
+        on_finished=results.append,
+        on_error=lambda _message: None,
+        source_factory=lambda _settings: DirectShowSource(sources),
+    )
+    assert service.start()
+    assert wait_until(lambda: bool(results))
+    assert results[0].devices[0].validated_backend == dshow
+    assert results[0].prepared is None
+    assert wait_until(lambda: sources[0].closed)
     assert service.stop(1.0)
 
 

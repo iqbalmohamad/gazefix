@@ -43,6 +43,20 @@ def ordered_backends_for_device(
     )
 
 
+def supports_thread_handoff(backend: CameraBackend) -> bool:
+    """Whether a capture opened on one thread may be read and released on another.
+
+    OpenCV's DirectShow capture calls ``CoInitialize`` in its constructor and
+    ``CoUninitialize`` in its destructor (``cap_dshow.cpp``), which must pair on
+    the same thread. Media Foundation initialises COM and MF once per process and
+    its source reader is free-threaded, so an MSMF capture can change owner.
+    """
+
+    import cv2  # lazy, see module docstring
+
+    return backend.api_preference != cv2.CAP_DSHOW
+
+
 def next_backend_after(
     backend: CameraBackend | None,
     platform: str | None = None,
