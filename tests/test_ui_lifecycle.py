@@ -189,8 +189,8 @@ def test_close_never_releases_a_pending_prepared_camera_on_the_ui_thread(qapp, c
         window.close()
         elapsed = time.perf_counter() - started
         assert elapsed < cfg.worker_join_timeout_s + 0.5, elapsed
-        assert warm.close_calls == 1 and not warm.closed  # release in flight, off the UI thread
-        assert window._closer.outstanding == 1
+        assert window._closer.outstanding == 1  # handed off; the closer owns it now
+        assert wait_until(lambda: warm.close_calls == 1) and not warm.closed  # in flight, off the UI thread
         assert window._runtime.state is RuntimeState.STOPPING
         assert {r.event for r in caplog.records} >= {"pipeline_shutdown_timeout", "prepared_cleanup_timeout"}  # type: ignore[attr-defined]
     finally:

@@ -300,9 +300,13 @@ class PipelineRuntime:
         # nothing here) or is abandoned inside a driver call and may never
         # reach that cleanup. Taking the tokens swaps them out under the
         # worker's request lock, and the cleanup thread releases them, so the
-        # caller never blocks on a driver and no token is released twice.
+        # caller never blocks on a driver and no token is released twice. A
+        # token the worker already adopted has an owner and no source left to
+        # release; handing it over would only inflate ``outstanding`` with a
+        # no-op, so only tokens that are still unclaimed count as cleanup.
         for prepared in self._capture.take_pending_prepared():
-            self._closer.submit(prepared)
+            if prepared.is_pending:
+                self._closer.submit(prepared)
         cleanup_done = self._closer.join(max(0.0, deadline - time.perf_counter()))
         return capture_joined, processor_joined, cleanup_done
 
