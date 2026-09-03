@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QImage, QPixmap
@@ -18,8 +19,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gazefix.camera.discovery import CameraDiscoveryService
+from gazefix.camera.capture import SourceFactory
+from gazefix.camera.discovery import CameraDiscoveryService, DiscoveryResult
 from gazefix.camera.models import CameraDevice, CaptureState, CaptureStatus
+from gazefix.camera.source import PreparedCamera
 from gazefix.config import AppSettings
 from gazefix.pipeline.runtime import PipelineRuntime
 
@@ -34,7 +37,12 @@ class UiSignals(QObject):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, settings: AppSettings, log_path: str) -> None:
+    def __init__(
+        self,
+        settings: AppSettings,
+        log_path: str,
+        source_factory: SourceFactory | None = None,
+    ) -> None:
         super().__init__()
         self._settings = settings
         self._signals = UiSignals()
@@ -43,14 +51,19 @@ class MainWindow(QMainWindow):
         self._signals.discovery_error.connect(self._on_discovery_error)
 
         self._runtime = PipelineRuntime(
-            settings, on_status=self._signals.capture_status.emit
+            settings,
+            on_status=self._signals.capture_status.emit,
+            source_factory=source_factory,
         )
+        discovery_kwargs = {} if source_factory is None else {"source_factory": source_factory}
         self._discovery = CameraDiscoveryService(
             settings,
             on_finished=self._signals.discovery_finished.emit,
             on_error=self._signals.discovery_error.emit,
+            **discovery_kwargs,
         )
         self._devices: list[CameraDevice] = []
+        self._preferred_index: int | None = None
         self._last_output_sequence = 0
         self._last_image: QImage | None = None
         self._first_frame_presented = False
@@ -128,38 +141,57 @@ class MainWindow(QMainWindow):
         if self._closing or self._discovery.is_running:
             return
         self._refresh_pending = True
+        # Remember the camera in use so a refresh keeps it (and its open handle).
+        current = self._camera_selector.currentIndex()
+        if 0 <= current < len(self._devices):
+            self._preferred_index = self._devices[current].index
         self._runtime.select_camera(None)
         self._clear_preview("Searching for camera candidates…")
         self._camera_selector.setEnabled(False)
         self._refresh_button.setEnabled(False)
-        self._status.setText("Status: probing OpenCV camera indexes…")
+        # Probing starts only once the worker has released its camera, which
+        # can take as long as the driver call it is inside; say so.
+        self._status.setText("Status: releasing camera before probing…")
 
     @Slot()
     def _start_discovery(self) -> None:
         if self._closing or not self._refresh_pending:
             return
         self._refresh_pending = False
-        if not self._discovery.start():
+        if self._discovery.start(self._preferred_index):
+            self._status.setText("Status: probing OpenCV camera indexes…")
+        else:
             self._refresh_button.setEnabled(True)
 
     @Slot(object)
-    def _on_discovery_finished(self, devices: list[CameraDevice]) -> None:
+    def _on_discovery_finished(self, result: DiscoveryResult) -> None:
         if self._closing:
+            # The discovery service closes an unclaimed prepared camera on stop.
             return
+        devices = result.devices
         self._devices = devices
         self._refresh_pending = False
+        selected = 0
+        if result.prepared is not None and result.prepared.device in devices:
+            selected = devices.index(result.prepared.device)
+        elif self._preferred_index is not None:
+            for position, device in enumerate(devices):
+                if device.index == self._preferred_index:
+                    selected = position
+                    break
         self._camera_selector.blockSignals(True)
         self._camera_selector.clear()
         for device in devices:
             self._camera_selector.addItem(device.display_name)
         if not devices:
             self._camera_selector.addItem("No validated camera candidates")
+        else:
+            self._camera_selector.setCurrentIndex(selected)
         self._camera_selector.blockSignals(False)
         self._camera_selector.setEnabled(bool(devices))
         self._refresh_button.setEnabled(True)
         if devices:
-            self._camera_selector.setCurrentIndex(0)
-            self._select_camera(0)
+            self._select_camera(selected, result.prepared)
         else:
             self._status.setText(
                 "Status: no camera produced a validation frame. Check Windows "
@@ -178,16 +210,23 @@ class MainWindow(QMainWindow):
         self._clear_preview("Camera probing failed")
 
     @Slot(int)
-    def _select_camera(self, index: int) -> None:
+    def _select_camera(
+        self, index: int, prepared: PreparedCamera | None = None
+    ) -> None:
         if self._closing or not 0 <= index < len(self._devices):
             return
         self._last_output_sequence = 0
-        self._runtime.select_camera(self._devices[index])
-        self._clear_preview("Opening selected camera…")
+        self._runtime.select_camera(self._devices[index], prepared)
+        self._clear_preview(
+            "Starting selected camera…" if prepared else "Opening selected camera…"
+        )
 
     @Slot(object)
     def _on_capture_status(self, status: CaptureStatus) -> None:
         if self._closing:
+            return
+        if 0 <= status.request_id < self._runtime.current_request_id:
+            # A status for a camera request the user has already replaced.
             return
         self._status.setText(f"Status: {status.message}")
         if status.state is CaptureState.IDLE and self._refresh_pending:
@@ -264,6 +303,8 @@ class MainWindow(QMainWindow):
         self._closing = True
         self._preview_timer.stop()
         self._metrics_timer.stop()
+        # Disappear immediately; the joins below may wait on a camera driver.
+        self.hide()
         metrics = self._runtime.metrics()
         logger.info(
             "Runtime metrics at shutdown",
@@ -279,10 +320,14 @@ class MainWindow(QMainWindow):
                 "output_replacements": metrics.output_replacements,
             },
         )
-        discovery_stopped = self._discovery.stop(
-            self._settings.worker_join_timeout_s
-        )
+        # Signal discovery first so both workers wind down concurrently, then
+        # bound the whole close by one join timeout instead of two in sequence.
+        deadline = time.perf_counter() + self._settings.worker_join_timeout_s
+        self._discovery.request_stop()
         pipeline_stopped = self._runtime.stop()
+        discovery_stopped = self._discovery.join(
+            max(0.0, deadline - time.perf_counter())
+        )
         if not discovery_stopped:
             logger.error(
                 "Discovery worker did not stop before timeout",

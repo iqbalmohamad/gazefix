@@ -47,8 +47,19 @@ Optional capture settings:
 ```
 
 The UI first validates bounded numerical OpenCV indexes, then selects the first
-candidate that both opens and returns a frame. Use the selector to switch without
-restarting, or **Refresh** after connecting a camera or changing privacy settings.
+candidate that both opens and returns a frame. The camera that validated first is
+kept open and handed to the capture worker, so it is not opened a second time.
+Use the selector to switch without restarting, or **Refresh** after connecting a
+camera or changing privacy settings.
+
+If Media Foundation camera opens are slow on a machine, compare both settings of
+the hardware-transform switch (GazeFix defaults to `0`, OpenCV's own default is
+`1`):
+
+```powershell
+.venv\Scripts\python -m gazefix --msmf-hw-transforms 0
+.venv\Scripts\python -m gazefix --msmf-hw-transforms 1
+```
 
 ## Run tests
 
@@ -72,16 +83,35 @@ To shorten the probe or sample interval:
 .venv\Scripts\python scripts\camera_test.py --max-index 1 --duration 1
 ```
 
+To measure the Media Foundation open cost with and without hardware transforms:
+
+```powershell
+.venv\Scripts\python scripts\camera_test.py --max-index 0 --duration 1 --msmf-hw-transforms 0
+.venv\Scripts\python scripts\camera_test.py --max-index 0 --duration 1 --msmf-hw-transforms 1
+```
+
 The tool reports one JSON object per index/backend combination, including whether
 it opened, requested and reported backend, negotiated size/FPS, observed sample
-FPS, successful reads, and failed reads. It releases every camera before exiting.
+FPS, successful reads, failed reads, and the measured `open_ms`, `configure_ms`,
+`first_frame_ms`, and `release_ms`. It releases every camera before exiting.
 
 ## Windows camera behavior
 
 GazeFix prefers OpenCV Media Foundation (`MSMF`) and falls back to DirectShow
-(`DSHOW`). A backend that worked during discovery is tried first when selected.
-This ordering is a prototype policy and should be revisited with a representative
-Windows hardware matrix.
+(`DSHOW`). A backend that worked during discovery is tried first when selected, a
+backend that opens but never delivers a frame counts as failed so the other one is
+tried, and a backend that stops delivering frames while running is demoted for the
+next reopen. The fallback is never permanent: MSMF is preferred again at the next
+open. This ordering is a prototype policy and should be revisited with a
+representative Windows hardware matrix.
+
+Opening a camera through MSMF is the slow operation in this application. GazeFix
+sets `OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS=0` at startup because hardware
+transform negotiation during open is the documented cause of very slow MSMF opens
+(OpenCV issue 17687); `--msmf-hw-transforms 1` restores OpenCV's default for
+comparison. Every camera open, release, and probe is logged with its duration
+(`open_ms`, `configure_ms`, `first_frame_ms`, `release_ms`, `probe_ms`,
+`discovery_ms`) so slow hardware can be diagnosed from the log alone.
 
 OpenCV numerical index probing is **not authoritative Windows device enumeration**.
 Labels such as `Camera index 0` are validated candidates for the current run, not

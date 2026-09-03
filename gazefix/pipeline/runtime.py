@@ -9,7 +9,7 @@ from typing import Callable
 
 from gazefix.camera.capture import CameraCaptureWorker, SourceFactory
 from gazefix.camera.models import CameraDevice, CaptureStatus
-from gazefix.camera.source import OpenCVCameraSource
+from gazefix.camera.source import OpenCVCameraSource, PreparedCamera
 from gazefix.config import AppSettings
 from gazefix.diagnostics.metrics import MetricsSnapshot, PipelineMetrics
 from gazefix.pipeline.frame_buffer import LatestValueBuffer, VersionedValue
@@ -63,13 +63,22 @@ class PipelineRuntime:
         self._capture.start()
         self._started = True
 
-    def select_camera(self, device: CameraDevice | None) -> int:
-        """Request a camera change and return its generation identifier."""
+    def select_camera(
+        self, device: CameraDevice | None, prepared: PreparedCamera | None = None
+    ) -> int:
+        """Request a camera change and return its generation identifier.
+
+        ``prepared`` is an already-open validated source for ``device`` (from
+        discovery) that the capture worker adopts instead of reopening.
+        """
 
         self._capture_buffer.clear()
         self._output_buffer.clear()
-        request_id = self._capture.request_camera(device)
+        # The generation is published under the same lock the frame consumer
+        # reads it with, so no frame of the new generation can be judged
+        # against the old id and no old frame against the new one.
         with self._request_lock:
+            request_id = self._capture.request_camera(device, prepared)
             self._current_request_id = request_id
         logger.info(
             "Camera switch requested",
@@ -77,9 +86,15 @@ class PipelineRuntime:
                 "event": "camera_switch_requested",
                 "request_id": request_id,
                 "camera_index": device.index if device else None,
+                "adopting_prepared": prepared is not None,
             },
         )
         return request_id
+
+    @property
+    def current_request_id(self) -> int:
+        with self._request_lock:
+            return self._current_request_id
 
     def consume_latest_output(
         self, after_sequence: int = 0
@@ -104,6 +119,7 @@ class PipelineRuntime:
 
     def stop(self) -> bool:
         if not self._started:
+            self._capture.close_pending_prepared()
             return True
         self._capture.stop()
         self._processor.stop()
@@ -113,8 +129,10 @@ class PipelineRuntime:
         # the source avoids backend deadlocks caused by concurrent release/read.
         capture_stopped = self._capture.join(min(0.5, timeout * 0.25))
         if not capture_stopped:
-            # Camera open can block much longer than one frame interval. It is
-            # safe to release the registered, not-yet-open capture as a fallback.
+            # Flag the source so the worker gives up at its next checkpoint. No
+            # release happens from this thread: a blocked driver open cannot be
+            # cancelled, and a blocked read returns on the backend's own timeout,
+            # after which the worker releases the camera itself.
             self._capture.interrupt()
             capture_stopped = self._capture.join(
                 max(0.0, deadline - time.perf_counter())
@@ -122,6 +140,8 @@ class PipelineRuntime:
         processor_stopped = self._processor.join(
             max(0.0, deadline - time.perf_counter())
         )
+        # Anything requested after the worker left its loop is closed here.
+        self._capture.close_pending_prepared()
         self._started = False
         clean = capture_stopped and processor_stopped
         log = logger.info if clean else logger.error

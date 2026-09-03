@@ -55,8 +55,18 @@ class CaptureState(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class CaptureStatus:
+    """One capture-state transition.
+
+    ``request_id`` is the camera-request generation the status belongs to, or
+    ``-1`` for worker-level statuses that precede any request (initial idle,
+    stopping, stopped). Including it makes statuses of different generations
+    distinct even when state and message repeat, so a consumer that waits for
+    a specific generation (for example the UI refresh flow waiting for idle)
+    always receives it.
+    """
+
     state: CaptureState
     message: str
     camera: CameraDevice | None = None
     open_result: CameraOpenResult | None = None
-
+    request_id: int = -1

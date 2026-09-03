@@ -22,6 +22,18 @@ class AppSettings:
     The class deliberately contains only foundation settings. Future processing
     options can be added here without scattering constants across the UI and
     camera modules.
+
+    ``discovery_validation_reads`` and ``open_validation_timeout_s`` bound the
+    frame reads every camera open performs before it is considered successful;
+    a backend that opens but never delivers a frame is treated as an open
+    failure so the next backend is tried. A failed read that took longer than
+    ``stalled_read_s`` (Media Foundation waits 10 s internally) counts as a
+    stall and triggers a reopen at once instead of one transient failure.
+    Repeated open failures back off from ``reconnect_delay_s`` up to
+    ``reconnect_delay_max_s``.
+    ``msmf_hw_transforms`` controls OpenCV's Media Foundation hardware-transform
+    negotiation (``OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS``); it is off by
+    default because it is the documented cause of multi-second MSMF opens.
     """
 
     capture_width: int = 1280
@@ -32,9 +44,13 @@ class AppSettings:
     metrics_refresh_ms: int = 500
     transient_read_failures: int = 5
     read_retry_delay_s: float = 0.05
+    stalled_read_s: float = 2.0
     reconnect_delay_s: float = 1.0
+    reconnect_delay_max_s: float = 5.0
     worker_join_timeout_s: float = 5.0
     discovery_validation_reads: int = 3
+    open_validation_timeout_s: float = 3.0
+    msmf_hw_transforms: bool = False
     log_level: str = "INFO"
     log_directory: Path = default_log_directory()
 
@@ -51,6 +67,10 @@ class AppSettings:
             raise ValueError("Transient read failure limit must be positive")
         if self.read_retry_delay_s < 0 or self.reconnect_delay_s < 0:
             raise ValueError("Retry delays cannot be negative")
+        if self.reconnect_delay_max_s < self.reconnect_delay_s:
+            raise ValueError("Maximum reconnect delay cannot be below the initial delay")
+        if self.stalled_read_s <= 0 or self.open_validation_timeout_s <= 0:
+            raise ValueError("Stall and validation timeouts must be positive")
         if self.worker_join_timeout_s <= 0:
             raise ValueError("Worker join timeout must be positive")
         if self.discovery_validation_reads < 1:
