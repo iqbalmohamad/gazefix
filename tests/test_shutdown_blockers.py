@@ -227,24 +227,28 @@ def test_stop_takes_pending_tokens_from_an_abandoned_worker_without_blocking() -
     assert warm.close_calls == 1 and not prepared.is_pending
 
 
-def test_a_token_refused_after_stop_is_released_off_the_caller_thread() -> None:
+def test_a_token_refused_after_finalized_stop_is_a_disposal_not_runtime_work() -> None:
+    """Once stop() has returned True, a refused token is released off the caller
+    thread as a detached disposal: the latched STOPPED never reverts."""
+
     runtime = PipelineRuntime(settings(worker_join_timeout_s=2.0), source_factory=factory_for([]))
     runtime.start()
-    assert runtime.stop() is True
+    assert runtime.stop() is True  # finalized: the latch is set
     gate = Event()
     warm, prepared = gated_prepared(3, gate)
     started = time.perf_counter()
     runtime.select_camera(CameraDevice(3), prepared)
     assert time.perf_counter() - started < SLACK_S  # returned while the release still blocks
-    assert runtime.state is RuntimeState.STOPPING and runtime.prepared_closer.outstanding == 1
-    assert wait_until(lambda: warm.close_calls == 1) and not warm.closed
+    assert runtime.state is RuntimeState.STOPPED  # the latch holds; no STOPPED -> STOPPING
+    assert runtime.prepared_closer.outstanding == 1  # visible to app-level accounting
+    assert wait_until(lambda: warm.close_calls == 1) and not warm.closed  # off this thread
     started = time.perf_counter()
-    assert runtime.stop() is False  # truthful: owned cleanup outstanding
-    assert time.perf_counter() - started < 2.0 + SLACK_S
+    assert runtime.stop() is True  # finalized stays final; bounded, no re-wind-down
+    assert time.perf_counter() - started < SLACK_S
     gate.set()
-    assert runtime.prepared_closer.join(2.0) and warm.closed
-    assert runtime.state is RuntimeState.STOPPED and runtime.stop() is True
-    assert warm.close_calls == 1
+    assert runtime.prepared_closer.join(2.0) and warm.closed  # never leaked
+    assert runtime.state is RuntimeState.STOPPED
+    assert warm.close_calls == 1  # exactly one release
 
 
 def test_discovery_join_hands_an_unadopted_token_to_cleanup_instead_of_blocking() -> None:

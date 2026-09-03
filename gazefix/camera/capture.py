@@ -60,7 +60,12 @@ class CameraCaptureWorker:
         self._on_status = on_status or (lambda _status: None)
         self._source_factory = source_factory
         # Releases prepared cameras refused after ``stop`` off the caller's
-        # thread; without one they are released on the caller's thread.
+        # thread; without one they are released on the caller's thread. The
+        # runtime passes its own cleanup thread here. Within the runtime this
+        # refusal path is unreachable (its ``select_camera`` refuses first,
+        # under the lifecycle lock), so a submission from here can never race
+        # the runtime's shutdown finalization; direct users of this worker
+        # get the same never-leak, never-block-the-caller disposal behaviour.
         self._prepared_closer = prepared_closer
         self._stop_event = Event()
         self._command_event = Event()

@@ -50,22 +50,23 @@ class MainWindow(QMainWindow):
         self._signals.discovery_finished.connect(self._on_discovery_finished)
         self._signals.discovery_error.connect(self._on_discovery_error)
 
-        # One cleanup thread releases every prepared camera that would
-        # otherwise be released on this (the Qt) thread at shutdown; the
-        # window joins it, bounded, in ``closeEvent``.
-        self._closer = PreparedCameraCloser()
+        # Cleanup is owner-scoped: the runtime owns its own cleanup thread
+        # (created inside PipelineRuntime, never shared, so discovery work
+        # can never appear as runtime lifecycle state), and the window owns a
+        # separate one for discovery's unadopted prepared cameras. closeEvent
+        # joins both, bounded, within the one shutdown deadline.
+        self._discovery_closer = PreparedCameraCloser("gazefix-discovery-prepared-close")
         self._runtime = PipelineRuntime(
             settings,
             on_status=self._signals.capture_status.emit,
             source_factory=source_factory,
-            prepared_closer=self._closer,
         )
         discovery_kwargs = {} if source_factory is None else {"source_factory": source_factory}
         self._discovery = CameraDiscoveryService(
             settings,
             on_finished=self._signals.discovery_finished.emit,
             on_error=self._signals.discovery_error.emit,
-            prepared_closer=self._closer,
+            prepared_closer=self._discovery_closer,
             **discovery_kwargs,
         )
         self._devices: list[CameraDevice] = []
@@ -337,7 +338,12 @@ class MainWindow(QMainWindow):
         discovery_stopped = self._discovery.join(
             max(0.0, deadline - time.perf_counter())
         )
-        cleanup_done = self._closer.join(max(0.0, deadline - time.perf_counter()))
+        runtime_cleanup_done = self._runtime.prepared_closer.join(
+            max(0.0, deadline - time.perf_counter())
+        )
+        discovery_cleanup_done = self._discovery_closer.join(
+            max(0.0, deadline - time.perf_counter())
+        )
         if not discovery_stopped:
             logger.error(
                 "Discovery worker did not stop before timeout",
@@ -355,12 +361,14 @@ class MainWindow(QMainWindow):
                     "runtime_state": self._runtime.state.value,
                 },
             )
-        if not cleanup_done:
+        if not (runtime_cleanup_done and discovery_cleanup_done):
+            # Say which owner still has work; each count is that owner's own.
             logger.error(
                 "Prepared camera release still outstanding at close",
                 extra={
                     "event": "prepared_cleanup_timeout",
-                    "outstanding": self._closer.outstanding,
+                    "runtime_cleanup_outstanding": self._runtime.prepared_closer.outstanding,
+                    "discovery_cleanup_outstanding": self._discovery_closer.outstanding,
                 },
             )
         event.accept()

@@ -33,14 +33,20 @@ logger = logging.getLogger(__name__)
 class RuntimeState(str, Enum):
     """Lifecycle state of a ``PipelineRuntime``, derived when it is read.
 
-    Every transition is decided from what the runtime actually owns at the
-    moment of the read: whether a worker thread has been started, whether one
-    is alive, and whether a prepared-camera release handed to the cleanup
-    thread is still outstanding. The only fact the runtime records itself is
-    that ``stop()`` (or a failed ``start()``) has been requested. A shutdown
-    that timed out with a worker still inside a driver call therefore keeps
-    reporting ``STOPPING`` until that thread has actually exited and every
-    handed-off release has returned.
+    Every transition is decided from what the runtime owns: whether a worker
+    thread has been started, whether one is alive, and whether a
+    runtime-owned prepared-camera release is still outstanding. The runtime
+    records two facts of its own: that ``stop()`` (or a failed ``start()``)
+    has been requested, and, once nothing owned is left, that shutdown is
+    final. ``STOPPED`` is a latch: it is entered exactly once, under the
+    lifecycle lock, when no owned worker is alive and no runtime-owned
+    release is outstanding, and it is never left. Work that reaches the
+    runtime's cleanup thread after that point (a refused request's token) is
+    a detached disposal owned by the cleanup thread, not runtime lifecycle
+    work, so no later event can move the state back to ``STOPPING``.
+    A shutdown that timed out with a worker still inside a driver call keeps
+    reporting ``STOPPING`` until that thread has exited and every
+    runtime-owned release has returned.
     """
 
     NEW = "new"
@@ -60,8 +66,15 @@ class PipelineRuntime:
     Nothing UI-facing here blocks on a camera driver. Releasing a camera is a
     driver call with no upper bound, so every release the runtime itself must
     perform (prepared cameras the capture worker can no longer adopt) is
-    handed to ``prepared_closer`` and tracked as outstanding shutdown work;
-    the active camera is only ever released by the capture worker thread.
+    handed to the runtime's own cleanup thread and tracked as outstanding
+    shutdown work; the active camera is only ever released by the capture
+    worker thread.
+
+    The cleanup thread is created by and owned by this runtime; it is
+    deliberately not injectable, so no other component (discovery, the
+    window) can put work on it and mutate this runtime's lifecycle state.
+    Cleanup other components own is theirs to track; the application
+    aggregates all owners at its own shutdown.
     """
 
     def __init__(
@@ -70,10 +83,11 @@ class PipelineRuntime:
         on_status: Callable[[CaptureStatus], None] | None = None,
         processor: FrameProcessor | None = None,
         source_factory: SourceFactory | None = None,
-        prepared_closer: PreparedCameraCloser | None = None,
     ) -> None:
         self._settings = settings
-        self._closer = prepared_closer or PreparedCameraCloser()
+        # Owned, never shared: only this runtime submits to it, so its
+        # ``outstanding`` count is runtime-owned work by construction.
+        self._closer = PreparedCameraCloser("gazefix-runtime-prepared-close")
         self._capture_buffer: LatestValueBuffer[CapturedFrame] = LatestValueBuffer()
         self._output_buffer: LatestValueBuffer[ProcessedFrame] = LatestValueBuffer()
         self._metrics = PipelineMetrics()
@@ -100,11 +114,21 @@ class PipelineRuntime:
         # shutdown that is waiting for a camera.
         self._lifecycle_lock = Lock()
         self._stop_requested = False
+        # The STOPPED latch: set exactly once, under the lifecycle lock, when
+        # nothing owned is alive or outstanding; never cleared. Refused-token
+        # submission happens under the same lock, so a submission is either
+        # observed by the latch decision or lands after it as a disposal.
         self._stop_finalized = False
+        self._stop_logged = False
 
     @property
     def prepared_closer(self) -> PreparedCameraCloser:
-        """The cleanup thread that releases prepared cameras on the runtime's behalf."""
+        """The runtime-owned cleanup thread; exposed for application shutdown accounting.
+
+        Only the runtime submits work to it. After the runtime has finalized,
+        anything still (or newly) on it is a detached disposal, invisible to
+        ``state`` but joinable here by the application within its deadline.
+        """
 
         return self._closer
 
@@ -162,12 +186,25 @@ class PipelineRuntime:
 
         Once ``stop()`` has been requested no worker will ever apply a request,
         so the request is refused: nothing is published, the current generation
-        is returned unchanged, and a prepared camera is handed to the cleanup
-        thread (never released on the caller's thread).
+        is returned unchanged, and a prepared camera the caller handed in is
+        accepted for disposal by the runtime's cleanup thread (never released
+        on the caller's thread, and never leaked). The hand-off happens under
+        the lifecycle lock, the same lock under which shutdown finalizes, so
+        exactly one of two things is true: the token was registered before the
+        final check (it counts as runtime-owned cleanup, ``stop()`` cannot
+        report success past it, and ``state`` stays ``STOPPING`` until it is
+        released) or the runtime was already finalized (the token is a
+        detached disposal of the cleanup thread and the latched ``STOPPED``
+        is unaffected). ``stop() == True`` therefore can never race with new
+        runtime-owned cleanup appearing afterwards.
         """
 
         with self._lifecycle_lock:
             accepted = not self._stop_requested
+            if not accepted and prepared is not None:
+                # Registered or disposed under the same lock that finalizes
+                # shutdown; see the docstring. ``submit`` never blocks.
+                self._closer.submit(prepared)
             if accepted:
                 self._capture_buffer.clear()
                 self._output_buffer.clear()
@@ -181,8 +218,6 @@ class PipelineRuntime:
                     request_id = self._capture.request_camera(device, prepared)
                     self._current_request_id = request_id
         if not accepted:
-            if prepared is not None:
-                self._closer.submit(prepared)
             logger.warning(
                 "Camera request refused; runtime is stopping or stopped",
                 extra={
@@ -234,36 +269,50 @@ class PipelineRuntime:
 
         Returns ``True`` only when, at the final check made after every wait
         and immediately before returning, no owned worker thread is alive and
-        no prepared-camera release handed to the cleanup thread is still
-        outstanding. Two things are kept apart: whether the configured
-        deadline ran out during this call (logged as ``deadline_exhausted``)
-        and whether owned work is still alive when the call returns (the
-        return value and ``state``). A join that timed out but whose thread
-        exited before the final check therefore yields ``True`` and
-        ``STOPPED``; a thread still inside an uncancellable driver call
-        yields ``False`` and ``STOPPING``, and a later ``stop()`` joins again
-        against a fresh bounded deadline. Nothing here can turn a live thread
-        into a reported success, and every call is bounded by one timeout.
+        no runtime-owned prepared-camera release is still outstanding. The
+        check runs under the lifecycle lock and latches ``STOPPED`` (see
+        ``RuntimeState``), so a ``True`` is final: the state stays
+        ``STOPPED``, later calls return ``True`` at once, and no
+        runtime-owned cleanup can appear afterwards, because refused-token
+        registration is serialized under the same lock. Two things are kept
+        apart: whether the configured deadline ran out during this call
+        (logged as ``deadline_exhausted``) and whether owned work is still
+        alive when the call returns (the return value and ``state``). A join
+        that timed out but whose thread exited before the final check yields
+        ``True`` and ``STOPPED``; a thread still inside an uncancellable
+        driver call yields ``False`` and ``STOPPING``, and a later ``stop()``
+        joins again against a fresh bounded deadline. Nothing here can turn a
+        live thread into a reported success, and every call is bounded by one
+        timeout.
         """
 
         with self._lifecycle_lock:
             first_call = not self._stop_requested
             self._stop_requested = True
+            finalized = self._stop_finalized
+        if finalized:
+            # STOPPED is a latch: nothing owned can come back to life, so a
+            # repeated stop() succeeds without re-running the wind-down.
+            self._log_finalized(first_call=first_call, deadline_exhausted=False)
+            return True
         waits = self._wind_down(self._settings.worker_join_timeout_s)
         return self._finish_shutdown(waits, first_call=first_call)
 
     @property
     def state(self) -> RuntimeState:
-        """Current lifecycle state, computed from what the runtime owns right now."""
+        """Current lifecycle state, computed from what the runtime owns right now.
+
+        ``STOPPED`` latches on its first observation (see ``RuntimeState``),
+        so this property is monotonic once shutdown has been requested:
+        ``STOPPING`` can become ``STOPPED``, never the other way round.
+        """
 
         with self._lifecycle_lock:
-            stop_requested = self._stop_requested
-        if not stop_requested:
-            started = self._capture.started or self._processor.started
-            return RuntimeState.RUNNING if started else RuntimeState.NEW
-        if self.workers_alive or self._closer.outstanding:
-            return RuntimeState.STOPPING
-        return RuntimeState.STOPPED
+            if not self._stop_requested:
+                started = self._capture.started or self._processor.started
+                return RuntimeState.RUNNING if started else RuntimeState.NEW
+            stopped, _, _, _ = self._latch_if_stopped_locked()
+        return RuntimeState.STOPPED if stopped else RuntimeState.STOPPING
 
     @property
     def workers_alive(self) -> bool:
@@ -313,48 +362,43 @@ class PipelineRuntime:
         ran and left nothing here) or is abandoned inside a driver call and
         may never reach that cleanup. Taking the tokens swaps them out under
         the worker's request lock, and the cleanup thread releases them, so
-        the caller never blocks on a driver and no token is released twice. A
-        token the worker already adopted has an owner and no source left to
-        release; handing it over would only inflate ``outstanding`` with a
-        no-op, so only tokens that are still unclaimed count as cleanup.
+        the caller never blocks on a driver and no token is released twice.
+        ``submit`` drops a token that was already claimed (it has an owner and
+        no source left to release), so only real work counts as outstanding.
         """
 
         for prepared in self._capture.take_pending_prepared():
-            if prepared.is_pending:
-                self._closer.submit(prepared)
+            self._closer.submit(prepared)
 
-    def _finish_shutdown(
-        self, waits: tuple[bool, bool, bool], *, first_call: bool
-    ) -> bool:
-        """Reconcile the real state after all waits and log it once, truthfully."""
+    def _latch_if_stopped_locked(self) -> tuple[bool, bool, bool, int]:
+        """Read owned work and latch STOPPED if none is left; lifecycle lock held.
 
-        deadline_exhausted = not all(waits)
-        # The final check is what the return value reports: everything the
-        # runtime owns, read after the last wait and immediately before
-        # returning, so a worker that exited after its join timed out is
-        # still counted as stopped.
+        Returns ``(stopped, capture_alive, processor_alive, cleanup_outstanding)``.
+        The latch decision and the refused-token registration in
+        ``select_camera`` share the lifecycle lock, so a registration is
+        either counted here (no latch until it drains) or happens after the
+        latch, where it can no longer change the lifecycle. Thread liveness
+        only ever moves from alive to exited, so a latch taken here can never
+        be contradicted later.
+        """
+
+        if self._stop_finalized:
+            return True, False, False, 0
         capture_alive = self._capture.is_alive
         processor_alive = self._processor.is_alive
         cleanup_outstanding = self._closer.outstanding
         stopped = not (capture_alive or processor_alive or cleanup_outstanding)
+        if stopped:
+            self._stop_finalized = True
+        return stopped, capture_alive, processor_alive, cleanup_outstanding
+
+    def _log_finalized(self, *, first_call: bool, deadline_exhausted: bool) -> None:
+        """Write the terminal ``pipeline_stopped`` line exactly once."""
+
         with self._lifecycle_lock:
-            newly_finalized = stopped and not self._stop_finalized
-            self._stop_finalized = self._stop_finalized or stopped
-        if not stopped:
-            logger.error(
-                "Pipeline shutdown incomplete; a worker or a prepared-camera "
-                "release is still outstanding",
-                extra={
-                    "event": "pipeline_shutdown_timeout",
-                    "capture_alive": capture_alive,
-                    "processor_alive": processor_alive,
-                    "cleanup_outstanding": cleanup_outstanding,
-                    "deadline_exhausted": deadline_exhausted,
-                    "timeout_s": self._settings.worker_join_timeout_s,
-                    "repeated_stop": not first_call,
-                },
-            )
-        elif newly_finalized:
+            newly_logged = not self._stop_logged
+            self._stop_logged = True
+        if newly_logged:
             logger.info(
                 "Pipeline stopped"
                 + (
@@ -372,4 +416,36 @@ class PipelineRuntime:
             logger.debug(
                 "Pipeline already stopped", extra={"event": "pipeline_stop_repeated"}
             )
-        return stopped
+
+    def _finish_shutdown(
+        self, waits: tuple[bool, bool, bool], *, first_call: bool
+    ) -> bool:
+        """Reconcile the real state after all waits and log it once, truthfully."""
+
+        deadline_exhausted = not all(waits)
+        # The final check is what the return value reports: everything the
+        # runtime owns, read after the last wait and immediately before
+        # returning, under the lifecycle lock, so a worker that exited after
+        # its join timed out is still counted as stopped and a refused-token
+        # registration cannot slip between the check and the latch.
+        with self._lifecycle_lock:
+            stopped, capture_alive, processor_alive, cleanup_outstanding = (
+                self._latch_if_stopped_locked()
+            )
+        if not stopped:
+            logger.error(
+                "Pipeline shutdown incomplete; a worker or a prepared-camera "
+                "release is still outstanding",
+                extra={
+                    "event": "pipeline_shutdown_timeout",
+                    "capture_alive": capture_alive,
+                    "processor_alive": processor_alive,
+                    "cleanup_outstanding": cleanup_outstanding,
+                    "deadline_exhausted": deadline_exhausted,
+                    "timeout_s": self._settings.worker_join_timeout_s,
+                    "repeated_stop": not first_call,
+                },
+            )
+            return False
+        self._log_finalized(first_call=first_call, deadline_exhausted=deadline_exhausted)
+        return True

@@ -134,8 +134,17 @@ class PreparedCameraCloser:
         self._thread: Thread | None = None
 
     def submit(self, prepared: PreparedCamera) -> None:
-        """Take over closing ``prepared``; returns at once, never touching the driver."""
+        """Take over closing ``prepared``; returns at once, never touching the driver.
 
+        A token that was already claimed is dropped on the spot: its source
+        belongs to the claimant, there is nothing left to release, and
+        queueing it would count a no-op as outstanding work. (A claim that
+        lands after this check merely makes the queued release a no-op; the
+        claim-once handover keeps that safe.)
+        """
+
+        if not prepared.is_pending:
+            return
         with self._condition:
             self._queue.append(prepared)
             self._ensure_thread()

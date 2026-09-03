@@ -189,7 +189,7 @@ def test_close_never_releases_a_pending_prepared_camera_on_the_ui_thread(qapp, c
         window.close()
         elapsed = time.perf_counter() - started
         assert elapsed < cfg.worker_join_timeout_s + 0.5, elapsed
-        assert window._closer.outstanding == 1  # handed off; the closer owns it now
+        assert window._runtime.prepared_closer.outstanding == 1  # runtime-owned hand-off
         assert wait_until(lambda: warm.close_calls == 1) and not warm.closed  # in flight, off the UI thread
         assert window._runtime.state is RuntimeState.STOPPING
         assert {r.event for r in caplog.records} >= {"pipeline_shutdown_timeout", "prepared_cleanup_timeout"}  # type: ignore[attr-defined]
@@ -200,4 +200,49 @@ def test_close_never_releases_a_pending_prepared_camera_on_the_ui_thread(qapp, c
         assert wait_until(lambda: warm.closed)
         assert all(s.closed for s in sources)
         assert warm.close_calls == 1  # exactly one release, by exactly one owner
+        assert window._runtime.state is RuntimeState.STOPPED
+
+
+def test_blocked_discovery_cleanup_is_accounted_at_close_without_blocking_the_ui(qapp, caplog) -> None:  # type: ignore[no-untyped-def]
+    """Discovery-owned cleanup participates in the window's single shutdown
+    deadline and its timeout is attributed to discovery, never to the runtime."""
+
+    import logging
+    from threading import Event
+
+    from camera_fakes import wait_until
+    from gazefix.camera.models import CameraDevice
+    from gazefix.camera.source import PreparedCamera
+    from gazefix.pipeline.runtime import RuntimeState
+
+    caplog.set_level(logging.ERROR, logger="gazefix.ui.main_window")
+    sources: list[FakeCameraSource] = []
+    cfg = replace(settings(1), worker_join_timeout_s=0.3)
+    window = MainWindow(cfg, "log", source_factory=factory_for(sources))
+    gate = Event()
+    warm = FakeCameraSource(close_gate=gate)
+    device = CameraDevice(9)
+    prepared = PreparedCamera(device, warm, warm.open(device))
+    try:
+        assert pump_until(lambda: window._first_frame_presented)
+        # A discovery run that finished while the window was closing leaves its
+        # unadopted token with the window's discovery closer.
+        window._discovery_closer.submit(prepared)
+
+        started = time.perf_counter()
+        window.close()
+        elapsed = time.perf_counter() - started
+        assert elapsed < cfg.worker_join_timeout_s + 0.5, elapsed
+        assert window._runtime.state is RuntimeState.STOPPED  # runtime unaffected
+        assert window._runtime.prepared_closer.outstanding == 0
+        assert window._discovery_closer.outstanding == 1
+        records = [r for r in caplog.records if getattr(r, "event", None) == "prepared_cleanup_timeout"]
+        assert records, [getattr(r, "event", None) for r in caplog.records]
+        assert records[-1].runtime_cleanup_outstanding == 0  # type: ignore[attr-defined]
+        assert records[-1].discovery_cleanup_outstanding == 1  # type: ignore[attr-defined]
+        assert not [r for r in caplog.records if getattr(r, "event", None) == "pipeline_shutdown_timeout"]
+    finally:
+        gate.set()
+        assert wait_until(lambda: warm.closed)
+        assert warm.close_calls == 1
         assert window._runtime.state is RuntimeState.STOPPED

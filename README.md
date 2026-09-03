@@ -171,10 +171,12 @@ remain in local process memory and are never transmitted.
 Closing the window waits at most `worker_join_timeout_s` in total. A camera
 release is a driver call with no upper bound, so the window never performs one:
 the capture worker releases its own camera on its thread, and a validated camera
-that was never adopted is released by a small cleanup thread the window joins
-within the same deadline. If a driver does not return in time the log says which
-worker or release is still outstanding, and that daemon thread ends with the
-process.
+that was never adopted is released by a small cleanup thread. Cleanup is
+owner-scoped: the pipeline runtime owns one cleanup thread (its lifecycle state
+reflects only its own work) and the window owns a second one for camera
+discovery, and the window joins both within the same single deadline. If a
+driver does not return in time the log says which owner still has work, and the
+daemon thread ends with the process.
 
 See [docs/architecture.md](docs/architecture.md) for the pipeline and shutdown
 details.

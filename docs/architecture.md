@@ -161,21 +161,44 @@ Timeouts are logged explicitly rather than silently hiding a stuck camera driver
 
 ### Runtime state is derived from what the runtime owns
 
-`PipelineRuntime` records one fact of its own: that `stop()` (or a `start()`
-that failed part-way) has been requested. Everything else is read from the
-things it owns when it is asked for (`PipelineRuntime.state`): whether a worker
-thread has been started (`Thread.ident`), whether one is alive, and whether a
-prepared-camera release handed to the cleanup thread is still outstanding.
+`PipelineRuntime` records two facts of its own: that `stop()` (or a `start()`
+that failed part-way) has been requested, and, once shutdown completed, that it
+is final. Everything else is read from the things it owns when it is asked for
+(`PipelineRuntime.state`): whether a worker thread has been started
+(`Thread.ident`), whether one is alive, and whether a runtime-owned
+prepared-camera release is still outstanding.
+
+Cleanup is owner-scoped. The runtime creates its own cleanup thread in its
+constructor and nothing else can submit work to it through the runtime's API;
+discovery's cleanup lives on a separate closer owned by the window. Work owned
+by discovery therefore cannot appear in, or mutate, the runtime's lifecycle.
 
 ```text
 NEW       no worker thread started, stop() not requested
 RUNNING   a worker thread started, stop() not requested
-STOPPING  stop() requested; a worker thread is alive or a handed-off release
-          is still outstanding
-STOPPED   stop() requested; no worker thread is alive and the cleanup thread the
-          runtime uses (shared with discovery when the window wires it so) has
-          no release outstanding
+STOPPING  stop() requested; a worker thread is alive or a runtime-owned
+          release is still outstanding
+STOPPED   stop() requested; nothing runtime-owned is alive or outstanding.
+          A latch: entered once, under the lifecycle lock, and never left.
 ```
+
+`STOPPED` is monotonic by construction: it is reported only after the latch is
+set, the latch is set only under the lifecycle lock when no owned worker is
+alive and no runtime-owned release is outstanding, and it is never cleared.
+Worker threads only move from alive to exited, and the two ways runtime-owned
+cleanup is registered are serialized with the latch: the shutdown path submits
+before its final check inside the same `stop()` call, and a refused
+`select_camera` submits under the lifecycle lock itself. A registration
+therefore either lands before the latch decision (it is counted, `stop()`
+returns `False`, and the state stays `STOPPING` until the release returns) or
+after it, in which case the token becomes a detached disposal: the cleanup
+thread still releases it (never on the caller's thread, never leaked, the
+claim-once handover still rules out a double close), it is visible to
+application-level accounting through `prepared_closer.outstanding`, but it is
+no longer lifecycle work and the latched `STOPPED` holds. `STOPPED` can never
+transition back to `STOPPING`, and `stop() == True` can never race with new
+runtime-owned cleanup appearing afterwards. A `stop()` called after the latch
+returns `True` immediately.
 
 **Transactional start.** `start()` launches the processing worker and then the
 capture worker. If the second launch raises, the runtime marks itself spent,
@@ -186,14 +209,14 @@ started worker outlives that deadline, `state` reads `STOPPING` (never `NEW`)
 and `stop()` keeps tracking it. Joining a worker that never started is a no-op.
 
 **Truthful stop.** `stop()` signals both workers, hands the prepared cameras the
-worker can no longer adopt to the cleanup thread at once (so their release
-overlaps the joins rather than starting after them), joins the workers against
-one deadline (`worker_join_timeout_s`), sweeps once more for a token the worker
-orphaned while winding down, and waits, still within the same deadline, for
-those releases. Then it reconciles: after every wait and immediately before
-returning it reads whether either worker thread is alive and whether any release
-is outstanding, and that final check is both the return value and what `state`
-reports. Two things are deliberately kept apart: whether the deadline ran out
+worker can no longer adopt to the runtime's cleanup thread at once (so their
+release overlaps the joins rather than starting after them), joins the workers
+against one deadline (`worker_join_timeout_s`), sweeps once more for a token the
+worker orphaned while winding down, and waits, still within the same deadline,
+for those releases. Then it reconciles under the lifecycle lock: it reads
+whether either worker thread is alive and whether any runtime-owned release is
+outstanding, latches `STOPPED` when nothing is left, and that final check is
+both the return value and what `state` reports. Two things are deliberately kept apart: whether the deadline ran out
 during the call (`deadline_exhausted` in the log) and whether owned work is
 alive at the moment of return. A join that timed out but whose thread exited
 before the final check yields `True` and `STOPPED`; a thread still inside an
@@ -206,39 +229,61 @@ written exactly once, on the call that first observes everything gone.
 
 After `stop()` has been requested the runtime accepts no further camera
 requests: `select_camera` publishes nothing, returns the current generation, and
-hands a prepared camera it was given to the cleanup thread (the capture worker
-enforces the same rule for requests that reach it directly after its stop event
-is set). A runtime is single-use because Python threads cannot be restarted;
-`start()` after `stop()` raises instead of pretending, and a fresh
+hands a prepared camera it was given to the runtime's cleanup thread, under the
+lifecycle lock as described above (the capture worker enforces the same
+never-leak rule for requests that reach it directly after its stop event is
+set; within the runtime that path is unreachable because `select_camera`
+refuses first). A runtime is single-use because Python threads cannot be
+restarted; `start()` after `stop()` raises instead of pretending, and a fresh
 `PipelineRuntime` is the restart path.
 
-### Prepared-camera cleanup is owned work, off the UI thread
+### Prepared-camera cleanup is owner-scoped work, off the UI thread
 
 Releasing a camera is a driver call with no upper bound, so no thread that must
 stay responsive performs one. The capture worker releases the camera it reads on
-its own thread, and only there. Prepared cameras that nobody adopted (a request
-the worker never applied before shutdown, a request refused after shutdown
-began, a discovery result delivered while the window was already closing) are
-handed to `PreparedCameraCloser`, one daemon thread owned by the window and
-shared by the runtime and the discovery service:
+its own thread, and only there. Prepared cameras that nobody adopted are handed
+to a `PreparedCameraCloser`, a daemon thread with a condition-guarded queue,
+and every closer has exactly one owner:
 
-- `submit` transfers the duty to close a token and returns at once.
+- The **runtime's closer** is created inside `PipelineRuntime` and is not
+  injectable, so only the runtime ever submits to it: the tokens `stop()`
+  takes from the capture worker, and the token of a `select_camera` refused
+  after shutdown began. Its `outstanding` count is therefore runtime-owned
+  work by construction (or, after the `STOPPED` latch, detached disposals).
+- The **discovery closer** is created by the window and given to the
+  discovery service, which hands it the unadopted token its `join` would
+  otherwise release on the calling thread. Its work is discovery-owned and
+  never touches the runtime's lifecycle.
+
+Shared mechanics of every closer:
+
+- `submit` transfers the duty to close a token and returns at once; a token
+  that was already claimed is dropped on the spot, so a no-op is never
+  counted as outstanding work.
 - The token's claim-once handover makes the closer safe against every other
   party that still holds a reference (the capture worker's own cleanup, the UI
-  adopting a discovery result): whichever side claims first releases, the other
-  finds nothing to do, so a token is never released twice or by two threads at
-  once. Nobody reads an unclaimed source, so a release never overlaps a read.
-- The release counts as outstanding until the driver call returns, so `state`
-  reads `STOPPING` and `stop()` returns `False` while it is in flight; `join`
-  waits at most the time it is given.
-- A release that never returns keeps the daemon thread alive until process exit,
-  exactly like a capture worker abandoned inside a driver call, and the tokens
-  queued behind it stay counted rather than forgotten.
+  adopting a discovery result, another closer): whichever side claims first
+  releases, the other finds nothing to do, so a token is never released twice
+  or by two threads at once. Nobody reads an unclaimed source, so a release
+  never overlaps a read.
+- A release counts as outstanding until the driver call returns; `join` waits
+  at most the time it is given, and a failed thread launch is retried on the
+  next `submit` or `join` with the token still counted.
+- A release that never returns keeps the daemon thread alive until process
+  exit, exactly like a capture worker abandoned inside a driver call, and the
+  tokens queued behind it stay counted rather than forgotten.
 
-`closeEvent` therefore performs no release at all: it signals discovery, calls
-`stop()`, joins discovery, and joins the closer, every wait bounded by the one
-deadline, and logs `pipeline_shutdown_timeout` or `prepared_cleanup_timeout` for
-anything still outstanding when it returns.
+**Application shutdown aggregates the owners.** `closeEvent` performs no
+release at all: against one deadline (`worker_join_timeout_s`) it signals
+discovery, calls `runtime.stop()` (which bounds its own joins by the same
+duration), joins the discovery thread, then joins the runtime's closer and the
+discovery closer with whatever remains of the deadline. Runtime success is the
+runtime's own verdict; overall shutdown success is the conjunction, and each
+shortfall is attributed to its owner: `pipeline_shutdown_timeout` for the
+runtime's workers or cleanup, `discovery_shutdown_timeout` for the discovery
+thread, and `prepared_cleanup_timeout` with separate
+`runtime_cleanup_outstanding` and `discovery_cleanup_outstanding` counts for
+the closers. The Qt thread never waits past the one deadline.
 
 ## Backend and discovery policy
 
