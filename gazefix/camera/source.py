@@ -9,10 +9,11 @@ the diagnostic.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import logging
 import os
-from threading import Event, Lock
+from threading import Condition, Event, Lock, Thread
 import time
 from typing import Callable, Protocol
 
@@ -102,6 +103,112 @@ class PreparedCamera:
             return self._source is not None
 
 
+class PreparedCameraCloser:
+    """Release unclaimed prepared cameras on one owned daemon thread.
+
+    Releasing a camera is a driver call with no upper bound, so no thread that
+    must stay responsive (the Qt thread inside ``closeEvent``, a runtime
+    caller inside ``stop()``) may perform it. ``submit`` transfers the duty to
+    close a token here; from then on this thread is the only party that will
+    call ``close_if_unclaimed`` on it. Because a token hands its source to
+    exactly one claimant, a party that still holds a reference (a capture
+    worker that adopts it, its own shutdown cleanup) cannot release the same
+    source a second time or at the same time: whichever side claims first
+    releases, the other finds nothing to do. Nobody reads an unclaimed source,
+    so a release here never overlaps a read.
+
+    The work is tracked until the release call returns: ``outstanding`` counts
+    the queued tokens plus the one whose release is in flight, so it stays
+    truthful while a driver blocks, and ``join`` waits at most ``timeout`` for
+    the count to reach zero. A release that never returns keeps this daemon
+    thread alive until process exit, exactly like a capture worker abandoned
+    inside a driver call; the tokens queued behind it stay counted as
+    outstanding rather than being forgotten.
+    """
+
+    def __init__(self, name: str = "gazefix-prepared-close") -> None:
+        self._name = name
+        self._condition = Condition()
+        self._queue: deque[PreparedCamera] = deque()
+        self._in_flight: PreparedCamera | None = None
+        self._thread: Thread | None = None
+
+    def submit(self, prepared: PreparedCamera) -> None:
+        """Take over closing ``prepared``; returns at once, never touching the driver."""
+
+        with self._condition:
+            self._queue.append(prepared)
+            if self._thread is None:
+                thread = Thread(target=self._run, name=self._name, daemon=True)
+                try:
+                    thread.start()
+                except RuntimeError:
+                    # Out of threads: the token stays queued and counted as
+                    # outstanding, and the next submit tries again.
+                    logger.exception(
+                        "Prepared camera cleanup thread could not start",
+                        extra={"event": "prepared_camera_closer_start_error"},
+                    )
+                    return
+                self._thread = thread
+
+    @property
+    def outstanding(self) -> int:
+        """Tokens not yet released: queued plus the one whose release is in flight."""
+
+        with self._condition:
+            return len(self._queue) + (1 if self._in_flight is not None else 0)
+
+    def join(self, timeout: float) -> bool:
+        """Wait at most ``timeout`` seconds for every submitted token to be released."""
+
+        with self._condition:
+            return self._condition.wait_for(self._idle, timeout=max(0.0, timeout))
+
+    def _idle(self) -> bool:
+        return not self._queue and self._in_flight is None
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                if not self._queue:
+                    # Exit when idle; ``submit`` starts a fresh thread when it
+                    # finds none, and it checks that under the same condition,
+                    # so a token can never be queued behind a thread that is
+                    # about to leave.
+                    self._thread = None
+                    self._condition.notify_all()
+                    return
+                prepared = self._queue.popleft()
+                self._in_flight = prepared
+            try:
+                started = time.perf_counter()
+                if prepared.close_if_unclaimed():
+                    logger.info(
+                        "Released a prepared camera nobody adopted",
+                        extra={
+                            "event": "prepared_camera_discarded",
+                            "camera_index": prepared.device.index,
+                            "release_ms": _elapsed_ms(started),
+                        },
+                    )
+            except Exception:
+                # ``close_if_unclaimed`` already absorbs source errors; this
+                # only guards the loop itself so one bad token cannot strand
+                # the ones queued behind it.
+                logger.exception(
+                    "Prepared camera cleanup failed",
+                    extra={
+                        "event": "prepared_camera_close_error",
+                        "camera_index": prepared.device.index,
+                    },
+                )
+            finally:
+                with self._condition:
+                    self._in_flight = None
+                    self._condition.notify_all()
+
+
 @dataclass(frozen=True, slots=True)
 class BackendOpenOutcome:
     """What one production open of one backend did and how long each step took.
@@ -113,10 +220,12 @@ class BackendOpenOutcome:
     - ``open_ms``: the ``VideoCapture.open`` call alone. DirectShow receives
       width and height as open parameters and builds its capture graph inside
       this call; Media Foundation negotiates its source reader here.
-    - ``configure_ms``: the conditional width/height/FPS ``set`` calls plus the
-      buffer-size hint. ``format_sets_applied`` is how many ``set`` calls of
-      width, height, or FPS actually ran (each one renegotiates the stream on
-      Media Foundation and rebuilds the graph on DirectShow).
+    - ``configure_ms``: the width/height/FPS property reads that decide
+      whether each value must be set, the ``set`` calls that follow for the
+      values that differ, and the buffer-size hint. ``format_sets_applied``
+      is how many ``set`` calls of width, height, or FPS actually ran (each
+      one renegotiates the stream on Media Foundation and rebuilds the graph
+      on DirectShow). The reads that fill ``result`` afterwards are outside it.
     - ``first_frame_ms``: the bounded first-frame validation reads, including
       the retry delays between them; ``validation_reads`` counts the attempts.
 

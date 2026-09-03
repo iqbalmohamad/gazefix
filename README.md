@@ -93,8 +93,9 @@ To measure the Media Foundation open cost with and without hardware transforms:
 The tool reports one JSON object per index/backend combination, including whether
 it opened and validated, requested and reported backend, negotiated size/FPS,
 observed sample FPS, successful reads, failed reads, and the measured `open_ms`,
-`configure_ms` (with `format_sets_applied`), `first_frame_ms` (with
-`validation_reads`), and `release_ms`. It releases every camera before exiting,
+`configure_ms` (the property reads that decide what to set, the sets that
+follow, and the buffer hint; `format_sets_applied` counts the sets),
+`first_frame_ms` (with `validation_reads`), and `release_ms`. It releases every camera before exiting,
 also when interrupted with Ctrl+C (exit code 130). Exit code 0 means at least one
 index/backend combination validated, 1 means none did, 2 means bad arguments.
 
@@ -166,6 +167,14 @@ Structured JSON-line logs rotate locally at:
 
 Logs contain lifecycle and diagnostic metadata, never raw frames. Webcam frames
 remain in local process memory and are never transmitted.
+
+Closing the window waits at most `worker_join_timeout_s` in total. A camera
+release is a driver call with no upper bound, so the window never performs one:
+the capture worker releases its own camera on its thread, and a validated camera
+that was never adopted is released by a small cleanup thread the window joins
+within the same deadline. If a driver does not return in time the log says which
+worker or release is still outstanding, and that daemon thread ends with the
+process.
 
 See [docs/architecture.md](docs/architecture.md) for the pipeline and shutdown
 details.

@@ -45,3 +45,32 @@ def test_waiter_receives_newest_published_value() -> None:
     assert not thread.is_alive()
     assert observed == [42]
 
+
+
+def test_wait_is_released_by_a_cancellation_set_before_or_during_the_wait() -> None:
+    """A stop flag set before the waiter arrives must not cost it the timeout."""
+
+    from threading import Event
+
+    buffer: LatestValueBuffer[int] = LatestValueBuffer()
+    stop = Event()
+    stop.set()
+    started = time.perf_counter()
+    assert buffer.wait_for_latest(timeout=1.0, cancelled=stop.is_set) is None
+    assert time.perf_counter() - started < 0.5  # returned at once, not after the timeout
+
+    stop = Event()
+    released: list[float] = []
+
+    def consume() -> None:
+        began = time.perf_counter()
+        buffer.wait_for_latest(timeout=5.0, cancelled=stop.is_set)
+        released.append(time.perf_counter() - began)
+
+    thread = Thread(target=consume)
+    thread.start()
+    time.sleep(0.02)
+    stop.set()  # flag first, then the notification, as ProcessingWorker.stop does
+    buffer.wake_all()
+    thread.join(2.0)
+    assert not thread.is_alive() and released and released[0] < 1.0

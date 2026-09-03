@@ -150,7 +150,8 @@ def test_timed_out_stop_reports_false_until_the_capture_worker_really_exits(capl
 
         timeouts = events(caplog, "pipeline_shutdown_timeout")
         assert len(timeouts) == 2 and all(r.levelno == logging.ERROR for r in timeouts)
-        assert timeouts[0].capture_stopped is False and timeouts[0].processor_stopped is True  # type: ignore[attr-defined]
+        assert timeouts[0].capture_alive is True and timeouts[0].processor_alive is False  # type: ignore[attr-defined]
+        assert all(r.deadline_exhausted for r in timeouts)  # type: ignore[attr-defined]
         assert [r.repeated_stop for r in timeouts] == [False, True]  # type: ignore[attr-defined]
         assert events(caplog, "pipeline_stopped") == []
     finally:
@@ -183,7 +184,7 @@ def test_timed_out_stop_tracks_a_stuck_processing_worker_independently(caplog: p
         assert not runtime._capture.is_alive and runtime._processor.is_alive
         assert all(s.closed for s in sources)  # capture released its camera on its own thread
         record = events(caplog, "pipeline_shutdown_timeout")[-1]
-        assert record.capture_stopped is True and record.processor_stopped is False  # type: ignore[attr-defined]
+        assert record.capture_alive is False and record.processor_alive is True  # type: ignore[attr-defined]
         assert runtime.stop() is False  # still truthful while the stage is blocked
     finally:
         gate.set()
@@ -203,9 +204,10 @@ def test_timed_out_stop_still_closes_a_prepared_camera_the_worker_can_no_longer_
     runtime.select_camera(CameraDevice(5), prepared)  # lands while the worker is inside the driver open
     try:
         assert runtime.stop() is False
-        # Closed by stop() on the caller's thread: the worker may never reach its
-        # own cleanup, and nobody reads an unclaimed source, so this is safe.
-        assert warm.closed and not prepared.is_pending
+        # Taken from the worker by stop() (it may never reach its own cleanup)
+        # and released on the cleanup thread, never on the caller's.
+        assert runtime._capture.take_pending_prepared() == []
+        assert wait_until(lambda: warm.closed) and not prepared.is_pending
     finally:
         gate.set()
     assert wait_until(lambda: not runtime.workers_alive, timeout=3.0)
@@ -226,7 +228,7 @@ def test_camera_requests_after_stop_are_refused_and_their_prepared_cameras_close
         assert runtime.stop() is False  # STOPPING: worker alive inside the driver call
         warm, prepared = prepared_camera(3)
         assert runtime.select_camera(CameraDevice(3), prepared) == first  # no new generation
-        assert warm.closed and not prepared.is_pending
+        assert wait_until(lambda: warm.closed) and not prepared.is_pending
         assert runtime.current_request_id == first
     finally:
         gate.set()
@@ -235,11 +237,15 @@ def test_camera_requests_after_stop_are_refused_and_their_prepared_cameras_close
 
     warm, prepared = prepared_camera(4)  # STOPPED: refused just the same
     assert runtime.select_camera(CameraDevice(4), prepared) == first
-    assert warm.closed and not prepared.is_pending
+    assert wait_until(lambda: warm.closed) and not prepared.is_pending
+    assert runtime.prepared_closer.join(2.0)
     assert runtime.select_camera(None) == first
     assert len(sources) == 1  # nothing was ever opened for a refused request
     refused = events(caplog, "camera_switch_refused")
-    assert [r.runtime_state for r in refused] == ["stopping", "stopped", "stopped"]  # type: ignore[attr-defined]
+    states = [r.runtime_state for r in refused]  # type: ignore[attr-defined]
+    # The second refusal hands its token to the cleanup thread, so at the
+    # moment it is logged that release may still be outstanding.
+    assert states[0] == "stopping" and states[1] in {"stopping", "stopped"} and states[2] == "stopped"
 
 
 def test_stop_before_start_is_stopped_and_start_is_then_refused() -> None:

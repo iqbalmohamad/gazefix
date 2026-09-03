@@ -32,6 +32,7 @@ class FakeCameraSource:
         read_exception: Exception | None = None,
         close_exception: Exception | None = None,
         fail_reads: bool = False,
+        close_gate: Event | None = None,
     ) -> None:
         if registry is not None:
             registry.append(self)
@@ -41,6 +42,9 @@ class FakeCameraSource:
         self.read_exception = read_exception
         self.close_exception = close_exception
         self.fail_reads = fail_reads
+        # When set, ``close`` blocks until the gate opens (bounded), modelling
+        # a driver release that does not return promptly.
+        self.close_gate = close_gate
         self.index: int | None = None
         self.open_calls = 0
         self.reads = 0
@@ -81,6 +85,8 @@ class FakeCameraSource:
 
     def close(self) -> None:
         self.close_calls += 1
+        if self.close_gate is not None:
+            self.close_gate.wait(10.0)
         self.closed = True
         if self.close_exception is not None:
             raise self.close_exception

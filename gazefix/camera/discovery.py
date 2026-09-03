@@ -10,7 +10,12 @@ from typing import Callable
 
 from gazefix.camera.backends import supports_thread_handoff
 from gazefix.camera.models import CameraDevice
-from gazefix.camera.source import CameraSource, OpenCVCameraSource, PreparedCamera
+from gazefix.camera.source import (
+    CameraSource,
+    OpenCVCameraSource,
+    PreparedCamera,
+    PreparedCameraCloser,
+)
 from gazefix.config import AppSettings
 
 
@@ -131,6 +136,12 @@ class CameraDiscoveryService:
     the first validated candidate is kept provisionally and replaced by the
     preferred index when that validates. Backends whose captures must be created
     and destroyed on one thread (DirectShow) are never handed over.
+
+    The discovery thread releases its own unclaimed prepared camera when a run
+    stops, fails, or is superseded by the next run. The one release that would
+    otherwise land on the caller's thread, in ``join`` after the thread has
+    delivered a result nobody adopted, is handed to ``prepared_closer`` when
+    one is given, so a UI thread joining at shutdown never blocks on a driver.
     """
 
     def __init__(
@@ -140,12 +151,14 @@ class CameraDiscoveryService:
         on_error: Callable[[str], None],
         source_factory: Callable[[AppSettings], CameraSource] = OpenCVCameraSource,
         keep_first_open: bool = True,
+        prepared_closer: PreparedCameraCloser | None = None,
     ) -> None:
         self._settings = settings
         self._on_finished = on_finished
         self._on_error = on_error
         self._source_factory = source_factory
         self._keep_first_open = keep_first_open
+        self._prepared_closer = prepared_closer
         self._stop_event = Event()
         self._thread: Thread | None = None
         self._lock = Lock()
@@ -190,11 +203,17 @@ class CameraDiscoveryService:
             source.interrupt()
 
     def join(self, timeout: float) -> bool:
+        """Bounded wait for the thread; an unadopted prepared camera is not released here.
+
+        With a ``prepared_closer`` the token goes to its thread; without one it
+        is released on the calling thread, which may block on the driver.
+        """
+
         with self._lock:
             thread = self._thread
         if thread is not None:
             thread.join(timeout)
-        self._close_unclaimed_prepared()
+        self._close_unclaimed_prepared(deferred=True)
         return thread is None or not thread.is_alive()
 
     def stop(self, timeout: float) -> bool:
@@ -291,11 +310,26 @@ class CameraDiscoveryService:
                 },
             )
 
-    def _close_unclaimed_prepared(self) -> None:
+    def _close_unclaimed_prepared(self, deferred: bool = False) -> None:
         with self._lock:
             prepared = self._prepared
             self._prepared = None
-        if prepared is not None and prepared.close_if_unclaimed():
+        if prepared is None:
+            return
+        if deferred and self._prepared_closer is not None:
+            if prepared.is_pending:
+                # Whoever claims first releases; the closer finds nothing to
+                # do if the UI adopted the token meanwhile.
+                self._prepared_closer.submit(prepared)
+                logger.info(
+                    "Prepared camera nobody adopted handed to cleanup",
+                    extra={
+                        "event": "prepared_camera_deferred_close",
+                        "camera_index": prepared.device.index,
+                    },
+                )
+            return
+        if prepared.close_if_unclaimed():
             logger.info(
                 "Closed prepared camera that was never adopted",
                 extra={

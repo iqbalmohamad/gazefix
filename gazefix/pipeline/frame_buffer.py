@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from threading import Condition
-from typing import Generic, TypeVar
+from typing import Callable, Generic, TypeVar
 
 
 T = TypeVar("T")
@@ -45,12 +45,27 @@ class LatestValueBuffer(Generic[T]):
             return self._consume_if_new(after_sequence)
 
     def wait_for_latest(
-        self, after_sequence: int = 0, timeout: float | None = None
+        self,
+        after_sequence: int = 0,
+        timeout: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> VersionedValue[T] | None:
+        """Wait for a value newer than ``after_sequence``.
+
+        ``cancelled`` is checked as part of the wait predicate, so a consumer
+        that sets its stop flag and then calls ``wake_all`` is released even
+        when the flag was set before the waiter reached this call; without
+        it that notification would be lost and the waiter would sleep out
+        ``timeout``.
+        """
+
+        def ready() -> bool:
+            return self._value is not None and self._sequence > after_sequence
+
         with self._condition:
-            if self._value is None or self._sequence <= after_sequence:
+            if not ready() and not (cancelled is not None and cancelled()):
                 self._condition.wait_for(
-                    lambda: self._value is not None and self._sequence > after_sequence,
+                    lambda: ready() or (cancelled is not None and cancelled()),
                     timeout=timeout,
                 )
             return self._consume_if_new(after_sequence)

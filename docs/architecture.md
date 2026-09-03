@@ -132,10 +132,10 @@ permanent: every open starts from the current preference and the platform order.
 ### Shutdown
 
 On window close, timers stop, discovery is told to stop, capture and processing are
-asked to stop, and all workers are joined against a single deadline
-(`worker_join_timeout_s`) rather than one timeout per worker in sequence. Capture
-gets a short grace period so an ordinary read can return and the owning thread can
-release its source safely.
+asked to stop, and all workers and the prepared-camera cleanup thread are joined
+against a single deadline (`worker_join_timeout_s`) rather than one timeout per
+worker in sequence. Capture gets a short grace period so an ordinary read can
+return and the owning thread can release its source safely.
 
 What can and cannot be cancelled:
 
@@ -159,38 +159,82 @@ What can and cannot be cancelled:
 
 Timeouts are logged explicitly rather than silently hiding a stuck camera driver.
 
-### Runtime state is derived from worker liveness
+### Runtime state is derived from what the runtime owns
 
-`PipelineRuntime` keeps only two facts of its own: whether `start()` launched the
-workers and whether `stop()` has been requested. Everything else is read from the
-worker threads when it is asked for (`PipelineRuntime.state`):
+`PipelineRuntime` records one fact of its own: that `stop()` (or a `start()`
+that failed part-way) has been requested. Everything else is read from the
+things it owns when it is asked for (`PipelineRuntime.state`): whether a worker
+thread has been started (`Thread.ident`), whether one is alive, and whether a
+prepared-camera release handed to the cleanup thread is still outstanding.
 
 ```text
-NEW       start() not yet called
-RUNNING   workers started, stop() not requested
-STOPPING  stop() requested and at least one worker thread is still alive
-STOPPED   stop() requested and no worker thread is alive
+NEW       no worker thread started, stop() not requested
+RUNNING   a worker thread started, stop() not requested
+STOPPING  stop() requested; a worker thread is alive or a handed-off release
+          is still outstanding
+STOPPED   stop() requested; nothing owned is alive or outstanding
 ```
 
-`stop()` returns `True` only when every owned worker has actually terminated by
-the time it returns. A shutdown that runs out its deadline while a worker sits in
-an uncancellable driver call returns `False`, logs `pipeline_shutdown_timeout`
-with which worker survived, and leaves the runtime `STOPPING`. Calling `stop()`
-again joins the surviving worker against a fresh, equally bounded deadline and
-returns `True` only once the thread has exited; there is no flag a repeated call
-can clear to manufacture a success. Every `stop()` closes the prepared cameras
-the worker can no longer adopt, on the caller's thread, because the worker may
-never reach its own cleanup: the token hands its source to exactly one closer,
-and nobody reads an unclaimed source, so this is the same rule discovery applies.
-The terminal `pipeline_stopped` line is written exactly once, on the call that
-first observes every worker gone.
+**Transactional start.** `start()` launches the processing worker and then the
+capture worker. If the second launch raises, the runtime marks itself spent,
+signals the worker that did start, joins it against one bounded deadline, hands
+any pending prepared camera to the cleanup thread, and re-raises the original
+error. A caller never inherits a live thread from a failed `start()`; if the
+started worker outlives that deadline, `state` reads `STOPPING` (never `NEW`)
+and `stop()` keeps tracking it. Joining a worker that never started is a no-op.
+
+**Truthful stop.** `stop()` signals both workers, joins them against one
+deadline (`worker_join_timeout_s`), hands the prepared cameras the worker can no
+longer adopt to the cleanup thread, and waits, still within the same deadline,
+for those releases. Then it reconciles: after every wait and immediately before
+returning it reads whether either worker thread is alive and whether any release
+is outstanding, and that final check is both the return value and what `state`
+reports. Two things are deliberately kept apart: whether the deadline ran out
+during the call (`deadline_exhausted` in the log) and whether owned work is
+alive at the moment of return. A join that timed out but whose thread exited
+before the final check yields `True` and `STOPPED`; a thread still inside an
+uncancellable driver call yields `False` and `STOPPING`, logged as
+`pipeline_shutdown_timeout` with which worker or release survived. Calling
+`stop()` again joins whatever survived against a fresh, equally bounded deadline
+and returns `True` only once nothing owned is left; there is no flag a repeated
+call can clear to manufacture a success. The terminal `pipeline_stopped` line is
+written exactly once, on the call that first observes everything gone.
 
 After `stop()` has been requested the runtime accepts no further camera
 requests: `select_camera` publishes nothing, returns the current generation, and
-closes a prepared camera it was handed (the capture worker enforces the same rule
-for requests that reach it directly after its stop event is set). A runtime is
-single-use because Python threads cannot be restarted; `start()` after `stop()`
-raises instead of pretending, and a fresh `PipelineRuntime` is the restart path.
+hands a prepared camera it was given to the cleanup thread (the capture worker
+enforces the same rule for requests that reach it directly after its stop event
+is set). A runtime is single-use because Python threads cannot be restarted;
+`start()` after `stop()` raises instead of pretending, and a fresh
+`PipelineRuntime` is the restart path.
+
+### Prepared-camera cleanup is owned work, off the UI thread
+
+Releasing a camera is a driver call with no upper bound, so no thread that must
+stay responsive performs one. The capture worker releases the camera it reads on
+its own thread, and only there. Prepared cameras that nobody adopted (a request
+the worker never applied before shutdown, a request refused after shutdown
+began, a discovery result delivered while the window was already closing) are
+handed to `PreparedCameraCloser`, one daemon thread owned by the window and
+shared by the runtime and the discovery service:
+
+- `submit` transfers the duty to close a token and returns at once.
+- The token's claim-once handover makes the closer safe against every other
+  party that still holds a reference (the capture worker's own cleanup, the UI
+  adopting a discovery result): whichever side claims first releases, the other
+  finds nothing to do, so a token is never released twice or by two threads at
+  once. Nobody reads an unclaimed source, so a release never overlaps a read.
+- The release counts as outstanding until the driver call returns, so `state`
+  reads `STOPPING` and `stop()` returns `False` while it is in flight; `join`
+  waits at most the time it is given.
+- A release that never returns keeps the daemon thread alive until process exit,
+  exactly like a capture worker abandoned inside a driver call, and the tokens
+  queued behind it stay counted rather than forgotten.
+
+`closeEvent` therefore performs no release at all: it signals discovery, calls
+`stop()`, joins discovery, and joins the closer, every wait bounded by the one
+deadline, and logs `pipeline_shutdown_timeout` or `prepared_cleanup_timeout` for
+anything still outstanding when it returns.
 
 ## Backend and discovery policy
 
@@ -246,7 +290,8 @@ returns a `BackendOpenOutcome` whose timing boundaries are fixed there:
 ```text
 open_ms         VideoCapture.open alone (DirectShow gets width/height as open
                 parameters and builds its graph inside this call)
-configure_ms    the conditional width/height/FPS set calls plus the buffer hint;
+configure_ms    the width/height/FPS property reads that decide what to set,
+                the set calls for the values that differ, and the buffer hint;
                 format_sets_applied counts the sets that actually ran
 first_frame_ms  the bounded validation reads including the retry delays between
                 them; validation_reads counts the attempts
