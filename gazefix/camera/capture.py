@@ -523,7 +523,18 @@ class CameraCaptureWorker:
         """Exponential backoff from reconnect_delay_s, capped at reconnect_delay_max_s."""
 
         base = self._settings.reconnect_delay_s
-        return min(base * (2 ** open_failures), self._settings.reconnect_delay_max_s)
+        cap = self._settings.reconnect_delay_max_s
+        if open_failures <= 0 or base <= 0:
+            return min(base, cap)
+        # Double iteratively and stop at the cap: ``base * 2 ** open_failures``
+        # overflows once open_failures grows past ~1024, and a camera that keeps
+        # failing to open must stay recoverable rather than kill the worker.
+        delay = base
+        for _ in range(open_failures):
+            if delay >= cap:
+                break
+            delay *= 2
+        return min(delay, cap)
 
     def _read(self, source: CameraSource) -> tuple[bool, object]:
         try:

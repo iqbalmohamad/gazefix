@@ -485,6 +485,33 @@ def test_open_failure_backoff_and_single_starting_status() -> None:
         assert runtime.stop()
 
 
+def test_reconnect_delay_is_bounded_for_very_large_failure_counts() -> None:
+    """A long-running camera outage must not overflow the backoff calculation.
+
+    ``base * 2 ** open_failures`` raised OverflowError past ~1024 failures, which
+    would tear down the capture worker instead of letting it keep retrying.
+    """
+
+    runtime = PipelineRuntime(
+        fast_settings(reconnect_delay_s=0.02, reconnect_delay_max_s=0.08),
+        source_factory=factory_for([], openable=set()),
+    )
+    worker = runtime._capture
+
+    # Small counts keep the exponential growth, then saturate at the maximum.
+    assert [worker._reconnect_delay(n) for n in range(5)] == [0.02, 0.04, 0.08, 0.08, 0.08]
+
+    # Large counts must neither raise nor exceed the configured maximum.
+    for failures in (1_024, 10_000, 1_000_000):
+        assert worker._reconnect_delay(failures) == 0.08
+
+    # The same holds for production-scale delays.
+    default = PipelineRuntime(
+        AppSettings(), source_factory=factory_for([], openable=set())
+    )._capture
+    assert default._reconnect_delay(10_000) == AppSettings().reconnect_delay_max_s
+
+
 def test_retry_delay_is_honoured_after_a_switch_to_a_camera_that_fails() -> None:
     """A stale command event must not turn the first retry into an immediate reopen."""
 
