@@ -1,0 +1,59 @@
+"""Central application settings for the Milestone 0 prototype."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+import os
+from pathlib import Path
+
+
+def default_log_directory() -> Path:
+    """Return a per-user, local-only log directory appropriate for Windows."""
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    base = Path(local_app_data) if local_app_data else Path.home() / ".local" / "state"
+    return base / "GazeFix" / "logs"
+
+
+@dataclass(frozen=True, slots=True)
+class AppSettings:
+    """Small, validated collection of runtime settings.
+
+    The class deliberately contains only foundation settings. Future processing
+    options can be added here without scattering constants across the UI and
+    camera modules.
+    """
+
+    capture_width: int = 1280
+    capture_height: int = 720
+    target_fps: float = 30.0
+    camera_probe_limit: int = 5
+    preview_poll_ms: int = 15
+    metrics_refresh_ms: int = 500
+    transient_read_failures: int = 5
+    read_retry_delay_s: float = 0.05
+    reconnect_delay_s: float = 1.0
+    worker_join_timeout_s: float = 5.0
+    discovery_validation_reads: int = 3
+    log_level: str = "INFO"
+    log_directory: Path = default_log_directory()
+
+    def validated(self) -> "AppSettings":
+        if self.capture_width <= 0 or self.capture_height <= 0:
+            raise ValueError("Capture dimensions must be positive")
+        if self.target_fps <= 0:
+            raise ValueError("Target FPS must be positive")
+        if not 1 <= self.camera_probe_limit <= 32:
+            raise ValueError("Camera probe limit must be between 1 and 32")
+        if self.preview_poll_ms <= 0 or self.metrics_refresh_ms <= 0:
+            raise ValueError("Timer intervals must be positive")
+        if self.transient_read_failures < 1:
+            raise ValueError("Transient read failure limit must be positive")
+        if self.read_retry_delay_s < 0 or self.reconnect_delay_s < 0:
+            raise ValueError("Retry delays cannot be negative")
+        if self.worker_join_timeout_s <= 0:
+            raise ValueError("Worker join timeout must be positive")
+        if self.discovery_validation_reads < 1:
+            raise ValueError("Discovery validation reads must be positive")
+        return replace(self, log_level=self.log_level.upper())
+
