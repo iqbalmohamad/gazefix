@@ -197,7 +197,7 @@ score = tracking_quality x openness_term x agreement_term x pose_term x offset_t
 | Term | Computed from | Falls when | Thresholds |
 | --- | --- | --- | --- |
 | `tracking_quality` | M1 `TrackingQuality.score` | the face is small, or partly outside the frame | inherited from M1 |
-| `openness_term` | the less open of the eyes used; ramp 0 at 0.10 to 1 at 0.20 | the eyelids cover the iris (a blink drives it to 0) | CHOSEN, against M1's observed 0.25–0.4 for an open eye |
+| `openness_term` | the less open of the eyes used, measured on the eye's own axis; ramp 0 at 0.10 to 1 at 0.20 | the eyelids cover the iris (a blink drives it to 0) | CHOSEN, against M1's observed 0.25–0.4 for an open eye |
 | `agreement_term` | how far the two eyes' estimates differ, beyond a deadband | one eye is mistracked; fixed 0.6 when only one eye is usable | deadband MEASURED (below); span and single-eye factor CHOSEN |
 | `pose_term` | head rotation; 1 up to 25 deg, falling to 0.25 at 60 deg | the head turns away and the projected model degrades | CHOSEN, informed by the §5 error tables |
 | `offset_term` | the measured iris offset against the eyeball model | the offset approaches or exceeds what an eye can produce | CHOSEN |
@@ -383,12 +383,15 @@ Other error sources, in rough order of size:
   lens. With no camera intrinsics there is nothing to correct this with. It is
   the same assumption as the orthographic projection, and it is why the smoke
   test asks the Product Owner to sit roughly in front of the camera.
-- **`openness` is not foreshortening-invariant.** M1 computes it as an
-  image-space vertical lid separation over the corner distance, so it shrinks
-  with head pitch and roll. `openness_term` therefore reads a pitched-down head
-  as slightly more closed than it is. The effect is small next to the
-  0.10-to-0.20 ramp, but it is the same asymmetry §3 corrects for `v` and does
-  not correct here.
+- **Eyelid aperture is re-measured for gaze, and M1's is not usable here.**
+  M1's `EyeLandmarks.openness` is an image-space vertical lid separation over
+  the corner distance, so it shrinks with head roll even though the eye has not
+  closed: on the real fixture a 37-degree roll took one eye from 0.234 to
+  0.146 and dragged the confidence below the threshold, blaming the eyelids.
+  `EyeGaze.openness` is the same ratio on the same scale, measured along the
+  eye's own up axis, and is flat to within 0.03 across +/-45 degrees of roll.
+  `openness_term` uses that one. Head *pitch* still foreshortens the aperture
+  and is not corrected.
 - **The eyelid clips the iris in almost every frame.** At M1's observed
   openness of 0.25–0.4 on a ~30 mm fissure the aperture is roughly 8–12 mm
   against an ~11.7 mm iris, so the visible iris is cut top and bottom and its

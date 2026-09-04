@@ -860,3 +860,42 @@ def test_the_fixating_residual_is_the_depth_leak_and_grows_with_it() -> None:
     # Shallower corners: a bigger depth difference, a bigger leak.
     assert residual(8.0) > residual(MEASURED_CANTHUS_DEPTH_MM)
     assert residual(6.0) > residual(8.0)
+
+
+# --- eyelid aperture must not be confused with head tilt ---
+
+
+def test_head_roll_does_not_look_like_a_closing_eye() -> None:
+    """M1's openness is an image-y ratio, so it shrinks under roll.
+
+    Measured on the real fixture, a 37-degree roll took one eye's M1 openness
+    from 0.234 to 0.146 and dragged the confidence below the threshold while
+    blaming the eyelids. The estimator measures the aperture along the eye's
+    own up axis instead, which is roll-invariant.
+    """
+
+    terms = []
+    for roll in (0.0, 15.0, 30.0, 45.0, -30.0):
+        result = estimate({"head_roll_deg": roll})
+        assert result.status.has_direction, roll
+        terms.append(result.confidence.openness_term)
+        for eye in result.per_eye:
+            assert eye.openness == pytest.approx(result.per_eye[0].openness, abs=0.03)
+    assert all(term == pytest.approx(terms[0], abs=0.02) for term in terms), terms
+
+
+def test_the_eye_aperture_is_reported_on_the_same_scale_as_m1() -> None:
+    """Same definition and scale, so the 0.10/0.20 thresholds keep meaning."""
+
+    tracking = gaze_scene(eye_openness=0.3).result()
+    result = estimator().estimate(tracking)
+    assert tracking.right_eye is not None
+    for eye in result.per_eye:
+        assert eye.openness == pytest.approx(tracking.right_eye.openness, abs=0.03)
+
+
+def test_a_genuinely_closing_eye_still_lowers_the_term() -> None:
+    assert estimate({"eye_openness": 0.30}).confidence.openness_term == pytest.approx(1.0, abs=0.05)
+    partly = estimate({"eye_openness": 0.15}).confidence.openness_term
+    assert 0.3 < partly < 0.7
+    assert estimate({"eye_openness": 0.02}).status is GazeStatus.UNAVAILABLE

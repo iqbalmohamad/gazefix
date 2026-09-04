@@ -312,11 +312,19 @@ def _gaze_lines(gaze: GazeResult | None, description: str) -> list[str]:
     if not gaze.status.has_direction or gaze.yaw_deg is None or gaze.pitch_deg is None:
         return [f"gaze: {gaze.status.value}" + (f"  {gaze.message[:80]}" if gaze.message else "")]
     confidence = gaze.confidence
+    # The contract allows an estimator to publish a camera-relative direction
+    # without an eye-in-head decomposition; formatting None would raise on the
+    # processor thread, on every frame.
+    eye_angles = (
+        "n/a"
+        if gaze.eye_yaw_deg is None or gaze.eye_pitch_deg is None
+        else f"yaw {gaze.eye_yaw_deg:+.0f} pitch {gaze.eye_pitch_deg:+.0f} deg"
+    )
     lines = [
         f"gaze (approx, uncalibrated) yaw {gaze.yaw_deg:+.0f} pitch {gaze.pitch_deg:+.0f} deg"
         f"  conf {confidence.score:.2f}  [{gaze.status.value}]",
         f"  + yaw = subject's left, + pitch = up (head-pose pitch is the other way)",
-        f"  eye-in-head yaw {gaze.eye_yaw_deg:+.0f} pitch {gaze.eye_pitch_deg:+.0f} deg"
+        f"  eye-in-head {eye_angles}"
         f"  eyes {confidence.eyes_used}"
         f"  head pose {'applied' if confidence.head_pose_applied else 'unavailable'}",
         f"  conf = quality {confidence.tracking_quality:.2f} x open {confidence.openness_term:.2f}"

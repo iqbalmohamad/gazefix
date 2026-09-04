@@ -594,10 +594,17 @@ class TrackerWorker:
     def _analyse(self, detection: RawDetection, submission: _Submission) -> TrackingResult:
         context = submission.context
         geometry = FrameGeometry(submission.frame.shape[1], submission.frame.shape[0])
-        timing = TrackingTiming(
-            inference_ms=detection.inference_ms,
-            total_ms=(self._clock() - submission.submitted_at) * 1000.0,
-        )
+
+        def timing_now() -> TrackingTiming:
+            # Sampled at each construction site, never once at the top: the
+            # frame's result is not available until analysis AND the gaze
+            # stage have run, and ``total_ms`` is documented as covering
+            # exactly that span.
+            return TrackingTiming(
+                inference_ms=detection.inference_ms,
+                total_ms=(self._clock() - submission.submitted_at) * 1000.0,
+            )
+
         analysis = self._analysis
         # Selection works on plausible arrays only; a backend that returns a
         # degenerate face must not take the selector down with it.
@@ -613,7 +620,7 @@ class TrackerWorker:
                 self._gaze.reset()
             return untracked(
                 TrackingStatus.NO_FACE, context.capture_sequence, context.captured_at_ns,
-                context.camera_request_id, geometry, "no face detected", timing, 0,
+                context.camera_request_id, geometry, "no face detected", timing_now(), 0,
             )
         face = candidates[selection.index]
         try:
@@ -650,7 +657,7 @@ class TrackerWorker:
             captured_at_ns=context.captured_at_ns,
             camera_request_id=context.camera_request_id,
             geometry=geometry,
-            timing=timing,
+            timing=TrackingTiming(inference_ms=detection.inference_ms),
             message="; ".join(reasons),
             faces_detected=len(detection.faces),
             landmarks=landmarks,
@@ -661,7 +668,9 @@ class TrackerWorker:
             quality=quality,
             stabilized=stabilized,
         )
-        return replace(result, gaze=self._estimate_gaze(result))
+        # Gaze first, then the timing that must include it.
+        gaze = self._estimate_gaze(result)
+        return replace(result, gaze=gaze, timing=timing_now())
 
     def _estimate_gaze(self, result: TrackingResult) -> GazeResult:
         """Gaze for this frame; never raises, never blocks the frame path."""

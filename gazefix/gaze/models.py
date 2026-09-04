@@ -166,6 +166,11 @@ class EyeGaze:
     #: ratios above, so it sets the angular resolution of this eye's estimate;
     #: ``GazeConfidence.resolution_term`` is derived from it.
     half_width_px: float = 0.0
+    #: Eyelid aperture over the full eye width, measured along the eye's own
+    #: up axis. Same definition and scale as ``EyeLandmarks.openness``, but
+    #: roll-invariant, because M1 measures its version along image ``y`` and
+    #: so reads a tilted head as a closing eye. ``openness_term`` uses this.
+    openness: float = 0.0
 
 
 @dataclass(frozen=True, slots=True, eq=False)

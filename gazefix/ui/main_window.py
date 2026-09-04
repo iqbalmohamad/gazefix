@@ -540,11 +540,18 @@ def _gaze_detail_text(gaze: GazeResult | None) -> str:
         return "gaze: not estimated"
     if not gaze.status.has_direction or gaze.yaw_deg is None or gaze.pitch_deg is None:
         return f"gaze: {gaze.status.value}" + (f" ({gaze.message})" if gaze.message else "")
+    # The contract allows a direction without an eye-in-head decomposition;
+    # formatting None would raise on the UI thread, on every refresh.
+    eye_angles = (
+        "n/a"
+        if gaze.eye_yaw_deg is None or gaze.eye_pitch_deg is None
+        else f"yaw {gaze.eye_yaw_deg:+.0f} pitch {gaze.eye_pitch_deg:+.0f}"
+    )
     return (
         f"gaze (approx, uncalibrated; + = subject's left / up) "
         f"yaw {gaze.yaw_deg:+.0f} pitch {gaze.pitch_deg:+.0f} deg "
         f"conf {gaze.confidence.score:.2f} [{gaze.status.value}] "
-        f"eye-in-head yaw {gaze.eye_yaw_deg:+.0f} pitch {gaze.eye_pitch_deg:+.0f} "
+        f"eye-in-head {eye_angles} "
         f"eyes {gaze.confidence.eyes_used} "
         f"head pose {'applied' if gaze.confidence.head_pose_applied else 'unavailable'}"
     )

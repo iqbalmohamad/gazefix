@@ -441,3 +441,114 @@ def test_a_low_quality_frame_still_carries_a_gaze_estimate_through_the_pipeline(
         raise AssertionError("never reached LOW_QUALITY")
     finally:
         processor.close()
+
+
+def test_the_tracking_total_time_includes_the_gaze_stage_it_claims_to() -> None:
+    """``tracking_total_ms`` is documented as covering the whole tracker span.
+
+    It used to be sampled before analysis and gaze ran, so a slow estimator
+    was invisible in the metric that claims to contain it.
+    """
+
+    from gazefix.gaze.models import unavailable as gaze_unavailable
+
+    class SlowEstimator:
+        description = "deliberately slow test estimator"
+
+        def estimate(self, result):  # type: ignore[no-untyped-def]
+            deadline = time.perf_counter() + 0.02
+            while time.perf_counter() < deadline:
+                pass
+            return gaze_unavailable("slow test estimator")
+
+        def reset(self) -> None:
+            return None
+
+    from gazefix.tracking.worker import TrackerWorker
+
+    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(),)})
+    settings = tracking_settings(tracking_wait_ms=200)
+    processor = TrackingProcessor(factory, settings, PipelineMetrics())
+    processor._worker = TrackerWorker(
+        factory, settings, processor._metrics, gaze_estimator=SlowEstimator()
+    )
+    processor.start()
+    try:
+        assert wait_until(lambda: processor.status().state == "ready")
+        output, _ = Driver(processor).until_tracked()
+        tracking = output.tracking
+        assert tracking is not None and tracking.timing.total_ms is not None
+        assert tracking.timing.total_ms >= 20.0, tracking.timing.total_ms
+    finally:
+        processor.close()
+
+
+def test_a_direction_without_an_eye_in_head_decomposition_does_not_break_rendering() -> None:
+    """The contract permits it; the overlay and the UI line run per frame."""
+
+    from gazefix.gaze.models import GazeConfidence, GazeResult, GazeStatus, direction_from_angles
+    from gazefix.tracking.overlay import _gaze_lines
+    from gazefix.ui.main_window import _gaze_detail_text
+
+    partial = GazeResult(
+        status=GazeStatus.ESTIMATED,
+        confidence=GazeConfidence(0.9, 1.0, 1.0, 1.0, 1.0, 1.0, 2, True),
+        yaw_deg=12.0,
+        pitch_deg=-4.0,
+        eye_yaw_deg=None,
+        eye_pitch_deg=None,
+        direction=direction_from_angles(12.0, -4.0),
+    )
+    assert "n/a" in " ".join(_gaze_lines(partial, ""))
+    assert "n/a" in _gaze_detail_text(partial)
+
+
+def test_a_substitute_estimator_drives_the_whole_pipeline() -> None:
+    """The boundary is real: consumers depend on GazeResult, not on the algorithm."""
+
+    from gazefix.gaze.models import GazeConfidence, GazeResult, GazeStatus, direction_from_angles
+
+    class ConstantEstimator:
+        description = "constant test estimator"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.resets = 0
+
+        def estimate(self, result):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            return GazeResult(
+                status=GazeStatus.ESTIMATED,
+                confidence=GazeConfidence(0.9, 1.0, 1.0, 1.0, 1.0, 1.0, 2, True),
+                yaw_deg=42.0,
+                pitch_deg=-7.0,
+                eye_yaw_deg=42.0,
+                eye_pitch_deg=-7.0,
+                direction=direction_from_angles(42.0, -7.0),
+                estimation_ms=0.01,
+            )
+
+        def reset(self) -> None:
+            self.resets += 1
+
+    from gazefix.tracking.worker import TrackerWorker
+
+    substitute = ConstantEstimator()
+    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(),)})
+    settings = tracking_settings()
+    processor = TrackingProcessor(factory, settings, PipelineMetrics())
+    processor._worker = TrackerWorker(
+        factory, settings, processor._metrics, gaze_estimator=substitute
+    )
+    processor.start()
+    try:
+        assert wait_until(lambda: processor.status().state == "ready")
+        output, _ = Driver(processor).until_tracked()
+        tracking = output.tracking
+        assert tracking is not None and tracking.gaze is not None
+        assert tracking.gaze.yaw_deg == 42.0
+        assert tracking.gaze_available is True
+        assert substitute.calls >= 1
+        assert "constant test estimator" in processor._worker.gaze_description
+    finally:
+        processor.close()

@@ -394,6 +394,20 @@ class GeometricGazeEstimator:
         if not (math.isfinite(u) and math.isfinite(v)):
             return None
 
+        # Eyelid aperture measured along the eye's OWN up axis. M1's
+        # ``EyeLandmarks.openness`` is the same ratio taken along image y, so
+        # it shrinks with head roll even though the eye has not closed at all
+        # (measured on the real fixture: a 37 degree roll takes one eye from
+        # 0.234 to 0.146 and drags the confidence below the threshold, blaming
+        # the eyelids). Projecting on ``ey`` costs one dot product and removes
+        # the artefact.
+        contour_px = np.asarray(eye.contour[:, :2], dtype=np.float64) * scale
+        lower = contour_px[list(topology.CONTOUR_LOWER_LID_POSITIONS)]
+        upper = contour_px[list(topology.CONTOUR_UPPER_LID_POSITIONS)][::-1]  # both outer -> inner
+        openness = float(np.mean(np.abs((upper - lower) @ ey))) / (2.0 * half_width)
+        if not math.isfinite(openness):
+            return None
+
         ratio = self._settings.eye_model_ratio
         x, y = ratio * u, ratio * v
         yaw_deg, pitch_deg = angles_from_direction(self._head_direction(x, y))
@@ -405,6 +419,7 @@ class GeometricGazeEstimator:
                 offset_u=u,
                 offset_v=v,
                 half_width_px=half_width,
+                openness=openness,
             ),
             x,
             y,
@@ -446,12 +461,7 @@ class GeometricGazeEstimator:
         settings = self._settings
         quality = result.quality.score if result.quality is not None else 0.0
 
-        used_sides = {eye.side for eye in per_eye}
-        opennesses = [
-            eye.openness
-            for eye in (result.right_eye, result.left_eye)
-            if eye is not None and eye.side in used_sides
-        ]
+        opennesses = [eye.openness for eye in per_eye]
         openness_term = _ramp(
             min(opennesses) if opennesses else 0.0, settings.openness_floor, settings.openness_full
         )

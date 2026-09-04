@@ -51,8 +51,8 @@ class MetricsSnapshot:
     ``pipeline_latency_ms`` runs from capture timestamp to the processed
     frame being published (it excludes camera driver latency and preview
     presentation); ``gaze_estimation_ms`` is the gaze stage alone, measured
-    inside the tracker thread immediately after analysis, and is therefore
-    already included in ``tracking_total_ms``.
+    inside the tracker thread immediately after analysis. ``tracking_total_ms``
+    is sampled after that stage, so it genuinely contains it.
     """
 
     capture_fps: float
