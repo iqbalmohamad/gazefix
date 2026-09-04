@@ -193,15 +193,33 @@ travels at shutdown, so the latch decision can never miss one in transfer:
 capture-worker slots        pending_prepared_count(): unclaimed tokens still
                             held in the worker's request/orphan slots
 hand-off                    a counter raised, under the lifecycle lock, before
-                            any token leaves the slots and lowered only after
-                            every taken token is registered with the cleanup
-                            thread
+                            any token leaves the slots and lowered when the
+                            transfer attempt ends, however it ends
+runtime-retained storage    tokens extracted from the worker but not yet
+                            accepted by the cleanup thread, held durably by
+                            the runtime across failed attempts
 cleanup thread              queued tokens plus the release in flight
 ```
 
+Every step of the transfer is exception-safe. Extraction is transactional per
+token: the worker appends a token to the runtime's retained storage first and
+clears its slot only afterwards, so a failure mid-extraction leaves the
+remainder worker-owned and everything already moved runtime-retained.
+Registration is resumable: a token leaves retained storage only after the
+cleanup thread accepted it, so a failure leaves the failed token and the
+unsubmitted remainder retained, and the next `stop()` or `join_cleanup()`
+(which re-attempts registration before waiting) picks up exactly where the
+failed attempt stopped. A retry that re-submits a token the closer already
+holds is a no-op thanks to the claim-once handover. An exception in the
+transfer is logged (`prepared_handoff_error`) and never moves a token out of
+ownership; interruption exceptions propagate normally with ownership intact.
+
 At every instant a token accepted before finalization is in at least one of
-the three counts (transitions overlap conservatively rather than gap), and
-the finalization check sums all three under the lifecycle lock. Worker
+the counts (transitions overlap conservatively rather than gap), and the
+finalization check sums all of them under the lifecycle lock. The sum,
+exposed as `cleanup_outstanding`, is an activity indicator rather than an
+exact camera count: a token moving between categories is briefly counted in
+two of them, so nonzero means "cleanup work remains" and zero means "none". Worker
 threads only move from alive to exited, and the two ways runtime-owned
 cleanup is registered are serialized with the latch: the shutdown path raises
 the hand-off counter under the lifecycle lock before touching the worker's

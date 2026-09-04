@@ -132,7 +132,17 @@ class CameraCaptureWorker:
                 )
         if refused is not None:
             if self._prepared_closer is not None:
-                self._prepared_closer.submit(refused)
+                try:
+                    self._prepared_closer.submit(refused)
+                except Exception:
+                    # The disposal thread refused the token; release inline
+                    # rather than lose it (may block briefly on the driver,
+                    # like the no-closer fallback below).
+                    logger.exception(
+                        "Prepared-camera disposal hand-off failed; releasing inline",
+                        extra={"event": "prepared_handoff_error"},
+                    )
+                    refused.close_if_unclaimed()
             elif refused.close_if_unclaimed():
                 logger.info(
                     "Closed prepared camera of a request that arrived after stop",
@@ -194,6 +204,27 @@ class CameraCaptureWorker:
                 tokens.append(self._requested_prepared)
         return sum(1 for token in tokens if token.is_pending)
 
+    def drain_pending_prepared_into(self, destination: list[PreparedCamera]) -> None:
+        """Move every prepared camera the worker has not applied into ``destination``.
+
+        Transactional per token: each token is appended to ``destination``
+        first and removed from its slot only afterwards, so if an append
+        raises, that token and everything behind it are still in the slots
+        and remain worker-owned; tokens already appended belong to the
+        destination's owner. At no instant is any token in neither place
+        (for an instant it may be in both, which over-counts, never loses).
+        Meant for shutdown, once the worker has been told to stop; the whole
+        move runs under the request lock and performs no blocking call.
+        """
+
+        with self._request_lock:
+            while self._orphaned_prepared:
+                destination.append(self._orphaned_prepared[0])
+                self._orphaned_prepared.pop(0)
+            if self._requested_prepared is not None:
+                destination.append(self._requested_prepared)
+                self._requested_prepared = None
+
     def take_pending_prepared(self) -> list[PreparedCamera]:
         """Hand over every prepared camera the worker has not applied.
 
@@ -214,10 +245,30 @@ class CameraCaptureWorker:
         return pending
 
     def close_pending_prepared(self) -> None:
-        """Release, on the calling thread, every prepared camera the worker will never adopt."""
+        """Release, on the calling thread, every prepared camera the worker will never adopt.
 
-        for prepared in self.take_pending_prepared():
-            if prepared.close_if_unclaimed():
+        Each token stays in its slot until its release attempt has returned,
+        so an exception at any point leaves every unreleased token still
+        owned and counted; a re-run resumes where it stopped, and the token's
+        claim-once handover makes a repeated attempt a no-op, never a double
+        close.
+        """
+
+        while True:
+            with self._request_lock:
+                if self._orphaned_prepared:
+                    prepared = self._orphaned_prepared[0]
+                elif self._requested_prepared is not None:
+                    prepared = self._requested_prepared
+                else:
+                    return
+            released = prepared.close_if_unclaimed()  # absorbs source errors
+            with self._request_lock:
+                if self._orphaned_prepared and self._orphaned_prepared[0] is prepared:
+                    self._orphaned_prepared.pop(0)
+                elif self._requested_prepared is prepared:
+                    self._requested_prepared = None
+            if released:
                 logger.info(
                     "Closed prepared camera the worker never adopted",
                     extra={

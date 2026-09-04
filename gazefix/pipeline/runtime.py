@@ -132,31 +132,52 @@ class PipelineRuntime:
         # counted by the finalization check at every instant of the chain
         # worker slots -> hand-off -> cleanup queue/in-flight release.
         self._handoff_in_progress = 0
+        # Durable runtime-owned storage for tokens extracted from the worker
+        # but not yet accepted by the cleanup thread. A token enters under
+        # the lifecycle lock as part of the extraction itself and leaves only
+        # after the cleanup thread accepted it, so an exception anywhere in
+        # the transfer leaves every token owned, counted, and retryable by
+        # the next stop()/join_cleanup() rather than silently dropped.
+        self._retained_prepared: list[PreparedCamera] = []
 
     @property
     def cleanup_outstanding(self) -> int:
         """Prepared-camera cleanup the runtime is responsible for, right now.
 
-        Counts tokens still in the capture worker's slots, tokens in hand-off
-        between the worker and the cleanup thread, and releases queued or in
-        flight on the cleanup thread; after finalization the same number
-        covers detached disposals. For application shutdown accounting; the
-        cleanup thread itself is private, so nothing outside the runtime can
-        submit work to it.
+        Sums tokens still in the capture worker's slots, hand-offs in
+        progress, tokens the runtime retains after a failed hand-off, and
+        releases queued or in flight on the cleanup thread; after
+        finalization the same number covers detached disposals. It is an
+        activity indicator, not an exact camera count: a token moving between
+        categories is deliberately counted in both for an instant, so treat
+        nonzero as "cleanup work remains", and zero as "none". For
+        application shutdown accounting; the cleanup thread itself is
+        private, so nothing outside the runtime can submit work to it.
         """
 
         with self._lifecycle_lock:
             return self._runtime_cleanup_locked()
 
     def join_cleanup(self, timeout: float) -> bool:
-        """Bounded wait for the cleanup thread to drain; never touches a driver.
+        """Bounded wait for runtime cleanup to drain; never touches a driver.
 
-        Meant for application shutdown after ``stop()`` has returned (every
-        hand-off inside ``stop()`` completes before it returns, and a refused
-        request registers its token before ``select_camera`` returns).
+        First re-attempts registration of any tokens a failed hand-off left
+        retained (so the application's shutdown join is itself a recovery
+        path), then waits, bounded, for the cleanup thread. Returns ``True``
+        only when the cleanup thread is idle and nothing is retained. Meant
+        for application shutdown after ``stop()`` has returned.
         """
 
-        return self._closer.join(timeout)
+        try:
+            self._register_retained()
+        except Exception:
+            logger.exception(
+                "Prepared camera hand-off retry failed; tokens remain retained",
+                extra={"event": "prepared_handoff_error"},
+            )
+        drained = self._closer.join(timeout)
+        with self._lifecycle_lock:
+            return drained and not self._retained_prepared
 
     def start(self) -> None:
         """Start both workers exactly once, or leave nothing running.
@@ -229,8 +250,18 @@ class PipelineRuntime:
             accepted = not self._stop_requested
             if not accepted and prepared is not None:
                 # Registered or disposed under the same lock that finalizes
-                # shutdown; see the docstring. ``submit`` never blocks.
-                self._closer.submit(prepared)
+                # shutdown; see the docstring. ``submit`` never blocks. If it
+                # raises, the token falls back to the durable retained store
+                # (recovered by the next stop()/join_cleanup()) rather than
+                # escaping ownership.
+                try:
+                    self._closer.submit(prepared)
+                except Exception:
+                    self._retained_prepared.append(prepared)
+                    logger.exception(
+                        "Refused-token registration failed; token retained",
+                        extra={"event": "prepared_handoff_error"},
+                    )
             if accepted:
                 self._capture_buffer.clear()
                 self._output_buffer.clear()
@@ -396,28 +427,73 @@ class PipelineRuntime:
         with self._lifecycle_lock:
             # Raised before any token leaves the worker's slots, so the
             # finalization check never sees a moment in which a pre-existing
-            # token is in neither container. Only the counter update happens
-            # under the lock; the transfer itself runs without it.
+            # token is in neither container. Only counter and list updates
+            # happen under the lock; registration itself runs without it.
             self._handoff_in_progress += 1
         try:
-            for prepared in self._capture.take_pending_prepared():
-                self._closer.submit(prepared)
+            try:
+                with self._lifecycle_lock:
+                    # Extraction lands directly in durable runtime storage,
+                    # token by token: the worker removes a token from its slot
+                    # only after the append here succeeded, so a failure mid
+                    # way leaves the remainder worker-owned and everything
+                    # already moved runtime-retained; nothing is in neither.
+                    self._capture.drain_pending_prepared_into(self._retained_prepared)
+            except Exception:
+                logger.exception(
+                    "Prepared camera extraction failed part-way; unmoved tokens "
+                    "remain worker-owned, moved tokens remain retained",
+                    extra={"event": "prepared_handoff_error"},
+                )
+            try:
+                self._register_retained()
+            except Exception:
+                logger.exception(
+                    "Prepared camera hand-off failed; tokens remain retained "
+                    "and the next stop() or join_cleanup() retries",
+                    extra={"event": "prepared_handoff_error"},
+                )
         finally:
             with self._lifecycle_lock:
                 self._handoff_in_progress -= 1
 
+    def _register_retained(self) -> None:
+        """Move retained tokens to the cleanup thread; resumable after failure.
+
+        A token is removed from the retained list only after ``submit``
+        returned for it, so an exception leaves the failed token and the
+        unsubmitted remainder retained (still runtime-owned and counted); a
+        later call picks up exactly where this one stopped. If a crash lands
+        between acceptance and removal, the retry submits the token a second
+        time, which the claim-once handover turns into a no-op rather than a
+        double close.
+        """
+
+        while True:
+            with self._lifecycle_lock:
+                if not self._retained_prepared:
+                    return
+                prepared = self._retained_prepared[0]
+            self._closer.submit(prepared)
+            with self._lifecycle_lock:
+                if self._retained_prepared and self._retained_prepared[0] is prepared:
+                    self._retained_prepared.pop(0)
+
     def _runtime_cleanup_locked(self) -> int:
         """All runtime-owned prepared cleanup; lifecycle lock held.
 
-        The three counters cover the whole chain a token travels at shutdown:
-        still in the worker's slots, in hand-off, or with the cleanup thread.
-        A token accepted before finalization is in exactly one of them at any
-        instant, so the finalization decision can never miss it.
+        The four counters cover the whole chain a token travels at shutdown:
+        still in the worker's slots, a hand-off in progress, retained by the
+        runtime after extraction (or after a failed registration), or with
+        the cleanup thread. A token accepted before finalization is in at
+        least one of them at every instant, whatever succeeds or raises, so
+        the finalization decision can never miss it.
         """
 
         return (
             self._capture.pending_prepared_count()
             + self._handoff_in_progress
+            + len(self._retained_prepared)
             + self._closer.outstanding
         )
 

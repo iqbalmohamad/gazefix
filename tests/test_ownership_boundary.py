@@ -234,28 +234,37 @@ def test_an_already_claimed_token_is_dropped_at_submit_and_never_counted() -> No
 
 
 def gated_take(runtime: PipelineRuntime, *, before: bool) -> tuple[Event, Event]:
-    """Pause the first slot-to-closer transfer, before or after the slot swap.
+    """Pause the first slot-to-closer transfer, before or during it.
 
-    Returns ``(paused, resume)``. Later calls (a second stop's own sweep, the
-    second sweep of the same stop) pass through untouched.
+    ``before=True`` gates the whole sweep (the token is still in the worker's
+    slots while paused); ``before=False`` gates the cleanup thread's first
+    acceptance (the token has been extracted and sits in the runtime's
+    retained storage while paused). Neither pause holds any lock, so
+    concurrent ``state``/``stop()`` calls run freely. Returns
+    ``(paused, resume)``; later calls pass through untouched.
     """
 
     paused, resume = Event(), Event()
-    original = runtime._capture.take_pending_prepared
+    if before:
+        original_sweep = runtime._submit_pending_prepared
 
-    def take():  # type: ignore[no-untyped-def]
-        if paused.is_set():
-            return original()
-        if before:
-            paused.set()
-            assert resume.wait(5.0)
-            return original()
-        result = original()
-        paused.set()
-        assert resume.wait(5.0)
-        return result
+        def sweep() -> None:
+            if not paused.is_set():
+                paused.set()
+                assert resume.wait(5.0)
+            original_sweep()
 
-    runtime._capture.take_pending_prepared = take  # type: ignore[method-assign]
+        runtime._submit_pending_prepared = sweep  # type: ignore[method-assign]
+    else:
+        original_submit = runtime._closer.submit
+
+        def submit(prepared: PreparedCamera) -> None:
+            if not paused.is_set():
+                paused.set()
+                assert resume.wait(5.0)
+            original_submit(prepared)
+
+        runtime._closer.submit = submit  # type: ignore[method-assign]
     return paused, resume
 
 
@@ -279,7 +288,8 @@ def test_case_a_finalization_is_denied_while_a_pre_existing_token_is_in_handoff(
     stopper = Thread(target=lambda: first_stop.setdefault("result", runtime.stop()))
     stopper.start()
     assert paused.wait(2.0)
-    # The accounting gap of the old code: token in neither container.
+    # The old accounting gap: token still in the slots, or extracted but not
+    # yet accepted by the cleanup thread (now durably retained and counted).
     assert runtime.state is RuntimeState.STOPPING  # a state read cannot latch
     assert runtime.stop() is False  # a concurrent second stop cannot latch
     assert runtime.state is RuntimeState.STOPPING
@@ -412,3 +422,157 @@ def test_case_d_pre_existing_work_and_post_latch_disposals_are_distinguished() -
     post_gate.set()
     assert runtime.join_cleanup(2.0) and warm_post.closed and warm_post.close_calls == 1
     assert runtime.state is RuntimeState.STOPPED
+
+
+# --- Exception-safe ownership retention (Cases E-I of the final review) ----------
+
+
+def accepted_tokens(runtime: PipelineRuntime, count: int = 3) -> list[FakeCameraSource]:
+    """Accept ``count`` prepared tokens pre-stop; earlier ones become orphans."""
+
+    warms: list[FakeCameraSource] = []
+    for index in range(count):
+        warm, token = prepared_token(index)
+        runtime.select_camera(CameraDevice(index), token)
+        warms.append(warm)
+    return warms
+
+
+class FaultySubmit:
+    """Closer.submit fault injection: raise after ``accept_first`` acceptances."""
+
+    def __init__(self, runtime: PipelineRuntime, accept_first: int = 0) -> None:
+        self.original = runtime._closer.submit
+        self.accept_first = accept_first
+        self.accepted = 0
+        self.armed = True
+        runtime._closer.submit = self  # type: ignore[method-assign]
+
+    def __call__(self, prepared: PreparedCamera) -> None:
+        if self.armed and self.accepted >= self.accept_first:
+            raise RuntimeError("queue insertion failed")
+        self.accepted += 1
+        self.original(prepared)
+
+
+def test_case_e_registration_failure_before_any_acceptance_retains_everything() -> None:
+    runtime = PipelineRuntime(settings(worker_join_timeout_s=0.5), source_factory=factory_for([]))
+    warms = accepted_tokens(runtime)
+    fault = FaultySubmit(runtime, accept_first=0)
+
+    for _ in range(1):
+        assert runtime.stop() is False  # cannot finalize with retained work
+    assert runtime.state is RuntimeState.STOPPING
+    assert runtime.cleanup_outstanding == 3  # every token accounted for
+    assert [w.close_calls for w in warms] == [0, 0, 0]
+    assert len(runtime._retained_prepared) == 3  # durably runtime-owned, retryable
+
+    fault.armed = False  # the fault is removed; retry via the next shutdown
+    assert runtime.stop() is True
+    assert runtime.state is RuntimeState.STOPPED
+    assert runtime.join_cleanup(2.0)
+    assert [w.closed for w in warms] == [True, True, True]
+    assert [w.close_calls for w in warms] == [1, 1, 1]  # exactly once each
+
+
+def test_case_f_partial_acceptance_splits_ownership_without_loss_or_overlap() -> None:
+    runtime = PipelineRuntime(settings(worker_join_timeout_s=0.5), source_factory=factory_for([]))
+    warms = accepted_tokens(runtime)
+    fault = FaultySubmit(runtime, accept_first=1)
+
+    assert runtime.stop() is False
+    assert runtime.state is RuntimeState.STOPPING
+    accepted = [w for w in warms if wait_until(lambda w=w: w.closed, timeout=1.0)]
+    assert len(accepted) == 1  # the accepted prefix was released by the closer
+    retained = list(runtime._retained_prepared)
+    assert len(retained) == 2  # failed token + unsubmitted suffix stay runtime-owned
+    assert all(token.is_pending for token in retained)  # not in both owners: still unclaimed
+    assert runtime._closer.outstanding == 0  # nothing of the remainder leaked into the closer
+    assert runtime.cleanup_outstanding == 2
+
+    fault.armed = False
+    assert runtime.stop() is True and runtime.state is RuntimeState.STOPPED
+    assert runtime.join_cleanup(2.0)
+    assert [w.closed for w in warms] == [True, True, True]
+    assert [w.close_calls for w in warms] == [1, 1, 1]
+
+
+class FaultyRetainedList(list):
+    """Runtime retained storage whose append fails after ``accept`` successes.
+
+    Exercises the real per-token drain: a failing append must leave the
+    current token (and everything behind it) still in the worker's slots.
+    """
+
+    def __init__(self, accept: int) -> None:
+        super().__init__()
+        self.accept = accept
+        self.armed = True
+
+    def append(self, item: PreparedCamera) -> None:  # type: ignore[override]
+        if self.armed and len(self) >= self.accept:
+            raise RuntimeError("batch construction failed")
+        super().append(item)
+
+
+def test_case_g_extraction_construction_failure_leaves_tokens_worker_owned() -> None:
+    runtime = PipelineRuntime(settings(worker_join_timeout_s=0.5), source_factory=factory_for([]))
+    warms = accepted_tokens(runtime)
+    faulty = FaultyRetainedList(accept=1)
+    runtime._retained_prepared = faulty  # the receiving storage fails mid-construction
+
+    assert runtime.stop() is False  # cannot falsely finalize
+    assert runtime.state is RuntimeState.STOPPING
+    # The wind-down sweeps twice and each sweep moves exactly one token past
+    # the faulty storage (append succeeds while it is empty, then trips), so
+    # two tokens were moved and released and the third never left the slots:
+    # no token was destructively cleared ahead of a durable owner.
+    assert runtime._capture.pending_prepared_count() == 1
+    assert sum(w.close_calls for w in warms) == 2
+    assert runtime.cleanup_outstanding == 1
+
+    faulty.armed = False  # fault removed: normal operation retries
+    assert runtime.stop() is True and runtime.state is RuntimeState.STOPPED
+    assert runtime.join_cleanup(2.0)
+    assert [w.closed for w in warms] == [True, True, True]
+    assert [w.close_calls for w in warms] == [1, 1, 1]
+
+
+def test_case_h_repeated_handoff_failure_survives_until_the_fault_is_removed() -> None:
+    runtime = PipelineRuntime(settings(worker_join_timeout_s=0.5), source_factory=factory_for([]))
+    warms = accepted_tokens(runtime)
+    fault = FaultySubmit(runtime, accept_first=0)
+
+    for attempt in range(3):  # repeated failed shutdowns
+        assert runtime.stop() is False, attempt
+        assert runtime.state is RuntimeState.STOPPING
+        assert len(runtime._retained_prepared) == 3  # no loss, no duplication
+        assert runtime.cleanup_outstanding == 3
+        assert all(w.close_calls == 0 for w in warms)
+    assert runtime.join_cleanup(0.2) is False  # join is truthful about retained work
+
+    fault.armed = False
+    assert runtime.join_cleanup(2.0)  # the app-level join is itself a recovery path
+    assert [w.closed for w in warms] == [True, True, True]
+    assert runtime.stop() is True and runtime.state is RuntimeState.STOPPED
+    assert [w.close_calls for w in warms] == [1, 1, 1]
+
+
+def test_case_i_accounting_stays_truthful_while_tokens_are_retained() -> None:
+    """No STOPPED, no stop() True, and honest counts while retained work exists."""
+
+    runtime = PipelineRuntime(settings(worker_join_timeout_s=0.5), source_factory=factory_for([]))
+    warms = accepted_tokens(runtime)
+    fault = FaultySubmit(runtime, accept_first=0)
+
+    observations: list[tuple[RuntimeState, int, bool]] = []
+    for _ in range(2):
+        result = runtime.stop()
+        observations.append((runtime.state, runtime.cleanup_outstanding, result))
+    assert observations == [(RuntimeState.STOPPING, 3, False)] * 2
+    assert not runtime.workers_alive  # only the retained tokens hold it open
+
+    fault.armed = False
+    assert runtime.stop() is True and runtime.state is RuntimeState.STOPPED
+    assert runtime.cleanup_outstanding == 0 or runtime.join_cleanup(2.0)
+    assert [w.close_calls for w in warms] == [1, 1, 1]
