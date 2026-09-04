@@ -10,13 +10,12 @@ later milestone.
 
 ## 1. Backend
 
-MediaPipe Tasks `FaceLandmarker` (package `mediapipe` 1.0.1, CPU delegate,
+MediaPipe Tasks `FaceLandmarker` (package `mediapipe` 0.10.21, CPU delegate,
 video running mode, blendshapes disabled) with the verified
 `face_landmarker.task` bundle (see `models/README.md` and
 `docs/decisions/ADR-0001-face-tracker-mediapipe.md`). Inference runs
-entirely on the local CPU (XNNPACK) with no GPU or NPU; GazeFix's own code
-uses no network at runtime, but the library performs a usage-logging upload
-when a landmarker is closed (section 13). The backend is hidden behind
+entirely on the local CPU (XNNPACK) with no GPU or NPU, and nothing in the
+running application touches the network (section 13). The backend is hidden behind
 `gazefix.tracking.tracker.FaceTracker`; everything else in the package
 works on plain arrays and is exercised by fakes.
 
@@ -250,14 +249,14 @@ covers shutdown with such a thread).
 | face partly outside / too small | `LOW_QUALITY` | original frames (+ dim overlay) | none needed |
 | tracker slower than the wait / stalled | `TIMEOUT` | original frames | section 8 |
 | camera change | `TRACKED` after one fresh detection | M0 behaviour (preview cleared by the UI) | backend state flushed, temporal state reset, budgets re-armed; stale results rejected by generation |
-| stop during init or inference | — | — | bounded join (`tracking_join_timeout_s`, 2 s; validated to fit with `tracking_wait_ms` inside half the runtime's 5 s deadline); a thread still inside a native call is logged (`tracker_shutdown_timeout` by the worker, `tracker_thread_alive_at_close` by the window) and holds no camera. The backend runs its native calls on a non-daemon worker thread that the interpreter joins at exit, so the entry point waits one more `worker_join_timeout_s` and then terminates the process (`forced_exit`) rather than hang |
+| stop during init or inference | — | — | bounded join (`tracking_join_timeout_s`, 2 s; validated to fit with `tracking_wait_ms` inside half the runtime's 5 s deadline); a thread still inside a native call is logged (`tracker_shutdown_timeout` by the worker, `tracker_thread_alive_at_close` by the window, `tracker_thread_alive_at_exit` by the entry point) and holds no camera. It is a daemon thread and the backend adds no threads of its own, so it ends with the process; nothing is force-terminated (section 14) |
 
 Logging is per event (`tracker_ready`, `tracker_init_failed`,
 `tracker_generation_reset`, `tracker_state_reset`,
 `tracker_inference_error`, `tracker_worker_error`,
 `tracker_rebuild_exhausted`, `tracker_released`,
-`tracker_shutdown_timeout`, `overlay_toggled`, `forced_exit`), never per
-frame.
+`tracker_shutdown_timeout`, `tracker_thread_alive_at_exit`,
+`tracking_budget_exceeded`, `overlay_toggled`), never per frame.
 
 ## 10. Primary face
 
@@ -295,33 +294,83 @@ original array reaches the preview unchanged (`output.frame is frame`).
 Widgets are touched only by the Qt thread; the toggle sets a flag read by
 the processor thread.
 
-## 13. Backend network activity (disclosure)
+## 13. Backend network activity
 
-The MediaPipe 1.0.1 native library contains an HTTP logging client
-(`mediapipe::tasks::core::logging::google_internal::HttpLoggingClient`).
-Measured here: every `FaceLandmarker.close()` opens an HTTPS connection to
-`play.googleapis.com` (Google's Clearcut logging endpoint) and blocks until
-it completes or fails (3 ms with no network route, 15–45 ms when the
-connection is refused, 110–380 ms through a working proxy; a black-holed
-route was reported to take about 5 s). Creation and inference do not
-contact the network. The payload types compiled into the library are usage
-statistics — `SolutionSessionStart/End`, `SolutionInvocationCount/Report`,
-`SolutionError`, `ClientInfo`, `SystemInfo`, `HostEnvironment`, `Platform`
-— with no image type; GazeFix passes only in-memory frames and never a
-frame to any logging call, but the upload itself is neither disclosed in the
-package metadata nor switchable through the Python API. The Windows build
-uses WinINet for it, which follows the system proxy settings and ignores
-the `HTTPS_PROXY` environment variables; on Linux (libcurl) a sinkhole
-proxy stops it. GazeFix does not work around it silently: the fact is
-recorded here, in the README and in ADR-0001; `close()` is called at exit
-and on every error-driven rebuild (at most `tracking_max_rebuilds` = 3 per
-camera generation; camera changes reset the backend state instead of
-rebuilding it); and the decision whether this is acceptable, must be
-blocked at the firewall, or requires a different backend/version
-(0.10.21, the last pybind-based release, contains no logging client) is
-escalated to the Product Manager in the M1 report.
+**The running application makes no network connection.** Model setup
+(`scripts/fetch_model.py`) is the only step in the project that uses the
+network, and it is run once, explicitly, by a person.
 
-## 14. Verification commands
+This was measured, not assumed. A full lifecycle of the backend was traced
+with `strace -f -tt -yy -e trace=%network` (every network syscall, all
+threads, with socket addresses resolved), driving each phase through marker
+files so syscalls could be attributed to a phase rather than correlated by
+clock:
+
+| Phase | Duration | Network syscalls (mediapipe 0.10.21) |
+| --- | --- | --- |
+| `import mediapipe` + Tasks API | 1.6 s | 0 |
+| create landmarker (model load) | 0.2 s | 0 |
+| sustained inference, 1849 frames at 1280×720 | 30 s | 0 |
+| idle with the landmarker open | 15 s | 0 |
+| state reset (the black-frame flush) | 15 ms | 0 |
+| `close()` | 3 ms | 0 |
+| rebuild (create + 30 frames) | 0.6 s | 0 |
+| second `close()` | 2 ms | 0 |
+| after close, before exit | 5 s | 0 |
+| **deliberate connection (positive control)** | — | **35, including DNS and the connect** |
+
+The positive control matters: it proves the trace really does capture
+outbound connections in this environment, so the zeros above are an
+observation rather than a blind spot. The same scenario run against
+mediapipe 1.0.1 produced a TLS session to `play.googleapis.com` (Google's
+Clearcut usage-logging endpoint) inside **each** `close()` — 80 and 79
+syscalls respectively, with the proxy `CONNECT play.googleapis.com:443` line
+in cleartext — and nothing in any other phase. That behaviour, which has no
+API switch and is not disclosed in the package metadata, is why the project
+pins 0.10.21; the reasoning is recorded in ADR-0001.
+
+**Limitations of this evidence.** The trace is Linux-only and covers one
+model, one set of options and one machine. On Windows the corresponding
+static check is that MediaPipe 0.10.21's `.pyd` files import no
+network-capable DLL (no `wininet`, `winhttp`, `ws2_32`, `urlmon`,
+`secur32`) in their PE import or delay-import tables, whereas 1.0.1's
+`libmediapipe.dll` imports `wininet` and embeds the logging endpoint. A PE
+import table cannot rule out a library loading a networking DLL dynamically,
+so **Windows runtime network behaviour is NOT VERIFIED**; confirming it on
+the target machine (Resource Monitor's network tab, or a short packet
+capture, during a tracking session) is a Product Owner check.
+
+## 14. Shutdown and process exit
+
+The tracker thread is a daemon, and MediaPipe 0.10.21 adds **no Python
+threads**: `detect_for_video` runs synchronously on whichever thread calls
+it, which here is always the tracker thread. CPython joins only non-daemon
+threads during interpreter shutdown, so a native call that never returns
+cannot hold the process open — it ends with the process.
+
+The application therefore performs **no forced termination**. Earlier
+revisions ended `main()` with `os._exit` after a grace period, because
+MediaPipe 1.0.1 ran native calls on a non-daemon `ThreadPoolExecutor`
+thread per landmarker, which the interpreter *does* join; on that backend a
+wedged call really could hang the process. With 0.10.21 that hazard is gone,
+the forced exit has been removed, and normal interpreter finalisation and
+log flushing always run. A tracker thread still inside a native call at exit
+is reported (`tracker_thread_alive_at_exit`), never presented as a completed
+cleanup.
+
+The camera is unaffected by a wedged tracker: it is owned and released by
+the capture worker on its own thread, which the tracker never touches.
+
+This is covered by tests rather than argued: `tests/test_shutdown_process_exit.py`
+starts real child processes with the tracker wedged inside a call that never
+returns and asserts the process still exits and the camera is still
+released, and `tests/test_real_model_tracking.py` asserts against the real
+backend that it adds no non-daemon Python thread (that assertion fails on
+1.0.1, naming its executor thread). **Not covered:** a genuinely hung native
+call inside MediaPipe was not induced — the wedge is applied at the tracker
+boundary, which is the same thread and the same daemon-thread condition.
+
+## 15. Verification commands
 
 ```powershell
 .venv\Scripts\python scripts\fetch_model.py                      # one-time model setup

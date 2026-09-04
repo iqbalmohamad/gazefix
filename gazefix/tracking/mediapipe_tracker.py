@@ -5,12 +5,16 @@ This is the only module that imports MediaPipe, and it does so lazily inside
 (about half a second, plus OpenCV and matplotlib) or fails when the native
 library cannot load. The factory runs on the tracker thread.
 
-Backend facts the adapter relies on (verified against mediapipe 1.0.1):
+Backend facts the adapter relies on (verified against mediapipe 0.10.21):
 
-- ``FaceLandmarker`` runs every native call on its own dispatcher thread and
-  blocks the caller; a call after ``close()`` returns an empty result instead
-  of raising, so this adapter tracks its own closed state.
-- ``detect_for_video`` needs strictly increasing millisecond timestamps.
+- ``FaceLandmarker`` runs inference synchronously on the calling thread and
+  creates no Python threads of its own, so the tracker thread that owns it is
+  the only thread involved. A call after ``close()`` raises ``ValueError``;
+  this adapter keeps its own closed state and raises ``TrackerClosedError``
+  first, so the backend's own message never reaches the pipeline.
+- ``detect_for_video`` needs strictly increasing millisecond timestamps and
+  raises ``ValueError`` for an equal or smaller one; the adapter bumps the
+  timestamp instead of letting that count as an inference failure.
 - The CPU delegate is selected explicitly; no GPU, NPU or network is used.
   The image passed to the backend is a fresh RGB copy of the frame.
 - With ``output_face_blendshapes`` disabled the backend produces landmarks

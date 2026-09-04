@@ -15,7 +15,7 @@ and read offline from the per-user model directory afterwards.
 | MD5 (storage ETag) | `b0e7274907a1644404fef66b28dd6d85` |
 | Contents (zip bundle) | `face_detector.tflite` (BlazeFace short-range), `face_landmarks_detector.tflite` (Face Mesh V2 with attention: 468 mesh + 10 iris points), `face_blendshapes.tflite` (not executed by GazeFix), `geometry_pipeline_metadata_landmarks.binarypb` (canonical face geometry for the head-pose matrix) |
 | Model licence | Apache License, Version 2.0 — stated ("LICENSED UNDER Apache License, Version 2.0") on the three model cards below; the bundle itself contains no licence file |
-| Code licence of the runtime (`mediapipe` 1.0.1) | Apache-2.0 |
+| Code licence of the runtime (`mediapipe` 0.10.21) | Apache-2.0 |
 | Redistribution | Apache-2.0 permits redistribution with attribution and licence notice; GazeFix nevertheless does not vendor the file so that provenance is always the official source |
 
 ## Model cards (licence evidence, retrieved 2026-09-04)

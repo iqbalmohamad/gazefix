@@ -7,15 +7,14 @@ that preview: 478 facial landmarks, anatomically labelled left/right eyes with
 eyelid contours, iris landmarks, head orientation, and a truthful quality
 signal (Milestone 1). Tracking runs on the CPU and entirely on the local
 machine. GazeFix's own code contains no gaze estimation, gaze correction,
-calibration, virtual-camera output, telemetry, or cloud processing; the
-bundled MediaPipe library does upload usage statistics when a landmarker is
-closed (see "Diagnostics and privacy" below).
+calibration, virtual-camera output, telemetry, or cloud processing, and it
+makes no network connection at runtime (see "Diagnostics and privacy").
 
 ## Requirements
 
 - Windows 10 or 11
 - Python 3.11 or 3.12 (64-bit). The application declares `>=3.11,<3.13`
-  because MediaPipe 1.0.1 is classified for Python 3.9–3.12 only.
+  because MediaPipe 0.10.21 is classified for Python 3.9–3.12 only.
 - A webcam allowed by **Windows Settings → Privacy & security → Camera**
 - The face landmarker model file, installed once by an explicit command (below)
 
@@ -25,16 +24,19 @@ MediaPipe. pytest is installed only by the `dev` optional dependency.
 | Dependency | Declared range | Purpose | Package license metadata |
 | --- | --- | --- | --- |
 | PySide6 | `>=6.7,<7` | Windows desktop UI and thread-safe signals | LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only |
-| opencv-contrib-python | `>=4.10,<5` | Webcam capture, Windows backend access, colour conversion, overlay drawing. Replaces `opencv-python` because MediaPipe requires the contrib distribution and both provide `cv2` | Apache-2.0 |
-| NumPy | `>=1.26,<3` | Typed frame-array representation | BSD-3-Clause and bundled component licenses |
-| mediapipe | `==1.0.1` (tested release) | Face landmark tracking (Tasks `FaceLandmarker`, CPU) | Apache-2.0 |
+| opencv-contrib-python | `>=4.10,<5` (resolves to 4.11.x) | Webcam capture, Windows backend access, colour conversion, overlay drawing. Replaces `opencv-python` because MediaPipe requires the contrib distribution and both provide `cv2` | Apache-2.0 |
+| NumPy | `>=1.26,<3` (resolves to 1.26.x) | Typed frame-array representation | BSD-3-Clause and bundled component licenses |
+| mediapipe | `==0.10.21` (tested release) | Face landmark tracking (Tasks `FaceLandmarker`, CPU) | Apache-2.0 |
 | pytest (development only) | `>=8,<10` | Hardware-independent automated tests | MIT |
 
-MediaPipe pulls in absl-py, flatbuffers, certifi, sounddevice (+cffi) and
-matplotlib (+pillow and friends); none of them is used by GazeFix directly. The
+MediaPipe declares absl-py, attrs, flatbuffers, jax, jaxlib, matplotlib,
+protobuf, sentencepiece and sounddevice; none is used by GazeFix directly and
+jax, jaxlib, scipy and sentencepiece are never even imported at runtime (they
+cost disk space, about 470 MB, not start-up time). MediaPipe 0.10.21 requires
+`numpy<2`, which is why NumPy resolves to 1.26.x and OpenCV to 4.11.x. The
 model file has its own Apache-2.0 licence; see `models/README.md` and
 `docs/decisions/ADR-0001-face-tracker-mediapipe.md` for the full dependency
-and model record.
+and model record, including why this version is pinned.
 
 ## Environment setup
 
@@ -48,7 +50,7 @@ py -3.12 -m venv .venv
 ```
 
 Python 3.11 can be substituted for 3.12; the project declares `>=3.11,<3.13`
-because MediaPipe 1.0.1 is classified for Python 3.9–3.12 only. **Upgrading an
+because MediaPipe 0.10.21 is classified for Python 3.9–3.12 only. **Upgrading an
 existing M0 environment:** create a fresh `.venv` (recommended) or run
 `pip uninstall -y opencv-python` first. pip does not notice that
 `opencv-python` and `opencv-contrib-python` install the same `cv2` package;
@@ -259,21 +261,19 @@ an in-memory copy of each frame and the model file is read from disk. The only
 network access in GazeFix's own code is the explicit `scripts/fetch_model.py`
 command.
 
-**Third-party disclosure:** the MediaPipe 1.0.1 native library itself contacts
-`play.googleapis.com` (Google's usage-logging endpoint) when a face landmarker
-is closed — at exit, and on every error-driven tracker rebuild (at most
-`tracking_max_rebuilds` = 3 per camera selection) — sending usage statistics
-and system information, not frames (measured and documented in
-`docs/tracking.md`, section 13). There is no switch for it in MediaPipe's
-API. Until the Product Manager decides how to handle it, users who want to
-prevent that connection can block the GazeFix Python interpreter's outbound
-traffic. Prefer a rule that *rejects* the connection (or a hosts-file entry
-sending `play.googleapis.com` to `127.0.0.1`): a silently dropping block
-makes the library's close call wait about 5 s for its timeout, which exceeds
-the 2 s tracker join at shutdown — the window still closes at once and the
-process ends within the additional grace period, but the log will report
-`tracker_shutdown_timeout`. GazeFix itself needs no network access after
-`scripts/fetch_model.py` has run.
+**No runtime network access.** GazeFix needs no network connection after
+`scripts/fetch_model.py` has installed the model, and neither does its
+tracking backend. This was checked rather than assumed: a full-lifecycle
+syscall trace of MediaPipe 0.10.21 (import, model load, 30 s of continuous
+inference, idle, state reset, close, rebuild, close) recorded **no network
+syscalls at all**, with a deliberate connection at the end of the same trace
+proving the measurement would have caught one. The MediaPipe 1.0.x line does
+upload usage statistics when a landmarker is closed, which is the reason this
+project pins 0.10.21; see `docs/tracking.md` section 13 and
+`docs/decisions/ADR-0001-face-tracker-mediapipe.md`. The trace was taken on
+Linux, so Windows runtime behaviour is not verified by it; the Windows
+binaries link no networking API, but confirming that on the target machine is
+a Product Owner check.
 
 Closing the window waits at most `worker_join_timeout_s` in total. A camera
 release is a driver call with no upper bound, so the window never performs one:
