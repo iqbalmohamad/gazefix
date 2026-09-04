@@ -69,6 +69,7 @@ class MetricsSnapshot:
     no_face_frames: int = 0
     tracking_timeouts: int = 0
     tracking_errors: int = 0
+    tracking_unavailable: int = 0
     tracking_replaced: int = 0
 
 
@@ -89,6 +90,7 @@ class PipelineMetrics:
         self._no_face_frames = 0
         self._tracking_timeouts = 0
         self._tracking_errors = 0
+        self._tracking_unavailable = 0
         self._tracking_replaced = 0
 
     def record_capture(self) -> None:
@@ -130,8 +132,14 @@ class PipelineMetrics:
                 self._no_face_frames += 1
             elif status == "timeout":
                 self._tracking_timeouts += 1
-            elif status in ("error", "unavailable"):
+            elif status == "error":
                 self._tracking_errors += 1
+            elif status == "unavailable":
+                # A tracker that cannot run at all (no model, failed start,
+                # shutdown) is a different operational condition from a
+                # backend that ran and raised; keeping them apart makes the
+                # diagnostics and the milestone report truthful.
+                self._tracking_unavailable += 1
             if inference_ms is not None and inference_ms > 0:
                 self._tracking_inference_ms = _smooth(self._tracking_inference_ms, inference_ms)
             if total_ms is not None and total_ms > 0:
@@ -164,6 +172,7 @@ class PipelineMetrics:
                 no_face_frames=self._no_face_frames,
                 tracking_timeouts=self._tracking_timeouts,
                 tracking_errors=self._tracking_errors,
+                tracking_unavailable=self._tracking_unavailable,
                 tracking_replaced=self._tracking_replaced,
             )
 

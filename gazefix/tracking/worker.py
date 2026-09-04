@@ -88,12 +88,21 @@ class _Submission:
 
 @dataclass(frozen=True, slots=True)
 class WorkerStatus:
-    """What the processor needs to label a frame it publishes untracked."""
+    """What the processor needs to label a frame it publishes untracked.
+
+    ``stopping`` is read from the worker's stop event under the same lock as
+    ``state``. It is reported separately because the two are independent for
+    a short while: ``stop()`` sets the event immediately, while the thread
+    only reaches the ``UNAVAILABLE`` state once its loop has exited. A frame
+    that finds no result during that window was not slow, it was cut short by
+    shutdown, and must not be labelled (or counted) as a timeout.
+    """
 
     state: str
     message: str
     description: str
     generation: int
+    stopping: bool = False
 
 
 class TrackerWorker:
@@ -221,7 +230,13 @@ class TrackerWorker:
             return self._status_locked()
 
     def _status_locked(self) -> WorkerStatus:
-        return WorkerStatus(self._state, self._message, self._description, self._generation or 0)
+        return WorkerStatus(
+            self._state,
+            self._message,
+            self._description,
+            self._generation or 0,
+            stopping=self._stop.is_set(),
+        )
 
     def mark_unavailable(self, message: str) -> None:
         """Label every frame as unavailable (the thread could not be started)."""
@@ -233,6 +248,11 @@ class TrackerWorker:
         logger.info("Tracker worker started", extra={"event": "tracker_worker_started"})
         try:
             while not self._stop.is_set():
+                # Cleared before every iteration: an exception raised while
+                # obtaining the next submission must never be attributed to
+                # the frame the previous iteration already handled and
+                # published.
+                submission: _Submission | None = None
                 try:
                     submission = self._next_submission()
                     if self._stop.is_set():
@@ -246,12 +266,12 @@ class TrackerWorker:
                     # Anything outside the per-frame inference path (a reset,
                     # a close, analysis) is treated like an inference failure
                     # burst: the tracker is rebuilt through the bounded path
-                    # and the frame, if any, is published as an error.
+                    # and the frame in hand, if any, is published as an error.
                     logger.exception(
                         "Tracker worker iteration failed; rebuilding through the bounded path",
                         extra={"event": "tracker_worker_error"},
                     )
-                    self._recover_from_crash(exc, submission if "submission" in locals() else None)
+                    self._recover_from_crash(exc, submission)
         finally:
             self._close_tracker("worker exit")
             with self._condition:

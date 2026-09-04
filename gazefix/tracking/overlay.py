@@ -14,6 +14,7 @@ and labelled ``L``. The head-pose axes are drawn at the nose tip and labelled
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import cv2
 import numpy as np
@@ -92,10 +93,69 @@ def _draw_points(canvas: Frame, points: np.ndarray, colour: tuple[int, int, int]
             cv2.circle(canvas, (x, y), radius, colour, -1, lineType=cv2.LINE_AA)
 
 
+def _clip_segment(
+    x0: float, y0: float, x1: float, y1: float, width: int, height: int
+) -> tuple[float, float, float, float] | None:
+    """Liang-Barsky: the part of the segment inside the image, or ``None``.
+
+    Clamping a vertex to the border would move the line, drawing a contour
+    along the image edge that no landmark supports. Clipping keeps the
+    segment's true geometry and simply stops it where it leaves the frame;
+    a segment entirely outside is dropped.
+    """
+
+    if not all(math.isfinite(v) for v in (x0, y0, x1, y1)):
+        return None
+    dx, dy = x1 - x0, y1 - y0
+    x_max, y_max = float(width - 1), float(height - 1)
+    enter, leave = 0.0, 1.0
+    for delta, distance in (
+        (-dx, x0 - 0.0),
+        (dx, x_max - x0),
+        (-dy, y0 - 0.0),
+        (dy, y_max - y0),
+    ):
+        if delta == 0.0:
+            if distance < 0.0:
+                return None  # parallel to this edge and wholly outside it
+            continue
+        crossing = distance / delta
+        if delta < 0.0:
+            if crossing > leave:
+                return None
+            enter = max(enter, crossing)
+        else:
+            if crossing < enter:
+                return None
+            leave = min(leave, crossing)
+    if enter > leave:
+        return None
+    return (x0 + enter * dx, y0 + enter * dy, x0 + leave * dx, y0 + leave * dy)
+
+
 def _draw_polyline(canvas: Frame, points: np.ndarray, colour: tuple[int, int, int], closed: bool) -> None:
-    clipped = _clip(points, canvas)
-    if len(clipped) >= 2:
-        cv2.polylines(canvas, [np.array(clipped, dtype=np.int32)], closed, colour, 1, lineType=cv2.LINE_AA)
+    """Draw each segment's visible part; off-screen parts are clipped away."""
+
+    height, width = canvas.shape[:2]
+    if len(points) < 2:
+        return
+    segments = list(zip(points, points[1:]))
+    if closed:
+        segments.append((points[-1], points[0]))
+    for start, end in segments:
+        visible = _clip_segment(
+            float(start[0]), float(start[1]), float(end[0]), float(end[1]), width, height
+        )
+        if visible is None:
+            continue
+        cv2.line(
+            canvas,
+            (int(round(visible[0])), int(round(visible[1]))),
+            (int(round(visible[2])), int(round(visible[3]))),
+            colour,
+            1,
+            lineType=cv2.LINE_AA,
+        )
 
 
 def _draw_eye(
@@ -108,26 +168,44 @@ def _draw_eye(
         iris = eye.iris[:, :2] * scale
         centre = iris[0]
         radius = float(np.mean(np.hypot(*(iris[1:] - centre).T)))
-        if np.isfinite(radius) and np.all(np.isfinite(centre)):
+        if np.isfinite(radius) and _inside(centre, canvas):
             cx, cy = _clip(centre[None, :], canvas)[0]
             cv2.circle(canvas, (cx, cy), max(1, min(int(round(radius)), max(width, height))), colour, 1, lineType=cv2.LINE_AA)
             cv2.circle(canvas, (cx, cy), 2, colour, -1, lineType=cv2.LINE_AA)
-    ox, oy = _clip(contour[topology.CONTOUR_OUTER_CORNER_POSITION][None, :], canvas)[0]
-    text = f"{label} {eye.openness:.2f}" + ("" if eye.valid else " !")
-    cv2.putText(canvas, text, (ox - 8, oy - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1, cv2.LINE_AA)
+    # The label is anchored to a landmark: drawing it from a clamped position
+    # would put it somewhere no landmark is, so an off-screen corner has none.
+    corner = contour[topology.CONTOUR_OUTER_CORNER_POSITION]
+    if _inside(corner, canvas):
+        ox, oy = _clip(corner[None, :], canvas)[0]
+        text = f"{label} {eye.openness:.2f}" + ("" if eye.valid else " !")
+        cv2.putText(canvas, text, (ox - 8, oy - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1, cv2.LINE_AA)
 
 
 def _draw_pose_axes(canvas: Frame, origin: np.ndarray, result: TrackingResult, length: int) -> None:
     pose = result.pose
     if pose is None:
         return
+    if not _inside(origin, canvas):
+        return  # the axes are anchored at the nose tip; off-screen means no anchor
+    height, width = canvas.shape[:2]
     ox, oy = _clip(origin[None, :], canvas)[0]
     rotation = pose.rotation
     for column, colour in ((0, _AXIS_X), (1, _AXIS_Y), (2, _AXIS_Z)):
         axis = rotation[:, column]
         # Camera frame y points up; image rows grow downwards.
-        end = (int(round(ox + axis[0] * length)), int(round(oy - axis[1] * length)))
-        cv2.line(canvas, (ox, oy), end, colour, 2, lineType=cv2.LINE_AA)
+        visible = _clip_segment(
+            float(ox), float(oy), ox + float(axis[0]) * length, oy - float(axis[1]) * length, width, height
+        )
+        if visible is None:
+            continue
+        cv2.line(
+            canvas,
+            (int(round(visible[0])), int(round(visible[1]))),
+            (int(round(visible[2])), int(round(visible[3]))),
+            colour,
+            2,
+            lineType=cv2.LINE_AA,
+        )
     cv2.putText(
         canvas,
         f"head pose (not gaze) yaw {pose.yaw_deg:+.0f} pitch {pose.pitch_deg:+.0f} roll {pose.roll_deg:+.0f}",
@@ -170,6 +248,14 @@ def _draw_text_panel(canvas: Frame, result: TrackingResult, style: OverlayStyle)
         cv2.rectangle(canvas, (x - 4, y - th - 4), (x + tw + 4, y + 5), (20, 20, 20), -1)
         cv2.putText(canvas, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1, cv2.LINE_AA)
         y += th + 10
+
+
+def _inside(point: np.ndarray, canvas: Frame) -> bool:
+    """Whether a pixel-space point is finite and within the image."""
+
+    height, width = canvas.shape[:2]
+    x, y = float(point[0]), float(point[1])
+    return math.isfinite(x) and math.isfinite(y) and 0.0 <= x < width and 0.0 <= y < height
 
 
 def _ms(value: float | None) -> str:

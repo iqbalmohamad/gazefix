@@ -99,7 +99,11 @@ class TrackingProcessor:
         )
         waited_ms = (time.perf_counter() - started) * 1000.0
         if result is None or not result.belongs_to(context.capture_sequence, context.camera_request_id):
-            if status.state == STATE_READY:
+            if status.stopping:
+                # Shutdown cut the wait short; the tracker was not slow.
+                tracking_status = TrackingStatus.UNAVAILABLE
+                message = "tracking stopped"
+            elif status.state == STATE_READY:
                 tracking_status, message = TrackingStatus.TIMEOUT, "tracking result not ready in time"
                 self._note_timeout()
             elif status.state == STATE_INITIALIZING:

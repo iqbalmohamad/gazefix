@@ -37,7 +37,7 @@ def test_metrics_snapshot_keeps_counts_and_replacements() -> None:
         ("no_face", "no_face_frames"),
         ("timeout", "tracking_timeouts"),
         ("error", "tracking_errors"),
-        ("unavailable", "tracking_errors"),
+        ("unavailable", "tracking_unavailable"),
         ("initializing", None),
     ],
 )
@@ -47,7 +47,14 @@ def test_tracking_outcomes_increment_exactly_one_counter(status: str, field: str
     snapshot = metrics.snapshot()
     counters = {
         name: getattr(snapshot, name)
-        for name in ("tracked_frames", "low_quality_frames", "no_face_frames", "tracking_timeouts", "tracking_errors")
+        for name in (
+            "tracked_frames",
+            "low_quality_frames",
+            "no_face_frames",
+            "tracking_timeouts",
+            "tracking_errors",
+            "tracking_unavailable",
+        )
     }
     assert sum(counters.values()) == (0 if field is None else 1)
     if field is not None:
