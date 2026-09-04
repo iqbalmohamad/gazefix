@@ -1,4 +1,103 @@
-# Architecture (Milestone 0 foundation, Milestone 1 tracking, Milestone 2 gaze)
+# GazeFix architecture
+
+This document has two parts. **Part I** describes the system that actually
+exists at the frozen Milestone 2 baseline (`milestone-2` at
+`81e06118801c23d2337629fc676d6ad8ac13716a`) — it describes reality, verified
+against the code, not an aspiration. **Part II** is the architecture baseline
+adopted at the overall architecture pass (2026-09-04) for Milestones 3–10: the
+stage boundaries, contracts, ownership and failure domains that future
+milestones implement incrementally, without rewriting the application core.
+
+Detailed per-milestone contracts stay in their own documents and are not
+duplicated here: `docs/tracking.md` owns the M1 tracking contract, coordinate
+conventions and failure budgets; `docs/gaze.md` owns the M2 gaze model, sign
+conventions and confidence semantics; `docs/decisions/` holds the decision
+records (ADR-0001 backend choice; ADR-0002 correction-engine boundary;
+ADR-0003 execution model and frame ownership); `docs/qa-policy.md` owns
+verification process, not architecture.
+
+# Part I — The frozen system (M0 foundation, M1 tracking, M2 gaze)
+
+## The system at a glance
+
+```text
+                                Qt main thread
+                (widgets, timers, poll-and-present, metrics labels)
+                                      ▲  poll: consume_latest_output
+                                      │  (generation-filtered)
+ capture thread                       │
+ "gazefix-camera-capture"             │
+ OpenCV read loop ──▶ latest-frame ──▶ processing worker ──▶ latest-output
+ (camera generations,  buffer          "gazefix-processor"    buffer
+  MSMF→DSHOW fallback) (1 slot,        TrackingProcessor      (1 slot,
+                        newest wins)     │submit    ▲bounded   newest wins)
+                                         ▼          │wait ≤ tracking_wait_ms
+                                     tracker thread "gazefix-tracker"
+                                     MediaPipe FaceLandmarker (CPU)
+                                     → analysis → gaze estimation
+                                     (1-slot submission in, 1-slot result out)
+
+ side threads: "gazefix-camera-discovery" (index probing),
+               two PreparedCameraCloser daemons (camera-release cleanup)
+```
+
+Every hand-off on the frame path is a one-slot, newest-wins buffer; no queue
+exists anywhere. The details of each mechanism follow in this part; this
+section is the inventory an architect needs in one place.
+
+**Threads and the mutable state each one owns:**
+
+| Thread | Owns (mutable state / resources) | Stops by |
+| --- | --- | --- |
+| Qt main | widgets, both timers, last-QImage/last-tracking caches, discovery service, the discovery-owned closer | `closeEvent`, one deadline (`worker_join_timeout_s`) |
+| `gazefix-camera-capture` | the open `VideoCapture` (sole releaser), capture state machine, generation application | stop event + flag-only interrupt; bounded join |
+| `gazefix-processor` | the `FrameProcessor` lifecycle (`start`/`process`/`close`) | stop event + buffer wake; bounded join |
+| `gazefix-tracker` | `FaceTracker` instance, primary-face selector, landmark stabiliser, gaze estimator and its smoother, all error/rebuild budgets | stop event; join ≤ `tracking_join_timeout_s`; abandoned as daemon if wedged in a native call |
+| `gazefix-camera-discovery` | probe loop, provisional prepared camera | `request_stop` + bounded join |
+| two `PreparedCameraCloser` daemons | queued camera-release tokens (runtime-owned and discovery-owned, never shared) | drain; bounded join |
+
+**Failure domains and their budgets (M2 state):**
+
+| Domain | Contained where | Budget and recovery |
+| --- | --- | --- |
+| camera | capture worker | degraded on read failures; stall/threshold → release + reopen with backoff; backend demotion; the capture thread never dies |
+| tracking | `TrackerWorker` | init: 5 attempts with backoff per camera generation; inference: rebuild after 3 consecutive errors, at most 3 rebuilds per generation, then UNAVAILABLE until the camera changes |
+| gaze | `TrackerWorker`, separate budget | raising `estimate` contained (never spends the tracker's budget); retired after 10 consecutive failures, or at once when its `reset` fails; revived only on generation change |
+| processor seam | `ProcessingWorker` | any `process()` exception publishes the original frame; the preview never freezes |
+
+**Temporal-state reset matrix (M2 state):**
+
+| Event | Backend tracking state | Primary-face memory | Landmark stabiliser | Gaze smoother | Budgets re-armed |
+| --- | --- | --- | --- | --- | --- |
+| camera generation change | reset | reset | reset | reset (and a retired estimator revived) | yes |
+| frame gap > `tracking_reset_gap_s` | reset | reset | reset | reset | no |
+| face lost / identity change | — | per policy | reset | reset | no |
+| gaze unavailable on a frame | — | — | — | reset | no |
+| inference failure | — | reset | reset | reset | no |
+
+**Substitution seams, all proven by fakes in the test suite:** the
+`CameraSource` protocol and `source_factory` parameters; the `FrameProcessor`
+protocol (`start`/`process`/`close`); the `FaceTracker` protocol and
+`TrackerFactory` (the only MediaPipe boundary); the `GazeEstimator` protocol
+(the only gaze-algorithm boundary); injectable clocks. These seams are the
+system's substitution surface: Part II extends the same pattern to correction,
+calibration and virtual-camera output instead of inventing a new one.
+
+**Configuration (M2 state):** every runtime setting lives on the frozen
+`AppSettings` dataclass (`gazefix/config.py`), validated at startup and set
+only through CLI flags; gaze-model constants that are not product-facing live
+in `gazefix.gaze.estimator.GazeSettings`. There is no settings persistence of
+any kind yet — Part II, "Configuration ownership", defines where future
+settings belong.
+
+**Diagnostics (M2 state):** `PipelineMetrics` (`gazefix/diagnostics/metrics.py`)
+collects capture/display FPS (rolling 2 s windows), EMA-smoothed
+processing/pipeline-latency/tracking/gaze durations, and per-status counters,
+written from the capture, processor and tracker threads and snapshotted by the
+Qt metrics timer; the consumer UI shows a small subset, `--dev` shows a detail
+line, and a full snapshot is logged at shutdown. The development overlay is
+drawn by the tracking processor on a copy of the frame, gated by
+`--dev`/`--overlay`, and is never part of the consumer UI.
 
 ## Data flow
 
@@ -534,3 +633,597 @@ termination. See docs/tracking.md section 14. The runtime's `STOPPED` latch keep
 its M0 meaning (the runtime-owned capture and processor threads and
 prepared-camera cleanup); the tracker thread's state is reported separately
 and truthfully rather than folded into it.
+
+# Part II — Architecture baseline for M3–M10
+
+Adopted at the overall architecture pass, 2026-09-04, on the frozen M2
+baseline. This part answers one question: given what GazeFix actually is
+after M2, how do the remaining milestones — offline correction (M3),
+real-time correction (M4), temporal stabilization (M5), calibration (M6),
+performance (M7), virtual camera (M8), neural evaluation (M9),
+productization (M10) — fit into the pipeline without rewriting the core?
+
+It is architecture, not milestone system analysis: it fixes boundaries,
+contracts, ownership, dependency direction and failure domains. Algorithm
+choices, warp math, mask construction and per-milestone task lists belong to
+each milestone's own SA. The final section separates what is now stable from
+what is deliberately deferred.
+
+Two decisions with long-term cost are recorded as ADRs and only summarized
+here: **ADR-0002** (correction is a separate engine stage behind a
+`CorrectionEngine` protocol; gaze estimation stays owned by tracking) and
+**ADR-0003** (one processing worker through M4–M8; copy-once frame
+ownership; per-consumer output buffers).
+
+## Target MVP architecture
+
+```text
+ capture worker ──▶ latest-frame buffer ──▶ processing worker (one thread)
+ (unchanged)         (1 slot)                 │
+                                              │ 1. tracking + gaze      M1/M2, unchanged
+                                              │    (tracker thread, bounded wait)
+                                              │ 2. target resolution    M6 (before M6: fixed
+                                              │    (calibration profile) camera target)
+                                              │ 3. correction policy    M4 (effective strength
+                                              │    (deviation/confidence  from requested strength,
+                                              │     gates, ramps)         PRD §10 curve)
+                                              │ 4. correction engine    M3 code, M4 wiring
+                                              │    (geometric first;     — owns masks and
+                                              │     neural M9, same seam) blending, writes ONE
+                                              │                           working copy
+                                              │ 5. dev overlay          existing, moves after
+                                              │    (dev builds only)      correction
+                                              ▼
+                                 ProcessedFrame (immutable again)
+                                   ├─▶ preview buffer (1 slot) ─▶ Qt poll (unchanged)
+                                   └─▶ output buffer  (1 slot) ─▶ virtual-camera worker (M8)
+                                                                    └─▶ VirtualCameraBackend
+```
+
+What stays exactly as frozen: capture, discovery, camera generations, the
+latest-frame buffers, the `FrameProcessor` seam, the tracker thread and both
+its slots, the Qt polling preview, the runtime lifecycle, shutdown
+accounting. What is added, per milestone, is stages 2–5 inside the existing
+processing worker and one new consumer thread at M8. Nothing about this
+target requires touching the frozen core; every addition happens behind an
+existing seam or as a new module.
+
+The PRD §18 sketch draws gaze estimation as its own pipeline stage;
+the frozen system deliberately runs it inside tracking (on the tracker
+thread, riding the `TrackingResult`), and this baseline keeps that: it is
+cheaper, gives gaze the frame's identity for free, and M2 froze its failure
+containment. The PRD sketch is conceptual; this is the concrete shape.
+
+## Stage boundaries and data contracts
+
+The contract rules that already govern M0–M2 extend to every new stage:
+results are immutable frozen dataclasses; every result names its frame
+(`capture_sequence`, `captured_at_ns`, `camera_request_id`) or rides on one
+that does; unavailable is an explicit status with a reason, never `None`-means-
+something or a fabricated value; heuristics carry provenance strings; timing
+fields are `None` when nothing was measured.
+
+| Contract | Purpose | Producer → consumers | Notes |
+| --- | --- | --- | --- |
+| `TrackingResult` (exists) | landmarks, eyes, pose, quality + embedded gaze for one frame | tracker thread → correction policy/engine, overlay, UI | unchanged; already carries everything correction needs |
+| `GazeResult` (exists) | uncalibrated source gaze + confidence | gaze estimator → target resolution, policy, UI | unchanged; the *source gaze* of PR-5 |
+| target gaze | where corrected eyes should appear to look | target resolution → policy, engine | a unit direction in the `GazeResult` camera frame; default `(0, 0, 1)` (the camera). Not a new dataclass until M6 gives it structure |
+| `CorrectionResult` (M4) | what correction did to one frame | correction stage → `ProcessedFrame`, metrics, UI | status `CORRECTED` / `SKIPPED(reason)` / `FAILED(reason)`, applied (effective) strength, `correction_ms`, optional debug metadata (e.g. mask bounds) for the overlay. Immutable; identity comes from the `TrackingResult` it answers |
+| `ProcessedFrame` (exists, extended M4) | the frame a consumer shows/sends + its metadata | processing worker → preview, virtual camera | gains `correction: CorrectionResult \| None` exactly as it carries `tracking` today |
+| `CalibrationProfile` (M6) | per-user gaze mapping | calibration store → target resolution | immutable; schema-versioned; persisted locally; see "Calibration seam" |
+
+There is deliberately no `CorrectionRequest` object: the engine call takes
+`(frame, tracking, target, strength)` directly (ADR-0002). Bundling those
+into a dataclass would add a wrapper with one producer and one consumer and
+no identity of its own. Likewise there is no god result: `ProcessedFrame`
+aggregates per-stage results by reference, each stage's result stays its own
+type, and image data lives only in `ProcessedFrame.frame` — every other
+contract is metadata.
+
+## Frame ownership and copying
+
+The frozen invariant stands: captured frames are marked read-only at the
+source and shared by reference across threads; nothing ever writes a
+published array. Correction is the first stage that needs writable pixels,
+and the rule is **copy once, then reuse** (ADR-0003):
+
+- The correction engine allocates **one** writable working copy of the
+  captured frame per corrected frame, warps and blends into it, and returns
+  it. Masks, patches and blending are engine-internal; no second full-frame
+  copy exists on the correction path.
+- The dev overlay draws on whatever frame the stage chain hands it: the
+  working copy when correction ran (no extra copy), its own copy of the
+  original otherwise (exactly as today).
+- Before publication the working copy is frozen (`setflags(write=False)`),
+  so `ProcessedFrame.frame` is immutable again and both consumers share it
+  by reference, exactly as the preview shares captured frames today.
+- The preview keeps its detached `QImage.copy()`; a virtual-camera backend
+  that needs a different pixel format converts inside the backend adapter
+  (that conversion is the backend's own buffer, not a pipeline copy).
+- An uncorrected frame (correction skipped, failed, disabled, or no valid
+  tracking) passes through as the original read-only array with zero copies,
+  exactly as every frame does today.
+
+Steady-state cost per displayed corrected frame at 720p is therefore one
+2.7 MB working copy plus the preview's existing QImage copy. That is the
+budget; shared-memory pools, in-place mutation of capture buffers and
+triple-buffer schemes are rejected as unnecessary at this resolution
+(ADR-0003 lists the alternatives). Revisit only if M7 measurement shows the
+copy itself (≈ millisecond scale) matters.
+
+Stale output cannot occur by construction: correction runs synchronously in
+the worker on the frame it was handed, so a correction result can never be
+paired with a different frame. If a correction sub-worker is ever split out
+(see below), the same identity fields that gate tracking results
+(`belongs_to`) gate correction results.
+
+## Threading and execution model
+
+**One processing worker through M4–M8** (ADR-0003). Tracking and gaze stay
+on the tracker thread; target resolution, policy, correction and overlay run
+serially on the existing `gazefix-processor` thread. No new frame-path
+thread is added until measurement proves the budget broken.
+
+The honest throughput arithmetic: with the frozen submit-then-wait design
+the tracker thread is idle while the processor corrects, so per-frame cost
+is approximately `inference + correction` in series. Tracking inference is
+~14 ms (measured, ADR-0001). The frame period is 33 ms at 30 FPS and 41 ms
+at the 24 FPS floor, so correction (warp + blend + copy) has a budget of
+roughly **15–25 ms** on the target CPU. Inside that budget, one worker
+holds full frame rate with no added pipeline latency.
+
+**The split trigger:** if, after M4 measurement and reasonable optimization
+(and again at M7), `inference + correction` exceeds the 41 ms floor on the
+target machine, correction moves to its own worker fed by a one-slot
+latest-value hand-off — the exact pattern the tracker thread already uses —
+so inference of frame N+1 overlaps correction of frame N. That buys
+throughput at the price of one frame of extra latency and a second
+stale-result guard; it is designed now, reserved, and not built until the
+measurement demands it.
+
+**Backpressure is unchanged everywhere:** newest wins at every one-slot
+buffer. If correction is slower than capture, frames are replaced in the
+capture buffer and output FPS drops; latency never grows and no queue ever
+forms. A slow consumer (preview or virtual camera) replaces values in its
+own output buffer and affects nobody else.
+
+**Stage skipping:** target resolution falls back to the fixed camera target
+when no profile exists; correction is skipped (frame passes as original)
+when disabled, when strength resolves to zero, when tracking or gaze is
+unavailable for the frame, or when the engine is retired; the overlay is
+dev-only; the virtual camera runs only when started. Tracking itself is
+never skipped while enabled — a slow tracker times out per frame exactly as
+today.
+
+**Degradation stays local; nothing restarts a larger subsystem:** the
+camera reopen loop, the tracker rebuild budget, gaze retirement, correction
+retirement (below) and virtual-camera stop are each confined to their own
+domain. `PipelineRuntime` remains single-use; no failure anywhere escalates
+to a pipeline or application restart.
+
+## M3 — offline correction architecture
+
+M3 proves visible gaze redirection on still images, recorded frames or
+short clips, without real-time constraints. The architectural requirement
+is that the M3 correction code is the *production* engine exercised
+offline — not a prototype to be rewritten for M4:
+
+- **`gazefix/correction/`** is created in M3 with the engine behind the
+  `CorrectionEngine` protocol (ADR-0002): `description`,
+  `correct(frame, tracking, target, strength) -> CorrectionResult`,
+  `reset()`, `close()`, created by a factory on its owning thread. The
+  module consumes only the existing contracts (`TrackingResult`,
+  `GazeResult`) and NumPy/OpenCV; it imports no Qt, no pipeline, no camera
+  code, and performs no I/O.
+- **The offline harness is a CLI** following the `validate.py` /
+  `scripts/tracking_test.py` pattern: load input → run the real tracker and
+  gaze estimator synchronously (the same analysis path the diagnostic
+  already uses) → call the engine with configurable target and strength →
+  write before/after outputs and a JSON report. The harness imports the
+  engine; nothing in the engine knows the harness exists.
+- **Strength semantics** (PRD §9): requested strength `s ∈ [0, 1]`,
+  interpolation not binary — corrected gaze ≈ source + `s`·(target −
+  source), expressed in yaw/pitch space. `0` must be a true no-op
+  (bit-identical passthrough). The deviation-dependent curve of PRD §10
+  (light near zero deviation, fading out above ~35°) is **policy**, not
+  engine: the policy layer turns requested strength, deviation and
+  confidence into the effective strength the engine receives, so engines
+  stay simple and the curve stays tunable without touching engines.
+- **Masks and blending are engine-internal** (ADR-0002): the engine returns
+  a complete corrected frame. Mask helpers live as library code inside
+  `gazefix/correction/` for reuse and for mask-debug output; a separate
+  compositor *stage* is deliberately not created (single caller, premature
+  contract).
+- **Failure behavior:** the engine documents never-raise (unusable input →
+  `SKIPPED`/`FAILED` result with a reason) and the caller contains a raise
+  anyway — the M2 gaze lesson applied verbatim.
+
+What M3 SA decides (not this document): the warp technique, mask
+construction, blending method, eye-region definition, interpolation
+details, the quality-scoring procedure against PRD §28, and harness input
+formats. M3 is the PRD's major quality gate: if visible, natural
+redirection cannot be shown offline, that verdict must surface at the gate
+rather than be engineered around.
+
+## M4 — real-time integration
+
+Correction enters through the existing `FrameProcessor` seam by
+composition: a staged processor wraps the frozen tracking stage and applies
+policy + engine to its output on the processing worker. Concretely,
+`process(frame, context)` runs tracking exactly as today, then: if the
+result's gaze is `ESTIMATED`, resolve target, compute effective strength,
+call the engine, and publish the working copy with a `CORRECTED` result; in
+every other case publish the original frame with a `SKIPPED` reason
+(`no gaze`, `low confidence`, `timeout`, `disabled`, `strength 0`, engine
+retired) or `FAILED`. The dev overlay moves to the end of the chain so it
+annotates what the consumer actually sees.
+
+- **Gaze unavailable / low confidence:** correction fades rather than
+  snaps — the policy ramps effective strength toward zero over a bounded
+  interval (refined in M5), then frames pass as originals. Correction never
+  runs on `LOW_CONFIDENCE` or stale gaze.
+- **Correction failure:** contained like gaze — its own consecutive-error
+  budget; retirement until camera generation change or the user toggles
+  correction off/on; rate-limited logging; the frame path always keeps the
+  original frame. Correction failures never touch the tracker's or gaze's
+  budgets.
+- **Latency measurement:** `correction_ms` is recorded around policy +
+  engine + freeze, on the processing worker, and joins the metrics snapshot
+  and dev detail line; the existing `processing_ms` automatically absorbs it,
+  keeping the end-to-end pipeline latency truthful.
+- **Engine lifecycle:** the factory is invoked and the engine created,
+  reset and closed on the processing worker (mirroring the tracker-thread
+  ownership rule); engine initialization failure marks correction
+  unavailable with an actionable message and never blocks the preview.
+- The M4 acceptance target (≥ 20 FPS development prototype) is measured
+  with the diagnostics below, not asserted.
+
+## Temporal stabilization (M5)
+
+Four smoothers with four owners — deliberately not one generic smoothing
+subsystem, because the signals have different frames, rates and reset
+rules:
+
+1. **Landmark stabiliser** (exists, tracker thread) — image-space landmark
+   jitter.
+2. **Gaze smoother** (exists, inside the estimator) — eye-in-head direction.
+3. **Correction-parameter smoothing** (M4/M5, policy layer, processing
+   worker) — effective strength and target ramps: fade-in on acquisition,
+   fade-out on loss/disable, slew-limited strength changes. This is the
+   primary tool against correction flicker and oscillation.
+4. **Image/output stabilization** (M5, only if 1–3 prove insufficient) — a
+   last resort, because image-space smoothing costs copies and risks ghosting;
+   its necessity is an M5 SA question, not a foregone conclusion.
+
+Reset rules extend the frozen matrix: correction-parameter state resets on
+face loss, camera generation change, Refresh/camera switch, correction
+disable, and calibration profile change. The structural test pattern that
+guards gaze resets today (every stabiliser-reset site must reset the gaze
+smoother) extends to the correction-parameter state at M4/M5.
+
+## Calibration seam (M6)
+
+Only the seam is defined now; calibration math, sampling UI and profile
+schema details are M6 SA.
+
+- **`CalibrationProfile`** is an immutable, schema-versioned value object,
+  produced by a calibration workflow (UI layer) and persisted locally as a
+  small file under the per-user data directory (sibling of `logs/` and
+  `models/`). Profiles are data, not settings.
+- **Ownership:** a `CalibrationStore` (M6, `gazefix/calibration/`) loads,
+  validates and saves profiles. The active profile reaches the processing
+  stage as an immutable object through a thread-safe setter on the staged
+  processor — the same pattern as the overlay toggle — and a profile change
+  resets correction-parameter smoothing.
+- **What it transforms:** target resolution consumes
+  (`GazeResult`, `CalibrationProfile`) and produces the target gaze and any
+  per-user parameters (e.g. a calibrated `eye_model_ratio` replacing the
+  population average — `docs/gaze.md` already designates it as the constant
+  calibration would replace). Uncalibrated operation (no profile) remains a
+  first-class mode: fixed camera target, population constants.
+- **Independence:** calibration depends on the gaze contract only — never on
+  a correction-engine implementation, never on the virtual camera. Engines
+  receive the *resolved* target and strength and cannot tell whether a
+  profile produced them.
+- **Invalidation:** schema version mismatch; explicit recalibration; camera
+  or capture-resolution change as a best-effort check — index probing gives
+  no stable device identity (a frozen, documented limitation), so profile-to-
+  camera matching is advisory (warn and let the user decide), not enforced.
+  This is a known risk (R10 below), not a silently ignored one.
+
+## Correction-engine replaceability and the neural boundary (M9)
+
+The PRD requires that GazeFix not be permanently tied to one correction
+implementation. The mechanism is the one already proven twice (FaceTracker,
+GazeEstimator): a small protocol, a factory, one adapter module per
+backend, and contract types that never leak backend types (ADR-0002).
+
+- **Geometric engine** (M3): pure NumPy/OpenCV inside
+  `gazefix/correction/`; no model file, no new dependencies.
+- **Neural engine** (M9, only if evaluation justifies it): one adapter
+  module is the only place that imports ONNX Runtime — exactly as
+  `mediapipe_tracker.py` is the only MediaPipe importer. Sessions, tensors,
+  providers and DirectML options are private to that module; provider
+  selection (CPU first, DirectML optional later) happens inside it with
+  automatic CPU fallback; inputs and outputs cross the protocol as NumPy
+  arrays only. Model assets follow the M1 pattern: manifest, checksum,
+  explicit fetch script, offline runtime, license recorded in an ADR before
+  adoption.
+- The rest of the application knows an engine only by its `description`
+  string and its `CorrectionResult`s. Engine selection is a configuration
+  value naming a factory.
+- A neural model that wants to estimate gaze internally does not displace
+  the tracking-owned `GazeResult` (which remains the source of truth for
+  status, confidence and the UI); the pipeline feeds every engine the same
+  source gaze. If M9 evaluation shows a compelling model that genuinely
+  requires its own estimation path, that is a new ADR at M9, with evidence —
+  not a silent contract change.
+- ONNX Runtime is **not** added now. One constraint is recorded for M9
+  planning: `mediapipe==0.10.21` caps NumPy below 2, so any neural runtime
+  must resolve against `numpy<2` (risk R9).
+
+## Virtual-camera boundary (M8)
+
+Defined now, implemented in M8:
+
+- **`VirtualCameraBackend` protocol** (PRD §19 shape):
+  `start(width, height, fps)`, `send_frame(frame)`, `stop()`, plus a
+  `description`. One adapter module per backend under `gazefix/output/` is
+  the only importer of the chosen library; the backend choice
+  (pyvirtualcam / OBS / other) is an M8 decision and, because it carries
+  driver and licensing weight, an ADR candidate *then*.
+- **Execution:** a dedicated output worker thread consumes `ProcessedFrame`s
+  from its **own** one-slot buffer (the fan-out in the target diagram), so a
+  slow or blocked backend replaces values in its own buffer and can never
+  backpressure capture, processing or preview. Frames are sent at
+  publication pace; fixed-rate pacing or frame-repeating, if the backend
+  needs it, lives inside the adapter (M8 SA).
+- **Formats:** the pipeline publishes what it has (BGR888, capture
+  resolution); conversion to the backend's format happens in the adapter,
+  in the adapter's own buffer.
+- **Lifecycle:** started and stopped explicitly from the UI; start creates
+  the worker and calls `backend.start`; stop signals the worker, which
+  stops the backend on its own thread within a bounded join — the same
+  ownership rule every other worker follows.
+- **Failure isolation:** send failures consume a bounded consecutive-error
+  budget, then the output stops itself, surfaces a status to the UI, and
+  waits for the user to restart it. A virtual-camera failure never stops
+  capture, processing or preview. Camera/virtual-camera coexistence quirks
+  on Windows are an M8 verification item (risk R5), not an architecture
+  change.
+
+## Diagnostics roadmap
+
+Extend `PipelineMetrics` in place — same recorders/EMA/snapshot/shutdown-log
+pattern, no observability platform:
+
+| Metric | Exists | Arrives |
+| --- | --- | --- |
+| capture FPS, display FPS, processing ms, pipeline latency ms | yes | — |
+| tracking inference/total ms, per-status counters, replaced counters | yes | — |
+| gaze estimation ms, per-status counters | yes | — |
+| correction ms (EMA), corrected/skipped/failed counters, applied strength (dev display) | no | M4 |
+| compositing time | folded into correction ms (engine owns compositing); split only if a compositor stage ever exists | — |
+| per-consumer output replacement counters | output buffer only | M8 (second buffer) |
+| virtual-camera send ms, sent FPS, send-error counter | no | M8 |
+| CPU / memory (optional psutil, PRD §21) | no | M7, where optimization needs it |
+| inference provider / engine description in snapshot | description strings exist in logs/overlay | M9 |
+
+The logging convention stays: structured JSONL events per state change (never
+per frame), rate-limited error events, a full metrics snapshot at shutdown.
+
+## Failure domains and recovery ownership
+
+The M2 lesson is now a rule: **every downstream stage gets its own error
+budget, and a downstream failure never spends an upstream stage's recovery
+budget.** There is deliberately no shared "processing error" mechanism.
+
+| Domain | Contained in | Recovery ownership | User-visible degradation |
+| --- | --- | --- | --- |
+| camera | capture worker (frozen) | reopen with backoff, backend demotion | status text; preview pauses |
+| tracking | tracker worker (frozen) | bounded rebuilds per generation, then wait for camera change | preview continues untracked |
+| gaze | tracker worker, own budget (frozen) | retire; revive on generation change | correction fades/stops; preview continues |
+| correction | staged processor (M4) | own consecutive-error budget; retire until generation change or user toggle | original frames; status shows correction off |
+| compositing | inside the engine = correction domain | same as correction | same as correction |
+| calibration | calibration store (M6) | load/save failures fall back to uncalibrated defaults with a visible notice; never block the pipeline | uncalibrated correction |
+| virtual camera | output worker (M8) | bounded send-error budget; stop output; user restarts | vcam stops; preview unaffected |
+
+Cross-cutting rules, unchanged from the frozen system: budgets re-arm on
+camera generation change; retirement is explicit and logged; every wait is
+bounded; every degradation leaves the original-frame preview usable
+(PRD §4: continuity of video outranks correction).
+
+## Configuration ownership
+
+Four tiers, extending the split that already exists (`AppSettings` vs
+`GazeSettings`):
+
+| Tier | Lives | Examples (future) |
+| --- | --- | --- |
+| product/user settings — persisted | a small local settings file, introduced **with M6** (calibration is the first feature that must persist data; PRD lists saved settings under M10, so M4 may keep correction controls session-only) | correction enabled, correction strength, selected engine, selected calibration profile, virtual-camera on/off + format |
+| runtime constants — code defaults + CLI | `AppSettings`, exactly as today | `correction_wait_budget_ms`, correction error budgets, output worker join timeout |
+| model/engine constants | per-engine settings dataclass in the engine's module (the `GazeSettings` pattern) | mask feathering, warp limits, ONNX provider options |
+| developer/debug | `--dev`-gated flags and dev-mode UI, as today | overlay layers, mask debug view, metrics detail |
+
+Calibration profiles are data files, not settings, and live beside `logs/`
+and `models/` in the per-user directory. The persisted-settings file format
+and migration policy are M6/M10 SA; the tier boundaries are fixed now so new
+knobs land in the right place from M3 onward.
+
+## Dependency direction
+
+```text
+  ui, main ──────────────▶ pipeline ───────▶ contracts ◀─────── engines/stages
+ (Qt only here)   (runtime, processor,   (camera.models,      (camera.source/capture,
+      │            buffers, staged        tracking.models,     tracking.*, gaze.estimator,
+      │            processor)             gaze.models,         correction.*, calibration.*,
+      ▼                                   correction.models*,  output.worker*)
+   config, logging, diagnostics.metrics   calibration.models*)        │
+   (imported by everyone; import          tracking.models ─▶ gaze.models   ▼
+    nothing above this line)              correction.models* ─▶ tracking/gaze models
+                                                       backend adapter modules*
+                                                       (mediapipe_tracker — mediapipe;
+                                                        correction.neural* — onnxruntime;
+                                                        output backend* — pyvirtualcam/…)
+                                          * = future modules
+```
+
+Rules (each already violated-by-nobody today and cheap to keep):
+
+- Contracts import contracts and stdlib/NumPy only, one direction, no
+  cycles (`tracking.models → gaze.models` is the existing edge; future
+  `correction.models` depends on both, nothing depends back on it).
+- Backend libraries (MediaPipe, ONNX Runtime, pyvirtualcam) are imported by
+  exactly one adapter module each, lazily, behind a factory.
+- The UI imports pipeline and contracts; it never imports backend adapters
+  (factories are handed in) and never learns MediaPipe/ONNX types.
+- Correction, calibration and output never import Qt.
+- Tracking never imports correction; calibration never imports output;
+  nothing imports the UI.
+
+## Repository structure
+
+The frozen layout is kept; the PRD §23 sketch is an example, not a target,
+and rearranging to match it would churn reviewed code for nothing.
+
+- **Already right:** `gazefix/{camera,pipeline,tracking,gaze,diagnostics,ui}`,
+  `config.py`, `logging_config.py`; contracts-in-`models.py` convention;
+  one-adapter-per-backend; scripts as thin wrappers over package CLIs;
+  per-milestone docs plus this baseline; `docs/decisions/` ADRs.
+- **Evolves naturally, in the milestone that needs it:** `gazefix/correction/`
+  (M3: engine protocol, geometric engine, models, mask helpers, offline
+  harness CLI + `scripts/` wrapper), `gazefix/calibration/` (M6),
+  `gazefix/output/` (M8), a neural adapter inside `correction/` (M9),
+  per-milestone docs (`docs/correction.md`, …).
+- **Waits until actually needed:** any split of `ui/main_window.py`
+  (calibration dialog arrives at M6), settings-file module (M6),
+  benchmark scripts (M7), installer/packaging layout (M10). No
+  restructuring is done speculatively.
+
+## Architectural risk register
+
+Risks that could invalidate architecture or gate a milestone — ordinary
+implementation choices are excluded. Each names the milestone where it
+bites and the mitigation or decision gate.
+
+| # | Risk | Impact | Milestone | Mitigation / gate |
+| --- | --- | --- | --- | --- |
+| R1 | correction quality: redirected eyes look synthetic or uncanny | product fails its core promise | M3 (major quality gate) | offline-first experimentation; PO visual scoring (PRD §28); subtlety over aggressiveness (PRD §4); M3 gate verdict is allowed to be FAIL/CHANGE APPROACH |
+| R2 | eye-region compositing artifacts (edges, lighting/skin mismatch, blink corruption) | uncanny output, PRD §11 violations | M3–M5 | soft masks and blending inside the engine; blink handling via openness gates; before/after review at the gate |
+| R3 | temporal instability (flicker between corrected/uncorrected, strength oscillation) | unusable live output | M4–M5 | parameter-space smoothing first (fades, slew limits); image-space stabilization only as measured last resort; reset discipline already frozen |
+| R4 | CPU/latency budget: inference (~14 ms) + correction exceeds the 24–30 FPS budget on the target laptop | M4/M7 acceptance miss | M4, M7 | measure at M4 on target hardware; eye-region-only processing; M7 optimization; the reserved split-worker design (ADR-0003) as last step |
+| R5 | camera + virtual camera coexistence and per-client compatibility (Zoom/Meet/Teams) | M8/MVP acceptance miss | M8 | backend abstraction; one-client proof for M8 technical PASS (PRD); client matrix verified before the MVP gate |
+| R6 | Windows backend behavior under a second video device (MSMF quirks, driver locks) | instability at M8/M10 | M8, M10 | frozen backend-fallback machinery; PO physical verification; qa-policy HIGH classification for vcam work |
+| R7 | frame-copy overhead at 720p | latency creep | M4, M7 | copy-once rule (ADR-0003); measure before adding cleverness |
+| R8 | neural model licensing (gaze-redirection models are frequently research-only) | M9 blocked or engine unshippable | M9 | license verified before adoption (dependency policy); ADR with evidence; geometric engine remains the shipping fallback |
+| R9 | neural dependency complexity: ONNX Runtime beside MediaPipe under the `numpy<2` cap | unresolvable environment | M9 | resolve-check before adoption; keep runtimes in separate adapter modules; ADR-0001's pin revisit triggers |
+| R10 | no stable camera identity for calibration profiles (index probing) | profiles silently applied to the wrong camera | M6 | advisory profile-camera matching with visible warnings; recalibration is cheap (<30 s, PRD §14); real enumeration is an M10 option |
+| R11 | uncalibrated gaze error (±10° documented) makes correction mis-target | correction worsens eye contact | M3–M4, M6 | interpolative correction tolerates moderate error; deviation/confidence policy limits harm; calibration exists to fix exactly this; PO judgment at M3/M4 gates |
+
+Accepted frozen debt stays as recorded: the `PreparedCameraCloser`
+ambiguous-`Thread.start()` bookkeeping gap (Part I) remains non-blocking,
+revisited before M10.
+
+## Reconciliation: PRD, documentation, and frozen code
+
+Verified during this pass; recorded rather than silently "fixed".
+
+**PRD vs frozen code — resolved by decision:**
+
+- PRD §15 sketches one `GazeCorrectionEngine` bundling `estimate_gaze` and
+  `correct`. Frozen M2 ships gaze estimation as a separate, tested stage
+  owned by tracking. **ADR-0002** resolves this: the estimator seam and the
+  correction-engine seam together satisfy PRD §15's intent (a stable model
+  interface, geometric/neural swappable); `estimate_gaze` is not moved into
+  the correction engine.
+- PRD §18 draws a linear stage diagram with gaze as a pipeline stage and a
+  single processed-frame path. Frozen code runs gaze inside tracking, and
+  the target adds per-consumer output buffers. Kept as built/designed; the
+  PRD's binding constraints (latest-frame, no unbounded queues, UI
+  decoupling, replaceable processor) are all honored.
+
+**PRD vs frozen code — documented deviations, no action:**
+
+- §23 repository sketch (`app/`, `devices.py`, `correction/`…) vs the actual
+  `gazefix/` layout — the PRD authorizes adjustment; the layout stays.
+- §21 diagnostics: CPU/memory and an inference-provider metric are not yet
+  implemented (arrive M7/M9); "capture latency" exists only as
+  pipeline-latency (capture-timestamp → publish), which excludes driver
+  latency — the definition is documented in Part I.
+- §17 ONNX preference: intentionally absent until M9 (milestone-scoped
+  dependency rule).
+- §20 UI sketch: correction/calibration/vcam controls absent (features
+  don't exist); the consumer window shows more metrics than the sketch —
+  acceptable at prototype stage, revisit wording at M10.
+- §22: `requires-python <3.13`, contrib OpenCV, and the `mediapipe==0.10.21`
+  privacy pin are recorded deviations with rationale (ADR-0001).
+
+**Documentation vs code (nits found by inspection, left for their owning
+docs' next natural edit — none is load-bearing):**
+
+- `docs/gaze.md` §9 says the overlay prints "five factors" of confidence;
+  there are six (code and README both say six).
+- `README.md` setup has one garbled parenthetical implying the *shipped*
+  MediaPipe uploads at close; that behavior belongs to the rejected 1.0.x
+  line only (the privacy section itself is accurate).
+- `gazefix/tracking/worker.py`'s module docstring claims a rebuild may cost
+  "a network attempt inside close()" — unverified folklore; nothing in the
+  adapter or ADR-0001's traces supports it.
+- Milestone-stamped docstrings lag reality in places (`config.py` says
+  "M0/M1"; `tracking/__init__.py` says "Milestone 1") — cosmetic.
+- The `mirrored()` contract family is implemented and tested but has no
+  caller yet (the preview is unmirrored); it is deliberate future surface,
+  now noted as such.
+
+## Stable decisions and deferred questions
+
+**Architecture decisions now stable** (guide all future milestones; change
+requires a new ADR):
+
+1. Pipeline shape: capture → latest-frame buffer → one processing worker →
+   per-consumer one-slot output buffers; newest-wins everywhere; no queues
+   (frozen + ADR-0003).
+2. Tracking + gaze remain on the tracker thread exactly as frozen; gaze
+   estimation stays owned by tracking, not by correction engines (ADR-0002).
+3. Correction is a separate stage on the processing worker behind the
+   `CorrectionEngine` protocol; engines own masks and compositing; policy
+   (deviation/confidence → effective strength) is outside engines
+   (ADR-0002).
+4. One processing worker through M4–M8, with a defined, measurement-gated
+   split trigger and a reserved split design (ADR-0003).
+5. Frame ownership: published frames immutable; correction copies once,
+   downstream reuses; `ProcessedFrame` re-frozen before fan-out (ADR-0003).
+6. Every stage is its own failure domain with its own bounded budget and
+   explicit retirement/revival; no shared processing-error mechanism.
+7. Contracts are immutable, identity-carrying, explicit-unavailability
+   dataclasses; new stages follow the existing contract rules.
+8. Substitution pattern: small protocol + factory + single adapter module
+   per external backend (MediaPipe today; ONNX, pyvirtualcam later).
+9. Dependency direction as diagrammed; the five prohibition rules.
+10. Four-tier configuration ownership; persisted settings arrive with M6.
+11. Virtual camera is an independent consumer on its own thread and buffer;
+    its failure never stops the pipeline.
+12. Diagnostics extend `PipelineMetrics` in place; no telemetry service.
+13. Repository layout evolves by adding milestone packages; no speculative
+    restructuring.
+
+**Deferred to M3 SA:** warp/redirection technique; mask construction and
+blending method; eye-region definition; the strength↔deviation curve values;
+harness input formats and CLI shape; the PRD §28 scoring procedure;
+`CorrectionResult` debug-metadata fields.
+
+**Deferred to later milestone SA:** M5 — whether image-space output
+stabilization is needed at all, and its algorithm; M6 — calibration math,
+profile schema/persistence format, sampling UI, settings-file format; M7 —
+optimization targets, psutil adoption, and whether the split trigger fires;
+M8 — virtual-camera backend choice (ADR then), pacing/format details,
+client-compatibility handling; M9 — neural model choice, ONNX
+provider/DirectML strategy, model licensing (ADR then), and whether any
+model justifies revisiting gaze-estimation ownership; M10 — settings
+persistence scope, installer/packaging, real device enumeration,
+production-hardening backlog including the accepted M0 closer debt.
+
+**Left to runtime / Product Owner experimentation:** correction naturalness
+thresholds and default strength; the deviation-curve breakpoints; glasses/
+lighting behavior; Windows runtime network confirmation (standing PO check
+from M1); physical performance numbers on the target laptop.
