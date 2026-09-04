@@ -504,9 +504,16 @@ The estimator itself is reached only through the `GazeEstimator` protocol
 (`gazefix/gaze/estimator.py`), which the worker accepts by injection, so no
 consumer depends on one gaze algorithm. `gazefix.gaze.models` imports nothing
 from `gazefix.tracking`, and `gazefix.tracking.models` imports it — one
-direction only, no cycle. A gaze failure never reaches the frame path: the
-estimator turns any exception into an `UNAVAILABLE` result and the frame is
-published unchanged. See [`gaze.md`](gaze.md).
+direction only, no cycle.
+
+A gaze failure never reaches the frame path, and never costs tracking. The
+estimator turns its own exceptions into an `UNAVAILABLE` result, and the
+worker does not depend on it doing so: because the boundary exists to be
+substituted, `TrackerWorker` catches a raising `estimate` before it can enter
+the inference-error path and spend the tracker's rebuild budget, and catches a
+raising `reset` before it can end the tracker thread. A persistently failing
+estimator is retired until the camera generation changes. See
+[`gaze.md`](gaze.md).
 
 ### M1 shutdown additions
 

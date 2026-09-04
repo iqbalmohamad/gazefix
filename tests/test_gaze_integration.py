@@ -8,6 +8,7 @@ tracker thread, attached to the frame it describes.
 from __future__ import annotations
 
 from dataclasses import replace
+import logging
 import time
 
 import numpy as np
@@ -438,10 +439,17 @@ def test_every_site_that_drops_landmark_history_drops_the_gaze_filter_too() -> N
 
     source = inspect.getsource(module.TrackerWorker)
     stabiliser_resets = source.count("self._stabilizer.reset()")
-    gaze_resets = source.count("self._gaze.reset()")
+    # The guarded helper, not the raw call: a raw ``self._gaze.reset()`` on a
+    # lifecycle path is exactly the ARCH-01 defect, so it must appear only
+    # inside ``_reset_gaze`` itself.
+    gaze_resets = source.count("self._reset_gaze()")
     assert gaze_resets >= stabiliser_resets, (
         f"{stabiliser_resets} stabiliser resets but only {gaze_resets} gaze resets; "
         "every site that drops landmark history must drop the gaze filter too"
+    )
+    assert source.count("self._gaze.reset()") == 1, (
+        "the estimator's reset must be reached only through _reset_gaze, which "
+        "contains a raising implementation instead of letting it kill the thread"
     )
 
 
@@ -584,5 +592,159 @@ def test_a_substitute_estimator_drives_the_whole_pipeline() -> None:
         assert tracking.gaze_available is True
         assert substitute.calls >= 1
         assert "constant test estimator" in processor._worker.gaze_description
+    finally:
+        processor.close()
+
+
+# --- a substitute estimator's failures must never cost tracking (ARCH-01/02) ---
+
+
+class RaisingEstimator:
+    """A conforming ``GazeEstimator`` that breaks its promise never to raise.
+
+    The boundary exists so M3+ can swap the algorithm, so the worker cannot
+    assume an implementation behaves. Both entry points are covered because
+    they fail through different paths: ``estimate`` runs inside ``_analyse``,
+    ``reset`` runs on the tracker's own lifecycle paths.
+    """
+
+    description = "estimator that raises"
+
+    def __init__(self, *, on_estimate: bool = False, on_reset: bool = False) -> None:
+        self.on_estimate = on_estimate
+        self.on_reset = on_reset
+        self.estimate_calls = 0
+        self.reset_calls = 0
+
+    def estimate(self, result):  # type: ignore[no-untyped-def]
+        self.estimate_calls += 1
+        if self.on_estimate:
+            raise RuntimeError("gaze estimate exploded")
+        return unavailable("substitute estimator")
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+        if self.on_reset:
+            raise RuntimeError("gaze reset exploded")
+
+
+def worker_with(estimator, **overrides):  # type: ignore[no-untyped-def]
+    from gazefix.tracking.worker import TrackerWorker
+
+    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(eye_yaw_deg=15.0),)})
+    settings = tracking_settings(**overrides)
+    processor = TrackingProcessor(factory, settings, PipelineMetrics())
+    processor._worker = TrackerWorker(
+        factory, settings, processor._metrics, gaze_estimator=estimator
+    )
+    processor.start()
+    assert wait_until(lambda: processor.status().state in ("ready", "unavailable"))
+    return processor, factory
+
+
+def test_a_gaze_estimate_that_raises_does_not_cost_the_tracker(  # ARCH-02
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A gaze failure must not reach the tracker's inference-error path.
+
+    It used to: the exception escaped ``_analyse``, was caught as an inference
+    failure, spent the consecutive-error budget and rebuilt a healthy tracker,
+    so every frame came back untracked.
+    """
+
+    estimator = RaisingEstimator(on_estimate=True)
+    processor, factory = worker_with(estimator)
+    try:
+        with caplog.at_level(logging.ERROR):
+            driver = Driver(processor)
+            tracked = 0
+            for _ in range(12):
+                output, _ = driver.once()
+                if output.tracking is not None and output.tracking.status is TrackingStatus.TRACKED:
+                    tracked += 1
+                    assert output.tracking.gaze is not None
+                    assert output.tracking.gaze.status is GazeStatus.UNAVAILABLE
+                    assert "gaze" in output.tracking.gaze.message
+                time.sleep(0.004)
+        assert tracked >= 8, "tracking must survive a broken gaze estimator"
+        assert processor._worker.is_alive
+        assert processor.status().state == "ready"
+        assert factory.attempts == 1, "the tracker must not have been rebuilt"
+    finally:
+        processor.close()
+    # And it is not called on every frame forever.
+    assert estimator.estimate_calls <= 12
+    assert any("gaze" in record.message.lower() for record in caplog.records)
+
+
+def test_a_gaze_reset_that_raises_does_not_kill_the_tracker_thread() -> None:  # ARCH-01
+    """A raising ``reset`` used to end the tracker thread through a double fault.
+
+    The exception escaped, the crash-recovery path called ``reset`` again, and
+    the second raise left the thread dead: tracking never recovered.
+    """
+
+    estimator = RaisingEstimator(on_reset=True)
+    processor, factory = worker_with(estimator)
+    try:
+        driver = Driver(processor)
+        tracked = 0
+        # Two generations, so the reset path is exercised for real.
+        for generation in (1, 2):
+            for _ in range(6):
+                output, _ = driver.once(generation=generation)
+                if output.tracking is not None and output.tracking.status is TrackingStatus.TRACKED:
+                    tracked += 1
+                time.sleep(0.004)
+        assert estimator.reset_calls >= 1, "the reset path must actually have run"
+        assert processor._worker.is_alive, "the tracker thread must survive"
+        assert processor.status().state == "ready"
+        assert tracked >= 8, "tracking must keep producing results"
+        assert factory.attempts == 1, "the tracker must not have been rebuilt"
+    finally:
+        processor.close()
+
+
+def test_a_persistently_failing_estimator_is_retired_and_says_so() -> None:
+    """Bounded, like every other failure path on this thread."""
+
+    from gazefix.tracking.worker import _GAZE_MAX_CONSECUTIVE_ERRORS
+
+    estimator = RaisingEstimator(on_estimate=True)
+    processor, _ = worker_with(estimator)
+    try:
+        driver = Driver(processor)
+        messages = []
+        for _ in range(_GAZE_MAX_CONSECUTIVE_ERRORS + 8):
+            output, _ = driver.once()
+            if output.tracking is not None and output.tracking.gaze is not None:
+                messages.append(output.tracking.gaze.message)
+            time.sleep(0.004)
+        assert estimator.estimate_calls <= _GAZE_MAX_CONSECUTIVE_ERRORS
+        assert any("was stopped" in message for message in messages), messages
+        assert processor._worker.is_alive
+    finally:
+        processor.close()
+
+
+def test_a_retired_estimator_gets_another_chance_on_a_new_camera() -> None:
+    """The tracker re-arms its own budgets on a generation change; so does gaze."""
+
+    from gazefix.tracking.worker import _GAZE_MAX_CONSECUTIVE_ERRORS
+
+    estimator = RaisingEstimator(on_estimate=True)
+    processor, _ = worker_with(estimator)
+    try:
+        driver = Driver(processor)
+        for _ in range(_GAZE_MAX_CONSECUTIVE_ERRORS + 4):
+            driver.once(generation=1)
+            time.sleep(0.004)
+        retired = estimator.estimate_calls
+        assert retired <= _GAZE_MAX_CONSECUTIVE_ERRORS
+        estimator.on_estimate = False  # the substitute recovers
+        for _ in range(6):
+            driver.once(generation=2)
+            time.sleep(0.004)
+        assert estimator.estimate_calls > retired, "a new camera must re-arm the stage"
     finally:
         processor.close()

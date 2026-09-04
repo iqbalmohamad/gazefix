@@ -469,9 +469,24 @@ landmarks are wrong, not that the person is looking very far away.
 
 ## 6. Unavailable and low-confidence behaviour
 
-A failure in gaze estimation must never interrupt video (PRD section 13). The
-estimator never raises: `GeometricGazeEstimator.estimate` wraps its own work
-and turns any exception into an `UNAVAILABLE` result carrying the message.
+A failure in gaze estimation must never interrupt video (PRD section 13), and
+must never cost tracking either. Two layers enforce that:
+
+1. `GeometricGazeEstimator.estimate` wraps its own work and turns any
+   exception into an `UNAVAILABLE` result carrying the message.
+2. **The worker does not rely on that.** `GazeEstimator` is a protocol built
+   for substitution, so `TrackerWorker` contains a raising implementation
+   itself: a failing `estimate` never reaches the tracker's inference-error
+   path (it would otherwise spend the consecutive-error budget and rebuild a
+   healthy tracker), and a failing `reset` cannot end the tracker thread. Both
+   are caught, logged rate-limited, and reported as an unavailable gaze on a
+   frame that keeps its landmarks. After ten consecutive failures the
+   estimator is retired until the camera generation changes, so a broken
+   implementation cannot be called on every frame forever.
+
+Verified by driving a deliberately raising substitute through the real
+pipeline: tracking stays `ready` with every frame `TRACKED` and no tracker
+rebuild, in both cases.
 
 | Situation | Result |
 | --- | --- |
