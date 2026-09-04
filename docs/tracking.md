@@ -13,10 +13,12 @@ later milestone.
 MediaPipe Tasks `FaceLandmarker` (package `mediapipe` 1.0.1, CPU delegate,
 video running mode, blendshapes disabled) with the verified
 `face_landmarker.task` bundle (see `models/README.md` and
-`docs/decisions/ADR-0001-face-tracker-mediapipe.md`). It runs entirely
-on the local CPU (XNNPACK); no GPU, NPU, or network is used. The backend is
-hidden behind `gazefix.tracking.tracker.FaceTracker`; everything else in
-the package works on plain arrays and is exercised by fakes.
+`docs/decisions/ADR-0001-face-tracker-mediapipe.md`). Inference runs
+entirely on the local CPU (XNNPACK) with no GPU or NPU; GazeFix's own code
+uses no network at runtime, but the library performs a usage-logging upload
+when a landmarker is closed (section 13). The backend is hidden behind
+`gazefix.tracking.tracker.FaceTracker`; everything else in the package
+works on plain arrays and is exercised by fakes.
 
 ## 2. Result contract (`TrackingResult`)
 
@@ -242,7 +244,7 @@ covers shutdown with such a thread).
 | --- | --- | --- | --- |
 | model missing / wrong size / wrong SHA-256, MediaPipe import failure | `UNAVAILABLE` (message names `scripts/fetch_model.py`) | original frames | non-retryable: one attempt per camera generation; a camera change or Refresh re-arms the budget |
 | backend creation fails at runtime | `UNAVAILABLE` (message shows the retry schedule) | original frames | exponential backoff from `tracking_init_retry_s` (2 s) to `tracking_init_retry_max_s` (30 s), at most `tracking_init_max_attempts` (5) per generation |
-| inference raises / malformed landmarks | `ERROR` | original frames | after `tracking_max_consecutive_errors` (3) the tracker is closed and rebuilt through the same bounded path, at most `tracking_max_rebuilds` (3) times per camera generation, after which it stays `UNAVAILABLE` until a camera change; the first error is logged with a traceback, repeats at most every 5 s |
+| inference raises / malformed or degenerate landmark arrays / analysis failure | `ERROR` | original frames | all count as one consecutive error; after `tracking_max_consecutive_errors` (3) the tracker is closed and rebuilt through the same bounded path, at most `tracking_max_rebuilds` (3) times per camera generation, after which it stays `UNAVAILABLE` until a camera change; the first error is logged with a traceback, repeats at most every 5 s |
 | any other exception on the tracker thread (reset, close, analysis) | `ERROR` for the frame in hand | original frames | logged once with a traceback and handled like an error burst: rebuild through the same bounded path; the thread never exits silently |
 | no face, face leaves | `NO_FACE` | original frames | stabiliser and primary-face memory reset after `memory_frames`; re-entry is tracked from a fresh detection |
 | face partly outside / too small | `LOW_QUALITY` | original frames (+ dim overlay) | none needed |
@@ -311,9 +313,10 @@ package metadata nor switchable through the Python API. The Windows build
 uses WinINet for it, which follows the system proxy settings and ignores
 the `HTTPS_PROXY` environment variables; on Linux (libcurl) a sinkhole
 proxy stops it. GazeFix does not work around it silently: the fact is
-recorded here, in the README and in ADR-0001, `close()` is called once per
-application session (camera changes reset the backend state instead of
-rebuilding it), and the decision whether this is acceptable, must be
+recorded here, in the README and in ADR-0001; `close()` is called at exit
+and on every error-driven rebuild (at most `tracking_max_rebuilds` = 3 per
+camera generation; camera changes reset the backend state instead of
+rebuilding it); and the decision whether this is acceptable, must be
 blocked at the firewall, or requires a different backend/version
 (0.10.21, the last pybind-based release, contains no logging client) is
 escalated to the Product Manager in the M1 report.

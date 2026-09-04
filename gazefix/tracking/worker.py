@@ -511,12 +511,9 @@ class TrackerWorker:
         # degenerate face must not take the selector down with it.
         candidates = tuple(face for face in detection.faces if _plausible(face.landmarks))
         if detection.faces and not candidates:
-            self._stabilizer.reset()
-            return untracked(
-                TrackingStatus.ERROR, context.capture_sequence, context.captured_at_ns,
-                context.camera_request_id, geometry, "malformed landmarks: no usable face array",
-                timing, len(detection.faces),
-            )
+            # Raised, not returned: a malformed backend output counts toward the
+            # bounded error budget and is rate-limit logged like any failure.
+            raise MalformedLandmarks("malformed landmarks: no usable face array")
         selection = self._selector.select(candidates)
         if selection is None:
             self._stabilizer.reset()
@@ -528,12 +525,7 @@ class TrackerWorker:
         try:
             landmarks, iris_available = validate_landmarks(face.landmarks)
         except MalformedLandmarks as exc:
-            self._stabilizer.reset()
-            return untracked(
-                TrackingStatus.ERROR, context.capture_sequence, context.captured_at_ns,
-                context.camera_request_id, geometry, f"malformed landmarks: {exc}", timing,
-                len(detection.faces),
-            )
+            raise MalformedLandmarks(f"malformed landmarks: {exc}") from exc
         if selection.identity_changed:
             self._stabilizer.reset()
         stabilized = self._stabilizer.enabled

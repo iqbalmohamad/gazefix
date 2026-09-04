@@ -157,6 +157,7 @@ class MainWindow(QMainWindow):
         self._processing_ms = QLabel("0.000 ms")
         self._dropped_frames = QLabel("0")
         self._tracking_ms = QLabel("off" if self._tracking is None else "starting")
+        self._tracking_ms.setWordWrap(True)
         metrics.addWidget(QLabel("Capture FPS:"), 0, 0)
         metrics.addWidget(self._capture_fps, 0, 1)
         metrics.addWidget(QLabel("Display FPS:"), 0, 2)
@@ -377,6 +378,9 @@ class MainWindow(QMainWindow):
                 self._tracking_ms.setText(
                     f"{metrics.tracking_inference_ms:.1f} ms ({tracking.status.value})"
                 )
+            elif tracking.status is TrackingStatus.UNAVAILABLE and tracking.message:
+                # The consumer window must say what to do, not just "unavailable".
+                self._tracking_ms.setText(f"{tracking.status.value}: {tracking.message}")
             else:
                 self._tracking_ms.setText(tracking.status.value)
             if self._tracking_detail is not None:

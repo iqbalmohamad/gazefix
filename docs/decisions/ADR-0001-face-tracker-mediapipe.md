@@ -72,8 +72,9 @@ contract, overlay, tests and pipeline never import MediaPipe.
    from the binary; GazeFix passes only in-memory frames). It is not
    disclosed in the package metadata and has no API switch. The Windows
    build uses WinINet (system proxy settings); Linux uses libcurl. GazeFix
-   closes the landmarker once per session and resets state on camera
-   changes instead of rebuilding, discloses the behaviour in the README and
+   closes the landmarker at exit and on error-driven rebuilds only (at most
+   3 per camera generation), resets state on camera changes instead of
+   rebuilding, discloses the behaviour in the README and
    `docs/tracking.md`, and escalates the decision (accept with disclosure,
    block at the firewall, pin 0.10.21 which has no logging client, or
    change backend) to the Product Manager. See the M1 report.

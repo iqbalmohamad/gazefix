@@ -2,8 +2,9 @@
 
 ## `astronaut_face.png`
 
-- **Content:** a 338×307 crop (upper 60 % of the height, central 66 % of the
-  width) of the colour photograph of astronaut Eileen Collins that ships as
+- **Content:** a 338×307 crop — rows 0–307, columns 61–399 of the 512×512
+  original (`astronaut[0:307, 61:399]`) — of the colour photograph of
+  astronaut Eileen Collins that ships as
   `skimage/data/astronaut.png` in the scikit-image 0.26.0 wheel
   (`scikit_image-0.26.0-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl`;
   original file SHA-256 `88431cd9653ccd539741b555fb0a46b61558b301d4110412b5bc28b5e3ea6cb5`).

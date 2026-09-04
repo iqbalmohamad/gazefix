@@ -6,14 +6,16 @@ responsive live preview (Milestone 0), and tracks the face of one person in
 that preview: 478 facial landmarks, anatomically labelled left/right eyes with
 eyelid contours, iris landmarks, head orientation, and a truthful quality
 signal (Milestone 1). Tracking runs on the CPU and entirely on the local
-machine. It contains no gaze estimation, gaze correction, calibration,
-virtual-camera output, telemetry, or cloud processing.
+machine. GazeFix's own code contains no gaze estimation, gaze correction,
+calibration, virtual-camera output, telemetry, or cloud processing; the
+bundled MediaPipe library does upload usage statistics when a landmarker is
+closed (see "Diagnostics and privacy" below).
 
 ## Requirements
 
 - Windows 10 or 11
-- Python 3.11 or 3.12 (64-bit). The application declares `>=3.11`; MediaPipe
-  1.0.1 declares support for Python 3.9–3.12, so 3.13 is untested.
+- Python 3.11 or 3.12 (64-bit). The application declares `>=3.11,<3.13`
+  because MediaPipe 1.0.1 is classified for Python 3.9–3.12 only.
 - A webcam allowed by **Windows Settings → Privacy & security → Camera**
 - The face landmarker model file, installed once by an explicit command (below)
 
@@ -58,8 +60,9 @@ Windows x64 / Python 3.12 on 2026-09-04; pass it with `-c` for a
 reproducible install. The last command downloads the
 face landmarker model (3.7 MB) from its documented official source into
 `%LOCALAPPDATA%\GazeFix\models`, verifies its size and SHA-256, and prints a
-JSON report; it is the only step that uses the network and it is never run by
-the application itself. `--verify-only` checks an existing file without
+JSON report; it is the only step in GazeFix's own code that uses the network
+and it is never run by the application itself (the MediaPipe library's own
+upload at close is described under "Diagnostics and privacy"). `--verify-only` checks an existing file without
 downloading; `--model-dir` chooses another directory (then pass the same
 `--model-dir` to the application).
 
@@ -107,9 +110,9 @@ With the overlay off the preview shows the original camera pixels; with it
 on, landmarks, eyelid contours (right eye cyan `R`, left eye yellow `L`,
 anatomical sides), iris circles, head-pose axes ("head pose (not gaze)") and
 a status panel are drawn on a copy of the frame. If the model file is
-missing or invalid the preview keeps running and the `Tracking:` metric,
-the detail line (`--dev`) and the log say what to do
-(`python scripts/fetch_model.py`). See `docs/tracking.md` for the result
+missing or invalid the preview keeps running and the `Tracking:` cell shows
+the reason and what to do (`python scripts/fetch_model.py`), as do the
+detail line (`--dev`) and the log. See `docs/tracking.md` for the result
 contract, coordinate conventions, quality semantics and failure policy.
 
 ## Run tests
@@ -258,13 +261,19 @@ command.
 
 **Third-party disclosure:** the MediaPipe 1.0.1 native library itself contacts
 `play.googleapis.com` (Google's usage-logging endpoint) when a face landmarker
-is closed — once per GazeFix session, at exit — sending usage statistics and
-system information, not frames (measured and documented in
+is closed — at exit, and on every error-driven tracker rebuild (at most
+`tracking_max_rebuilds` = 3 per camera selection) — sending usage statistics
+and system information, not frames (measured and documented in
 `docs/tracking.md`, section 13). There is no switch for it in MediaPipe's
 API. Until the Product Manager decides how to handle it, users who want to
-prevent that connection can block outbound traffic for the GazeFix Python
-interpreter in Windows Defender Firewall; GazeFix needs no network access
-after `scripts/fetch_model.py` has run.
+prevent that connection can block the GazeFix Python interpreter's outbound
+traffic. Prefer a rule that *rejects* the connection (or a hosts-file entry
+sending `play.googleapis.com` to `127.0.0.1`): a silently dropping block
+makes the library's close call wait about 5 s for its timeout, which exceeds
+the 2 s tracker join at shutdown — the window still closes at once and the
+process ends within the additional grace period, but the log will report
+`tracker_shutdown_timeout`. GazeFix itself needs no network access after
+`scripts/fetch_model.py` has run.
 
 Closing the window waits at most `worker_join_timeout_s` in total. A camera
 release is a driver call with no upper bound, so the window never performs one:

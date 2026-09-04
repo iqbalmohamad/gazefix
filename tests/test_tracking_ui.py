@@ -111,7 +111,7 @@ def test_unavailable_tracker_keeps_preview_and_reports_status(qapp) -> None:  # 
         assert pump_until(lambda: window._first_frame_presented)
         assert pump_until(lambda: window._last_tracking is not None and window._last_tracking.status is TrackingStatus.UNAVAILABLE)
         assert pump_until(lambda: "fetch_model" in window._tracking_detail.text())
-        assert window._tracking_ms.text() == "unavailable"
+        assert window._tracking_ms.text().startswith("unavailable: ") and "fetch_model" in window._tracking_ms.text()
         assert window._status.text().startswith("Status: Running on FAKE")  # camera status untouched
     finally:
         window.close()
