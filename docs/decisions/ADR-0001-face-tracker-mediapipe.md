@@ -49,8 +49,8 @@ Consequences.
 | Network (Linux, syscall trace) | `strace -f -tt -yy -e trace=%network` over a full lifecycle (import, create, 30 s / 1849 inference frames, 15 s idle, reset, close, rebuild, close, 5 s post-close): **zero network syscalls in every phase**. The same trace of 1.0.1 shows a TLS session to `play.googleapis.com` inside each of its two `close()` calls. A deliberate connection at the end of both runs is a positive control proving the trace captures connects |
 | Network (Windows, static) | The 0.10.21 `.pyd` files (`_framework_bindings`, `_pywrap_metadata_version`, `_pywrap_flatbuffers`) import **no** network-capable Windows DLL in their PE import or delay-import tables (no wininet, winhttp, ws2_32, urlmon, secur32). 1.0.1's `libmediapipe.dll` imports `wininet` and contains the `play.googleapis.com/log` endpoint string |
 | Threading | A 0.10.21 landmarker creates **no** Python threads; inference runs synchronously on the calling thread. 1.0.1 creates one non-daemon `ThreadPoolExecutor` worker per landmarker (see Consequences 10) |
-| Windows OpenCV | `opencv_contrib_python-4.14.0.94-cp37-abi3-win_amd64` `cv2.pyd` build info: Media Foundation YES, DirectShow YES, DXVA YES; `OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS` present; bundles `opencv_videoio_ffmpeg4140_64.dll` — the M0 backends and switch exist in the contrib build |
-| Windows resolution | pip resolves (win_amd64, CPython 3.12, 2026-09-04): mediapipe 1.0.1, opencv-contrib-python 4.14.0.94, numpy 2.5.2, PySide6 6.11.2, absl-py 2.5.0, flatbuffers 25.12.19, sounddevice 0.5.6, cffi 2.1.1, matplotlib 3.11.1, pillow 12.3.0 (full list: `constraints-windows-py312.txt`) |
+| Windows OpenCV | `opencv_contrib_python-4.11.0.86-cp37-abi3-win_amd64` `cv2.pyd` build info: Media Foundation YES, DirectShow YES, DXVA YES; `OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS` present; bundles `opencv_videoio_ffmpeg4110_64.dll` — the M0 backends and switch exist in the contrib build at the version the backend's `numpy<2` cap selects |
+| Windows resolution | pip resolves (win_amd64, CPython 3.12, 2026-09-04): mediapipe 0.10.21, numpy 1.26.4, opencv-contrib-python 4.11.0.86, PySide6 6.11.2, absl-py 2.5.0, flatbuffers 25.12.19, protobuf 4.25.9, jax/jaxlib 0.7.1, scipy 1.17.1, sentencepiece 0.2.2, sounddevice 0.5.6, cffi 2.1.1, matplotlib 3.11.1, pillow 12.3.0 (full list: `constraints-windows-py312.txt`) |
 | Linux .so | additionally links `libEGL.so.1` and `libGLESv2.so.2` (system packages) even for CPU inference |
 | Project status | 0.10.21 is a February 2025 release and receives no further upstream fixes; the line has moved on to 1.0.x. Classifier "Development Status :: 3 - Alpha", as for every MediaPipe release |
 
@@ -108,9 +108,13 @@ Consequences.
    library loading a networking DLL dynamically at runtime, so a Windows
    confirmation (Resource Monitor or a packet capture during a session)
    remains a Product Owner check.
-8. **Python range.** `requires-python = ">=3.11,<3.13"`: MediaPipe 1.0.1
-   ships `py3-none` wheels without a `Requires-Python` marker, so nothing
-   else would stop an untested 3.13/3.14 install.
+8. **Python range.** `requires-python = ">=3.11,<3.13"`: MediaPipe 0.10.21
+   publishes no `Requires-Python` marker at all (classifiers 3.9–3.12 only),
+   so nothing in its metadata would stop an untested 3.13/3.14 install; the
+   project's own cap is what does. Its newest ABI-specific wheel is `cp312`,
+   so on 3.13 the install would in practice fail to find a wheel rather than
+   silently proceed — but the cap is the deliberate statement of what was
+   tested, and it stays.
 9. **Environment upgrade.** Installing over an M0 environment leaves
    `opencv-python` and `opencv-contrib-python` both registered over one
    `cv2` directory; recreate the environment (README) — the tracker logs

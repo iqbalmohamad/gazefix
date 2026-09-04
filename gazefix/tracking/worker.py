@@ -60,6 +60,7 @@ from gazefix.tracking.models import (
     TrackingTiming,
     untracked,
 )
+from gazefix.tracking.overlay import warm_up as warm_up_overlay_drawing
 from gazefix.tracking.selection import PrimaryFaceSelector, SelectionSettings
 from gazefix.tracking.stabilizer import LandmarkStabilizer
 from gazefix.tracking.tracker import (
@@ -246,6 +247,7 @@ class TrackerWorker:
     # ------------------------------------------------------- tracker thread
     def _run(self) -> None:
         logger.info("Tracker worker started", extra={"event": "tracker_worker_started"})
+        self._warm_up_overlay()
         try:
             while not self._stop.is_set():
                 # Cleared before every iteration: an exception raised while
@@ -279,6 +281,40 @@ class TrackerWorker:
                 self._message = "tracker stopped"
                 self._condition.notify_all()
             logger.info("Tracker worker stopped", extra={"event": "tracker_worker_stopped"})
+
+    def _warm_up_overlay(self) -> None:
+        """Pay OpenCV's one-time drawing initialisation here, never in a frame.
+
+        Runs before the loop, so it is ordered ahead of the first
+        ``STATE_READY``: a caller that has seen a tracked result knows the
+        warm-up is done. This thread is the right place for it because slow
+        one-time work here (the model load) already overlaps camera
+        discovery and never blocks the preview, whereas the first overlay
+        render happens on the processor thread inside a frame. The overlay
+        is drawn even when the tracker never initialises (the status panel
+        still renders), so this is unconditional. A failure here only means
+        the first render pays the cost, as it did before; it must never stop
+        tracking from starting.
+        """
+
+        started = self._clock()
+        try:
+            warm_up_overlay_drawing()
+        except Exception:  # noqa: BLE001  (a warm-up is best effort by nature)
+            logger.warning(
+                "Overlay drawing warm-up failed; the first overlay render will pay "
+                "the one-time initialisation cost",
+                exc_info=True,
+                extra={"event": "overlay_warm_up_failed"},
+            )
+            return
+        logger.info(
+            "Overlay drawing primitives warmed up",
+            extra={
+                "event": "overlay_warm_up",
+                "warm_up_ms": round((self._clock() - started) * 1000.0, 1),
+            },
+        )
 
     def _next_submission(self) -> _Submission | None:
         with self._condition:

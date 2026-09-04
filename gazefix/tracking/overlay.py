@@ -80,6 +80,36 @@ def render_overlay(frame: Frame, result: TrackingResult, style: OverlayStyle | N
     return canvas
 
 
+def warm_up() -> None:
+    """Run each drawing primitive once, on a private throwaway canvas.
+
+    OpenCV initialises its drawing path lazily: the first call into the
+    anti-aliased routines builds dispatch tables and, where a runtime is
+    installed, enumerates OpenCL platforms and loads the IPP libraries. That
+    one-time cost lands on whichever thread draws first. Measured here, the
+    first call to each primitive costs 16x to 547x its steady-state time;
+    on a Windows machine with an OpenCL runtime present it has been observed
+    to take seconds.
+
+    Without this, the cost is paid inside the first ``render_overlay`` call,
+    which happens on the processor thread in the middle of a frame, the
+    moment a developer switches the overlay on, and stalls the preview once.
+    The call below must therefore stay off that path; it is made once from
+    the tracker thread, which already absorbs slow one-time work while
+    frames pass through untracked. Keep it in step with the primitives the
+    ``_draw_*`` helpers below use.
+    """
+
+    canvas = np.zeros((16, 16, 3), dtype=np.uint8)
+    cv2.circle(canvas, (8, 8), 3, _MESH, 1, lineType=cv2.LINE_AA)
+    cv2.circle(canvas, (8, 8), 2, _MESH, -1, lineType=cv2.LINE_AA)
+    cv2.line(canvas, (0, 0), (15, 15), _MESH, 1, lineType=cv2.LINE_AA)
+    cv2.line(canvas, (0, 15), (15, 0), _MESH, 2, lineType=cv2.LINE_AA)
+    cv2.rectangle(canvas, (0, 0), (4, 4), _MESH, -1)
+    cv2.getTextSize("warm up", cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+    cv2.putText(canvas, "warm up", (0, 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, _TEXT, 1, cv2.LINE_AA)
+
+
 def _draw_points(canvas: Frame, points: np.ndarray, colour: tuple[int, int, int], radius: int) -> None:
     """Draw only points that lie inside the image.
 

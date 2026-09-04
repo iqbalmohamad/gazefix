@@ -172,9 +172,10 @@ processor thread (M0)   TrackingProcessor.process(): submit → bounded wait →
                         publish; overlay rendering on a copy
 tracker thread (M1)     "gazefix-tracker": the only thread that creates, calls,
                         rebuilds and closes the FaceTracker; primary-face
-                        memory and stabiliser live here
-(backend internal)      one MediaPipe dispatcher thread per landmarker instance;
-                        stopped by close()
+                        memory and stabiliser live here; also warms up the
+                        OpenCV drawing primitives before its loop
+(backend internal)      none: MediaPipe 0.10.21 adds no Python threads and runs
+                        inference on the calling thread (section 14)
 ```
 
 - Frames are handed to the tracker thread through a **latest-value slot**:
@@ -293,6 +294,16 @@ processor thread on a copy of the frame; with the checkbox off the
 original array reaches the preview unchanged (`output.frame is frame`).
 Widgets are touched only by the Qt thread; the toggle sets a flag read by
 the processor thread.
+
+OpenCV initialises its drawing routines lazily, and that one-time cost is
+large (on Windows with an OpenCL runtime installed, seconds). It would
+otherwise land inside the first `render_overlay` call — on the processor
+thread, in the middle of a frame, the moment the checkbox is ticked. The
+tracker thread therefore runs `overlay.warm_up()` once before its loop, so
+the cost is paid where slow one-time work already happens and no frame ever
+stalls for it. The warm-up is ordered before the first `STATE_READY`, is
+best effort (a failure is logged and tracking still starts), and draws only
+on its own 16×16 throwaway canvas.
 
 ## 13. Backend network activity
 

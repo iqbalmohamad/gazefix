@@ -478,10 +478,12 @@ exactly that frame; `ProcessedFrame` carries the sequence and the
 `TrackingResult` to the consumer. `PassthroughProcessor` (M0) returns the
 input unchanged with no metadata. `TrackingProcessor` (M1,
 `gazefix/tracking/processor.py`) is the first real stage: it starts its
-tracker thread from `start()` so model loading overlaps camera discovery,
-never blocks a frame for longer than `tracking_wait_ms`, and releases the
-tracker from `close()` within a bounded join. Camera capture, latest-frame
-behaviour, UI polling and the M0 lifecycle ownership are unchanged. The
+tracker thread from `start()` so model loading — and the one-time warm-up
+of OpenCV's drawing primitives, which would otherwise be paid inside the
+first overlay render — overlaps camera discovery, never blocks a frame for
+longer than `tracking_wait_ms`, and releases the tracker from `close()`
+within a bounded join. Camera capture, latest-frame behaviour, UI polling
+and the M0 lifecycle ownership are unchanged. The
 window chooses the processor (`--no-tracking` selects the passthrough) and
 hands it to `PipelineRuntime`.
 

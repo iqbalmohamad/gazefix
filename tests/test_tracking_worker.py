@@ -116,6 +116,11 @@ def test_frames_pass_through_immediately_while_the_tracker_initializes() -> None
         assert output.tracking.belongs_to(context.capture_sequence, context.camera_request_id)
         assert output.frame is driver.frame
         assert elapsed_ms < tracking_settings().tracking_wait_ms / 2
+        # The pass-through above is the timing assertion; the construction of
+        # the tracker is a separate event on the worker thread, ordered after
+        # its overlay warm-up, so wait for it rather than assuming it has
+        # already happened. Where it ran is what matters here.
+        assert wait_until(lambda: bool(factory.threads)), "the tracker was never constructed"
         assert set(factory.threads) == {"gazefix-tracker"}  # never on the caller's thread
         gate.set()
         driver.until_status(TrackingStatus.TRACKED)

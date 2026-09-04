@@ -74,6 +74,11 @@ def test_developer_mode_toggles_overlay_through_the_processor_only(qapp) -> None
         assert not window._overlay_checkbox.isChecked() and not window.overlay_enabled
         assert pump_until(lambda: window._last_tracking is not None and window._last_tracking.status is TrackingStatus.TRACKED)
         assert pump_until(lambda: "head pose (not gaze)" in window._tracking_detail.text())
+        # A tracked result has been seen, so the tracker thread is past its
+        # warm-up of the OpenCV drawing primitives (it runs before the loop
+        # that can report READY). Toggling the overlay on therefore cannot
+        # pay that one-time initialisation inside this frame; without the
+        # warm-up it could take seconds and time this wait out.
         window._overlay_checkbox.setChecked(True)
         assert window.overlay_enabled  # the flag lives on the processor
         window._first_frame_presented = False
