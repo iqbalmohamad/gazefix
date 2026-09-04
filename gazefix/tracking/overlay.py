@@ -329,7 +329,7 @@ def _gaze_lines(gaze: GazeResult | None, description: str) -> list[str]:
         f"  head pose {'applied' if confidence.head_pose_applied else 'unavailable'}",
         f"  conf = quality {confidence.tracking_quality:.2f} x open {confidence.openness_term:.2f}"
         f" x agree {confidence.agreement_term:.2f} x pose {confidence.pose_term:.2f}"
-        f" x offset {confidence.offset_term:.2f}",
+        f" x offset {confidence.offset_term:.2f} x res {confidence.resolution_term:.2f}",
     ]
     if description:
         lines.append(f"  {description[:110]}")

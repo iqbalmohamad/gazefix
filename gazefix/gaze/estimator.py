@@ -289,11 +289,14 @@ class GeometricGazeEstimator:
 
         per_eye = tuple(m[0] for m in measurements)
         confidence = self._confidence(result, per_eye, pose, offset_term, measurements)
-        if confidence.score <= 0.0:
-            # A zero-confidence estimate carries no information. Publishing
-            # angles beside it would invite a consumer to read them anyway, so
-            # the honest answer is that there is no estimate for this frame.
-            # A closed eyelid during a blink is the usual cause.
+        if confidence.score <= _NEGLIGIBLE_CONFIDENCE:
+            # A confidence this small carries no information. Publishing angles
+            # beside it would invite a consumer to read them anyway, so the
+            # honest answer is that there is no estimate for this frame. The
+            # comparison is against a small threshold rather than exactly zero
+            # because a ramp crossing its floor produces values like 7e-08,
+            # which are zero in every sense that matters. A closed eyelid
+            # during a blink is the usual cause.
             return self._give_up(
                 f"no gaze: {_zero_confidence_reason(confidence)}", started
             )
@@ -478,7 +481,12 @@ class GeometricGazeEstimator:
         if pose is None:
             pose_term = settings.no_pose_factor
         else:
-            turn = max(abs(pose.yaw_deg), abs(pose.pitch_deg))
+            # The angle between the face's forward axis and the camera axis,
+            # not max(|yaw|, |pitch|). The projected-geometry error is driven
+            # by how far off-axis the face is, and yaw and pitch compound: a
+            # head at (20, 20) is 28 degrees off-axis, and at (25, 25) it is
+            # 35, which max() would charge as 20 and 25.
+            turn = math.degrees(math.acos(max(-1.0, min(1.0, float(pose.rotation[2, 2])))))
             if turn <= settings.pose_full_deg:
                 pose_term = 1.0
             elif turn >= settings.pose_limit_deg:
@@ -513,6 +521,11 @@ class GeometricGazeEstimator:
         )
 
 
+#: Confidence at or below this is treated as no estimate at all. It is not
+#: exactly zero because a ramp crossing its floor yields values like 7e-08.
+_NEGLIGIBLE_CONFIDENCE = 1e-6
+
+
 def _usable_pose(pose: HeadPose | None) -> HeadPose | None:
     """The pose, or ``None`` if any part of it is missing or non-finite.
 
@@ -537,13 +550,13 @@ def _zero_confidence_reason(confidence: GazeConfidence) -> str:
 
     named = (
         ("eyelids too closed to locate the iris", confidence.openness_term),
+        ("the eye is too few pixels wide to measure", confidence.resolution_term),
         ("face tracking quality is zero", confidence.tracking_quality),
         ("the two eyes disagree completely", confidence.agreement_term),
         ("head turned too far for the gaze model", confidence.pose_term),
         ("iris offset is outside the eyeball model", confidence.offset_term),
-        ("the eye is too few pixels wide to measure", confidence.resolution_term),
     )
-    zeroed = [reason for reason, term in named if term <= 0.0]
+    zeroed = [reason for reason, term in named if term <= _NEGLIGIBLE_CONFIDENCE]
     return "; ".join(zeroed) if zeroed else "gaze confidence is zero"
 
 

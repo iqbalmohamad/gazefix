@@ -899,3 +899,55 @@ def test_a_genuinely_closing_eye_still_lowers_the_term() -> None:
     partly = estimate({"eye_openness": 0.15}).confidence.openness_term
     assert 0.3 < partly < 0.7
     assert estimate({"eye_openness": 0.02}).status is GazeStatus.UNAVAILABLE
+
+
+def test_pose_term_charges_the_true_off_axis_angle_not_the_larger_euler_angle() -> None:
+    """max(|yaw|,|pitch|) under-charges a head rotated in both axes.
+
+    A head at (20, 20) is 28 degrees off the camera axis and one at (25, 25) is
+    35, yet both have a maximum Euler angle inside the 25-degree full-confidence
+    band. The projected-geometry error compounds across the two rotations, so
+    the term must see the off-axis angle.
+    """
+
+    single = estimate({"head_yaw_deg": 25.0}).confidence.pose_term
+    both = estimate({"head_yaw_deg": 25.0, "head_pitch_deg": 25.0}).confidence.pose_term
+    assert single == pytest.approx(1.0)
+    assert both < single
+    # And it still costs nothing when the head really is near-frontal.
+    assert estimate({"head_yaw_deg": 10.0, "head_pitch_deg": 10.0}).confidence.pose_term == 1.0
+
+
+def test_combined_head_rotation_costs_confidence_where_it_costs_accuracy() -> None:
+    """The cross-talk that motivates the off-axis measure is real; pin its scale."""
+
+    from gaze_fakes import MEASURED_CANTHUS_DEPTH_MM
+
+    def spurious_yaw(head_yaw: float, head_pitch: float) -> float:
+        result = estimator().estimate(
+            gaze_scene(
+                0.0, 20.0, head_yaw, head_pitch, 0.0, canthus_depth_mm=MEASURED_CANTHUS_DEPTH_MM
+            ).result()
+        )
+        assert result.eye_yaw_deg is not None
+        return abs(result.eye_yaw_deg)
+
+    # An eye looking purely up reads a spurious yaw once the head rotates in
+    # both axes, and it grows with both.
+    assert spurious_yaw(0.0, 0.0) < 0.5
+    assert spurious_yaw(30.0, 30.0) > spurious_yaw(30.0, 0.0) > spurious_yaw(10.0, 0.0)
+    # The confidence sees it: the same pose is charged.
+    frontal = estimate({"eye_pitch_deg": 20.0}).confidence.pose_term
+    rotated = estimate(
+        {"eye_pitch_deg": 20.0, "head_yaw_deg": 30.0, "head_pitch_deg": 30.0}
+    ).confidence.pose_term
+    assert rotated < frontal
+
+
+def test_a_negligible_confidence_is_unavailable_not_a_near_zero_estimate() -> None:
+    """A ramp crossing its floor yields values like 7e-08, not exactly zero."""
+
+    settings = GazeSettings()
+    result = estimate({"eye_openness": settings.openness_floor})
+    assert result.status is GazeStatus.UNAVAILABLE
+    assert result.yaw_deg is None

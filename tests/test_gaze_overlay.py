@@ -152,9 +152,30 @@ def test_the_gaze_text_prints_whole_degrees_only() -> None:
 
 
 def test_the_gaze_text_shows_every_confidence_factor() -> None:
+    """All six, or the printed product does not equal the printed score."""
+
     joined = " ".join(text_lines(tracked_with(gaze())))
-    for factor in ("quality", "open", "agree", "pose", "offset"):
+    for factor in ("quality", "open", "agree", "pose", "offset", "res"):
         assert factor in joined
+
+
+def test_the_printed_confidence_factors_multiply_to_the_printed_score() -> None:
+    import re
+
+    from gazefix.gaze.estimator import GazeSettings, GeometricGazeEstimator
+    from gaze_fakes import gaze_scene
+
+    result = GeometricGazeEstimator(GazeSettings(smoothing=0.0)).estimate(
+        gaze_scene(eye_yaw_deg=12.0, head_yaw_deg=30.0, pixels_per_mm=1.0).result()
+    )
+    assert result.status.has_direction
+    lines = " ".join(text_lines(replace(tracked_with(None), gaze=result)))
+    factors = [float(v) for v in re.findall(r"(?:quality|open|agree|pose|offset|res) (\d\.\d\d)", lines)]
+    assert len(factors) == 6, lines
+    product = 1.0
+    for factor in factors:
+        product *= factor
+    assert product == pytest.approx(result.confidence.score, abs=0.02)
 
 
 def test_the_gaze_text_separates_gaze_from_the_eye_in_head_component() -> None:

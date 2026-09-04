@@ -161,8 +161,10 @@ consequences fall out:
 
 There is one more approximation in the axes: `ey` is the image-perpendicular
 of `ex`, whereas the head's projected up-axis is only perpendicular to its
-projected right-axis when head yaw and pitch are not both non-zero. The
-resulting cross-talk is under a degree over the range §5 tabulates.
+projected right-axis when head yaw and pitch are not both non-zero. **Combined
+yaw and pitch therefore leak vertical eye rotation into the horizontal
+reading**, and §5 tabulates how much. It is not negligible: an earlier draft of
+this document called it "under a degree", which was wrong.
 
 ### Why `v` is the only place head pose enters
 
@@ -187,11 +189,12 @@ given an invented depth, and `offset_term` drops to `offset_floor_factor`.
 
 ## 4. Confidence
 
-`GazeConfidence.score` is the product of five terms, each in `[0, 1]` and each
+`GazeConfidence.score` is the product of six terms, each in `[0, 1]` and each
 exposed on the result so a reader can see which one is responsible:
 
 ```text
-score = tracking_quality x openness_term x agreement_term x pose_term x offset_term
+score = tracking_quality x openness_term x agreement_term x pose_term
+        x offset_term x resolution_term
 ```
 
 | Term | Computed from | Falls when | Thresholds |
@@ -199,7 +202,7 @@ score = tracking_quality x openness_term x agreement_term x pose_term x offset_t
 | `tracking_quality` | M1 `TrackingQuality.score` | the face is small, or partly outside the frame | inherited from M1 |
 | `openness_term` | the less open of the eyes used, measured on the eye's own axis; ramp 0 at 0.10 to 1 at 0.20 | the eyelids cover the iris (a blink drives it to 0) | CHOSEN, against M1's observed 0.25–0.4 for an open eye |
 | `agreement_term` | how far the two eyes' estimates differ, beyond a deadband | one eye is mistracked; fixed 0.6 when only one eye is usable | deadband MEASURED (below); span and single-eye factor CHOSEN |
-| `pose_term` | head rotation; 1 up to 25 deg, falling to 0.25 at 60 deg | the head turns away and the projected model degrades | CHOSEN, informed by the §5 error tables |
+| `pose_term` | how far the face's forward axis is off the camera axis (not `max(|yaw|,|pitch|)`, which under-charges a head rotated in both); 1 up to 25 deg, falling to 0.25 at 60 | the head turns away and the projected model degrades | CHOSEN, informed by the §5 error tables |
 | `offset_term` | the measured iris offset against the eyeball model | the offset approaches or exceeds what an eye can produce | CHOSEN |
 | `resolution_term` | the smaller eye's half-width in pixels; ramp 0.2 at 5 px to 1 at 20 px | the face is far away, so one pixel of iris noise is worth several degrees | CHOSEN |
 
@@ -223,9 +226,10 @@ Two things the confidence does *not* cover, stated plainly:
 in this milestone reports a probability of its own, and none is invented.
 Every term is computed from a quantity the pipeline actually measures.
 
-A score of exactly 0 is reported as `UNAVAILABLE`, not as a zero-confidence
-estimate: publishing angles beside a zero would invite a reader to use them.
-The message names the term that reached zero.
+A negligible score (at or below 1e-6) is reported as `UNAVAILABLE`, not as a
+near-zero-confidence estimate: publishing angles beside it would invite a
+reader to use them. The threshold is not exactly zero because a ramp crossing
+its floor yields values like 7e-08. The message names the term responsible.
 
 Below `gaze_min_confidence` (default 0.35) the status is `LOW_CONFIDENCE`: the
 angles are carried so a developer can see them, and `GazeResult.available` is
@@ -328,6 +332,25 @@ constant that can overshoot (the 12 mm row above shows how easily an assumed
 depth errs the other way). It is recorded here as the natural first
 improvement for a calibration milestone.
 
+**Cross-talk under combined head rotation.** Spurious eye *yaw*, in degrees,
+reported for an eye looking purely UP by 20 degrees (true eye yaw 0), at the
+measured canthal depth. Two effects compound here: the `ey` skew above and the
+depth leak.
+
+| head yaw | pitch 0 | pitch 10 | pitch 20 | pitch 30 |
+| --- | --- | --- | --- | --- |
+| 10 | +1.68 | +2.27 | +2.78 | +3.20 |
+| 20 | +3.47 | +4.69 | +5.75 | +6.62 |
+| 30 | +5.51 | +7.46 | +9.15 | +10.53 |
+| 40 | +8.03 | +10.87 | +13.36 | +15.41 |
+
+On the coplanar idealisation the same sweep peaks at +6.18 degrees, so roughly
+half of the above is the `ey` skew and half the depth leak. This is why
+`pose_term` measures the face's true off-axis angle rather than
+`max(|yaw|, |pitch|)`: a head at (20, 20) is 28 degrees off-axis and one at
+(25, 25) is 35, and charging them as 20 and 25 would report full confidence on
+a five-to-nine-degree error.
+
 **Vertical (eye pitch error vs. head pitch):**
 
 | true eye pitch | head 0 | head 15 | head 30 | head 45 |
@@ -363,13 +386,14 @@ Other error sources, in rough order of size:
   against a weak-perspective projection at 50 cm the error is under 0.11
   degrees at 30 degrees of eye rotation — negligible at normal webcam
   distances, growing if the face is very close to the lens.
-- **Head-pose range.** `pose_term` reads `HeadPose.yaw_deg`, which M1 derives
-  through `asin` and which therefore cannot exceed +/-90 degrees. A head turned
-  further than that is not distinguished from one turned less. In practice the
-  question does not arise: well before 90 degrees the far eye leaves the frame
-  or falls below `tracking_min_eye_width_px`, M1 stops reporting `TRACKED`, and
-  gaze reports `UNAVAILABLE` (measured: a 89-degree synthetic head yaw is
-  already unavailable).
+- **Head-pose range.** `pose_term` now derives the off-axis angle from the
+  rotation matrix rather than the Euler angles, so it is not limited to the
+  +/-90 degrees `HeadPose.yaw_deg` can express. What actually stops a
+  profile view is the eye geometry: at 89 degrees of synthetic head yaw the
+  projected eye is too foreshortened for either eye to pass its own validity
+  check, and gaze reports `UNAVAILABLE` with "no eye had usable iris
+  geometry". Note that M1 may still report `TRACKED` for that frame — the
+  gaze gate is per-eye, not the tracking status.
 - **The M1 landmark stabiliser is per-point.** `LandmarkStabilizer` gives each
   landmark its own velocity-adaptive gain, so a fast-moving iris and slower
   eye corners can be smoothed by different amounts for a frame or two. Because
