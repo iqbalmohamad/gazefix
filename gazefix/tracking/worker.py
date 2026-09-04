@@ -448,9 +448,9 @@ class TrackerWorker:
 
         self._selector.reset()
         self._stabilizer.reset()
-        self._rebuild_or_give_up(f"tracker failure: {exc}")
         if submission is not None:
             self._publish(self._untracked(submission, TrackingStatus.ERROR, f"tracking error: {exc}"))
+        self._rebuild_or_give_up(f"tracker failure: {exc}")
 
     def _rebuild_or_give_up(self, reason: str) -> None:
         """Close the tracker and schedule a rebuild, bounded per generation."""
@@ -492,12 +492,17 @@ class TrackerWorker:
                 },
             )
         message = f"tracking error: {exc}"
-        if self._consecutive_errors >= self._settings.tracking_max_consecutive_errors:
-            self._rebuild_or_give_up("repeated inference errors")
+        rebuild = self._consecutive_errors >= self._settings.tracking_max_consecutive_errors
+        if rebuild:
             message += "; restarting tracker"
         self._selector.reset()
         self._stabilizer.reset()
+        # Publish the frame's own ERROR result before any state change: the
+        # processor wakes on either, and must attach this result (with its
+        # message) to the frame rather than a later, state-derived label.
         self._publish(self._untracked(submission, TrackingStatus.ERROR, message))
+        if rebuild:
+            self._rebuild_or_give_up("repeated inference errors")
 
     def _analyse(self, detection: RawDetection, submission: _Submission) -> TrackingResult:
         context = submission.context
