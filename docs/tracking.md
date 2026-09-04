@@ -211,7 +211,7 @@ abandoned as a daemon after a bounded join (below).
 | face partly outside / too small | `LOW_QUALITY` | original frames (+ dim overlay) | none needed |
 | tracker slower than the wait / stalled | `TIMEOUT` | original frames | section 8 |
 | camera change | `INITIALIZING` → `TRACKED` | M0 behaviour (preview cleared by the UI) | tracker rebuilt; stale results rejected by generation |
-| stop during init or inference | — | — | bounded join (`tracking_join_timeout_s`, 1 s, inside the runtime's deadline); a thread still inside a native call is logged (`tracker_shutdown_timeout`) and ends with the process; it releases the tracker itself when the call returns; it holds no camera |
+| stop during init or inference | — | — | bounded join (`tracking_join_timeout_s`, 2 s, inside the runtime's 5 s deadline); a thread still inside a native call is logged (`tracker_shutdown_timeout`) and ends with the process; it releases the tracker itself when the call returns; it holds no camera |
 
 Logging is per event (`tracker_ready`, `tracker_init_failed`,
 `tracker_generation_reset`, `tracker_inference_error`, `tracker_released`,

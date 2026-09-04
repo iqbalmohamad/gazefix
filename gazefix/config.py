@@ -98,7 +98,7 @@ class AppSettings:
     tracking_init_retry_max_s: float = 30.0
     tracking_init_max_attempts: int = 5
     tracking_max_consecutive_errors: int = 3
-    tracking_join_timeout_s: float = 1.0
+    tracking_join_timeout_s: float = 2.0
 
     def validated(self) -> "AppSettings":
         if self.capture_width <= 0 or self.capture_height <= 0:
