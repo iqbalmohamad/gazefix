@@ -1,25 +1,38 @@
-# GazeFix — Milestone 0
+# GazeFix — Milestones 0 and 1
 
-GazeFix Milestone 0 is a local Windows desktop prototype that discovers validated
-OpenCV camera candidates, lets the user select and switch cameras, and displays a
-responsive live preview. It contains no gaze correction, tracking, ML inference,
+GazeFix is a local Windows desktop prototype that discovers validated OpenCV
+camera candidates, lets the user select and switch cameras, displays a
+responsive live preview (Milestone 0), and tracks the face of one person in
+that preview: 478 facial landmarks, anatomically labelled left/right eyes with
+eyelid contours, iris landmarks, head orientation, and a truthful quality
+signal (Milestone 1). Tracking runs on the CPU and entirely on the local
+machine. It contains no gaze estimation, gaze correction, calibration,
 virtual-camera output, telemetry, or cloud processing.
 
 ## Requirements
 
 - Windows 10 or 11
-- Python 3.11 or newer (64-bit recommended)
+- Python 3.11 or 3.12 (64-bit). The application declares `>=3.11`; MediaPipe
+  1.0.1 declares support for Python 3.9–3.12, so 3.13 is untested.
 - A webcam allowed by **Windows Settings → Privacy & security → Camera**
+- The face landmarker model file, installed once by an explicit command (below)
 
-The M0 runtime dependencies are PySide6, OpenCV, and NumPy. pytest is installed
-only by the `dev` optional dependency.
+Runtime dependencies are PySide6, OpenCV (contrib variant), NumPy, and
+MediaPipe. pytest is installed only by the `dev` optional dependency.
 
-| Dependency | Declared range | M0 purpose | Package license metadata |
+| Dependency | Declared range | Purpose | Package license metadata |
 | --- | --- | --- | --- |
 | PySide6 | `>=6.7,<7` | Windows desktop UI and thread-safe signals | LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only |
-| opencv-python | `>=4.10,<5` | Webcam capture and Windows backend access | Apache-2.0 |
+| opencv-contrib-python | `>=4.10,<5` | Webcam capture, Windows backend access, colour conversion, overlay drawing. Replaces `opencv-python` because MediaPipe requires the contrib distribution and both provide `cv2` | Apache-2.0 |
 | NumPy | `>=1.26,<3` | Typed frame-array representation | BSD-3-Clause and bundled component licenses |
+| mediapipe | `==1.0.1` (tested release) | Face landmark tracking (Tasks `FaceLandmarker`, CPU) | Apache-2.0 |
 | pytest (development only) | `>=8,<10` | Hardware-independent automated tests | MIT |
+
+MediaPipe pulls in absl-py, flatbuffers, certifi, sounddevice (+cffi) and
+matplotlib (+pillow and friends); none of them is used by GazeFix directly. The
+model file has its own Apache-2.0 licence; see `models/README.md` and
+`docs/decisions/ADR-0001-face-tracker-mediapipe.md` for the full dependency
+and model record.
 
 ## Environment setup
 
@@ -29,10 +42,16 @@ From PowerShell in the repository root:
 py -3.12 -m venv .venv
 .venv\Scripts\python -m pip install --upgrade pip
 .venv\Scripts\python -m pip install -e ".[dev]"
+.venv\Scripts\python scripts\fetch_model.py
 ```
 
-Python 3.11 can be substituted for 3.12. The application declares compatibility
-with Python `>=3.11`.
+Python 3.11 can be substituted for 3.12. The last command downloads the
+face landmarker model (3.7 MB) from its documented official source into
+`%LOCALAPPDATA%\GazeFix\models`, verifies its size and SHA-256, and prints a
+JSON report; it is the only step that uses the network and it is never run by
+the application itself. `--verify-only` checks an existing file without
+downloading; `--model-dir` chooses another directory (then pass the same
+`--model-dir` to the application).
 
 ## Run the application
 
@@ -61,13 +80,64 @@ the hardware-transform switch (GazeFix defaults to `0`, OpenCV's own default is
 .venv\Scripts\python -m gazefix --msmf-hw-transforms 1
 ```
 
+### Tracking and development mode
+
+Tracking starts automatically. The consumer window shows only a
+`Tracking:` metric (inference time and status word). Development mode adds
+the debug controls:
+
+```powershell
+.venv\Scripts\python -m gazefix --dev            # overlay checkbox + tracking detail line
+.venv\Scripts\python -m gazefix --dev --overlay  # start with the overlay on
+.venv\Scripts\python -m gazefix --no-tracking    # M0 passthrough preview, no model loaded
+.venv\Scripts\python -m gazefix --model-dir D:\models
+```
+
+With the overlay off the preview shows the original camera pixels; with it
+on, landmarks, eyelid contours (right eye cyan `R`, left eye yellow `L`,
+anatomical sides), iris circles, head-pose axes ("head pose (not gaze)") and
+a status panel are drawn on a copy of the frame. If the model file is
+missing or invalid the preview keeps running and the `Tracking:` metric,
+the detail line (`--dev`) and the log say what to do
+(`python scripts/fetch_model.py`). See `docs/tracking.md` for the result
+contract, coordinate conventions, quality semantics and failure policy.
+
 ## Run tests
 
 ```powershell
 .venv\Scripts\python -m pytest
 ```
 
-The automated suite uses fake camera sources and does not require webcam hardware.
+The automated suite uses fake camera sources and fake trackers; it needs no
+webcam, no network and no model file (the real-model tests are skipped). To
+run the real MediaPipe face landmarker on the licensed fixture image
+(`tests/assets/astronaut_face.png`, public domain; see `tests/assets/README.md`)
+after `scripts/fetch_model.py` has installed the model:
+
+```powershell
+$env:GAZEFIX_REAL_MODEL_TESTS = "1"
+.venv\Scripts\python -m pytest tests\test_real_model_tracking.py
+```
+
+Set `GAZEFIX_MODEL_DIR` if the model lives outside the default directory.
+
+## Run tracking diagnostics
+
+After the model setup above, run the real tracker on the fixture image or on
+a physical camera and get one JSON object with detection counts, validity,
+head-pose and inference-time statistics:
+
+```powershell
+.venv\Scripts\python scripts\tracking_test.py --image tests\assets\astronaut_face.png
+.venv\Scripts\python scripts\tracking_test.py --camera 0 --duration 10
+```
+
+The tool runs inference synchronously on its own thread (no bounded wait, no
+stabilisation, no primary-face memory), so `inference_ms` is the pure backend
+cost per frame; the application's `Tracking:` metric and the `runtime_metrics`
+log line at close report the same inference time plus the processor wait,
+`processing_ms`, and `pipeline_latency_ms` (capture timestamp to processed
+frame). Exit code 0 means at least one frame was tracked.
 
 ## Run camera diagnostics
 
@@ -155,9 +225,14 @@ The UI defines metrics as follows:
 
 - **Capture FPS:** successful camera reads per second over a rolling window.
 - **Display FPS:** new frames actually presented by the Qt preview per second.
-- **Processing:** measured time inside the current passthrough processing stage;
-  it excludes buffer wait time and UI presentation.
+- **Processing:** measured time inside the processing stage: for M1 the bounded
+  wait for the frame's own tracking result plus overlay rendering; it excludes
+  buffer wait time and UI presentation.
 - **Replaced frames:** unread values overwritten in the capture and preview buffers.
+- **Tracking:** smoothed tracker inference time (colour conversion plus the
+  backend call on the tracker thread) and the status of the displayed frame's
+  result; `--dev` adds the total and waited times, the pipeline latency
+  (capture timestamp to processed frame), and timeout/error/replaced counters.
 
 Structured JSON-line logs rotate locally at:
 
@@ -166,7 +241,9 @@ Structured JSON-line logs rotate locally at:
 ```
 
 Logs contain lifecycle and diagnostic metadata, never raw frames. Webcam frames
-remain in local process memory and are never transmitted.
+remain in local process memory and are never transmitted; the tracker receives
+an in-memory copy of each frame and the model file is read from disk. The only
+network access in the project is the explicit `scripts/fetch_model.py` command.
 
 Closing the window waits at most `worker_join_timeout_s` in total. A camera
 release is a driver call with no upper bound, so the window never performs one:
@@ -179,4 +256,5 @@ driver does not return in time the log says which owner still has work, and the
 daemon thread ends with the process.
 
 See [docs/architecture.md](docs/architecture.md) for the pipeline and shutdown
-details.
+details and [docs/tracking.md](docs/tracking.md) for the tracking contract,
+threads, overload policy and failure handling.
