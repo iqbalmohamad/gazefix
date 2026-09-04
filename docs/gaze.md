@@ -253,6 +253,14 @@ genuinely mistracked eye. Before this was measured, a 15-degree span rejected
 `tests/test_real_model_tracking.py::test_real_eyes_disagree_structurally_and_averaging_absorbs_it`
 pins the measurement, so the deadband stays justified.
 
+**Provenance caveat, stated plainly:** those 9 detections are 9 placements of
+**one** face — the public-domain fixture in `tests/assets/`. The mechanism
+(nasal canthus past the globe) is anatomical and should generalise, and the
+deadband is set well above the measured value precisely because one subject is
+thin evidence, but the number itself is n=1 and must not be quoted as a
+population figure. The Product Owner's smoke test is the first time a second
+face sees this code.
+
 ## 5. Accuracy and limitations
 
 Measured on synthetic scenes built from an independent 3-D eyeball and
@@ -369,14 +377,57 @@ Other error sources, in rough order of size:
   brief phantom offset during rapid eye movement. Set `tracking_smoothing=0`
   to remove it; the gaze smoother then still damps iris jitter downstream, in
   the right units.
+- **The zero reference is the camera's OPTICAL AXIS, not the camera.**
+  `yaw_deg = 0` means the gaze is parallel to the optical axis, so a user
+  sitting well off to one side reads a large yaw while looking straight at the
+  lens. With no camera intrinsics there is nothing to correct this with. It is
+  the same assumption as the orthographic projection, and it is why the smoke
+  test asks the Product Owner to sit roughly in front of the camera.
+- **`openness` is not foreshortening-invariant.** M1 computes it as an
+  image-space vertical lid separation over the corner distance, so it shrinks
+  with head pitch and roll. `openness_term` therefore reads a pitched-down head
+  as slightly more closed than it is. The effect is small next to the
+  0.10-to-0.20 ramp, but it is the same asymmetry §3 corrects for `v` and does
+  not correct here.
+- **The eyelid clips the iris in almost every frame.** At M1's observed
+  openness of 0.25–0.4 on a ~30 mm fissure the aperture is roughly 8–12 mm
+  against an ~11.7 mm iris, so the visible iris is cut top and bottom and its
+  estimated centre is pulled by whichever lid cuts more. Nothing models this;
+  it is part of why downward gaze is the least reliable direction.
+- **No hysteresis on availability.** An eyelid hovering at the `openness_floor`
+  makes the status alternate between estimated and unavailable, resetting the
+  smoother each time, so the signal is unfiltered exactly where it is noisiest.
+  Accepted for M2: the frames concerned are blink boundaries, which are the
+  least trustworthy frames anyway.
+- **No iris-plausibility check.** Nothing verifies that the iris centre lies
+  inside its own eye contour. A badly mistracked iris is caught only when it
+  leaves the frame (M1) or exceeds the eyeball model (`offset_term`).
 - **Backend iris quality.** Everything rests on MediaPipe's iris landmarks;
-  glasses, reflections, strong side lighting and low resolution degrade them.
-  Not characterised here — the Product Owner's smoke test is where this shows
-  up.
+  glasses, reflections, contact lenses, heavy makeup, motion blur, exposure and
+  strong side lighting all degrade them. **None of this is characterised** —
+  the Product Owner's smoke test is the first time any of it is exercised.
 
-**Do not** quote these numbers as an accuracy specification for a real user.
-They are the model's error on known geometry; the per-user terms above are not
-included, and no ground-truth gaze data exists for this project.
+### The combined budget
+
+**Do not** quote the tables above as an accuracy specification for a real user.
+They are the model's error on known geometry. Adding the per-user terms — `k`
+(about +/-3 degrees at a true 20), angle kappa (4–6), the head-pose depth
+residual (a few degrees at a large head turn) and iris pixel noise (about 4
+degrees per pixel of noise at a 40 px eye width, 8 at 20 px) — **a realistic
+per-user error budget is on the order of +/-10 degrees.** No ground-truth gaze
+data exists for this project, so even that is an estimate of an estimate.
+
+This is why the readout prints whole degrees with an "approx, uncalibrated"
+marker and why `docs` and code alike call the output an indication of how far
+the eyes are looking away from the camera, rather than an angle.
+
+### Saturation is a contract property, not a bug
+
+Past the joint offset limit (`hypot(g_x, g_y) > 0.95`, about 72 degrees of
+eye-in-head rotation) the direction is clamped and further iris movement
+changes nothing. `offset_term` drops to its floor to report it. Real eyes do
+not rotate that far in their sockets, so reaching saturation means the
+landmarks are wrong, not that the person is looking very far away.
 
 ## 6. Unavailable and low-confidence behaviour
 
