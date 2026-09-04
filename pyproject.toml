@@ -4,14 +4,26 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gazefix"
-version = "0.1.0"
-description = "Local Windows webcam pipeline foundation for GazeFix"
+version = "0.2.0"
+description = "Local Windows webcam pipeline with face and eye tracking for GazeFix"
 readme = "README.md"
-requires-python = ">=3.11"
+# MediaPipe 0.10.21 declares Python 3.9-3.12 only; 3.11 and 3.12 are supported here.
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "numpy>=1.26,<3",
-    "opencv-python>=4.10,<5",
+    # MediaPipe requires opencv-contrib-python (unpinned). It is the same OpenCV
+    # build as opencv-python plus the contrib modules and cannot coexist with
+    # opencv-python (both provide ``cv2``), so the project depends on the
+    # contrib variant, kept below OpenCV 5 to preserve the M0-validated
+    # capture behaviour. MediaPipe 0.10.21 requires ``numpy<2``, so pip
+    # resolves OpenCV 4.11.x here (4.12+ require NumPy 2); the exact resolved
+    # set is recorded in constraints-windows-py312.txt.
+    "opencv-contrib-python>=4.10,<5",
     "PySide6>=6.7,<7",
+    # Pinned to the tested release. 0.10.21 is the last MediaPipe that does not
+    # contain the usage-logging HTTP client; see
+    # docs/decisions/ADR-0001-face-tracker-mediapipe.md.
+    "mediapipe==0.10.21",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +34,8 @@ dev = [
 [project.scripts]
 gazefix = "gazefix.main:main"
 gazefix-camera-test = "gazefix.camera.diagnostics:main"
+gazefix-fetch-model = "gazefix.tracking.provision:main"
+gazefix-tracking-test = "gazefix.tracking.validate:main"
 
 [tool.setuptools.packages.find]
 include = ["gazefix*"]
@@ -29,4 +43,6 @@ include = ["gazefix*"]
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
-
+markers = [
+    "real_model: runs the real MediaPipe face landmarker on the licensed fixture; opt-in via GAZEFIX_REAL_MODEL_TESTS=1",
+]

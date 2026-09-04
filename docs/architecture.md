@@ -1,4 +1,4 @@
-# Milestone 0 Architecture
+# Architecture (Milestone 0 foundation, Milestone 1 tracking)
 
 ## Data flow
 
@@ -7,27 +7,33 @@ OpenCV camera source (capture worker)
                  ↓
        latest-captured-frame buffer
                  ↓
-      passthrough processor worker
+   processor worker: TrackingProcessor ──submit──▶ tracker thread (MediaPipe, CPU)
+        (M0: PassthroughProcessor)     ◀─result──   latest-value slot in, latest result out
                  ↓
-       latest-output-frame buffer
+       latest-output-frame buffer  (frame + TrackingResult for that frame)
                  ↓
         Qt timer-driven preview
 ```
 
-Both buffers contain at most one value. Publishing replaces an unread value and
-increments a replacement counter; producers never wait for consumers and old
-frames cannot accumulate. The UI polls for a newer output sequence instead of
-receiving one queued Qt event per frame. If display is slower than capture or
-processing, it therefore presents the freshest available output.
+Both M0 buffers contain at most one value. Publishing replaces an unread value
+and increments a replacement counter; producers never wait for consumers and
+old frames cannot accumulate. The UI polls for a newer output sequence instead
+of receiving one queued Qt event per frame. If display is slower than capture
+or processing, it therefore presents the freshest available output. The M1
+hand-off between the processor thread and the tracker thread uses the same
+latest-value principle (one waiting frame, one latest result), so tracking can
+never grow a queue either; `docs/tracking.md` describes it in full.
 
 ## Frame ownership
 
 OpenCV supplies a distinct NumPy array for each successful `read`. The capture
-worker marks that array read-only before publishing it. Milestone 0's passthrough
-processor shares the same immutable array without copying. A future processor that
-mutates pixels must create its own output array. The preview builds a detached
-`QImage.copy()` before the NumPy reference can be replaced, so Qt owns the displayed
-pixels safely.
+worker marks that array read-only before publishing it. The passthrough
+processor shares the same immutable array without copying, and so does the
+tracking processor with the overlay off: the tracker converts the frame into
+its own RGB array for inference and never writes to the capture array. With
+the overlay on, the processor draws on a copy and publishes the copy. The
+preview builds a detached `QImage.copy()` before the NumPy reference can be
+replaced, so Qt owns the displayed pixels safely.
 
 ## Threads and lifecycle
 
@@ -35,6 +41,10 @@ pixels safely.
 - The camera-discovery thread performs potentially blocking index validation.
 - The long-lived capture thread owns camera open/read/release and automatic retry.
 - The processor thread waits for and processes only the latest captured frame.
+- The tracker thread (M1, owned by the tracking processor) creates, calls,
+  resets, rebuilds after repeated errors, and closes the face tracker; the
+  processor thread hands it frames and waits a bounded time for each frame's
+  own result.
 
 Capture state explicitly moves through idle, starting, running, degraded, retrying,
 error, stopping, and stopped states. Status changes cross into Qt using signals;
@@ -454,8 +464,45 @@ costs, not a prediction of application start-up time.
 
 ## Processing seam
 
-`FrameProcessor.process(frame)` is the only transformation contract in M0, and
-`PassthroughProcessor` returns the input unchanged. Later milestones can replace
-this object with tracking and gaze pipeline work on the existing processor thread;
-camera capture, latest-frame behavior, UI polling, and lifecycle ownership remain
-unchanged. No future-milestone algorithm or dependency is included now.
+`FrameProcessor` is the only transformation contract:
+
+```text
+start(metrics)             once, on the processor thread, before the first frame
+process(frame, context) -> ProcessorOutput(frame, tracking)
+close()                    once, on the processor thread, when the worker exits
+```
+
+`FrameContext` tells the processor which frame it holds (capture sequence,
+capture timestamp, camera generation) so the metadata it returns is tied to
+exactly that frame; `ProcessedFrame` carries the sequence and the
+`TrackingResult` to the consumer. `PassthroughProcessor` (M0) returns the
+input unchanged with no metadata. `TrackingProcessor` (M1,
+`gazefix/tracking/processor.py`) is the first real stage: it starts its
+tracker thread from `start()` so model loading — and the one-time warm-up
+of OpenCV's drawing primitives, which would otherwise be paid inside the
+first overlay render — overlaps camera discovery, never blocks a frame for
+longer than `tracking_wait_ms`, and releases the tracker from `close()`
+within a bounded join. Camera capture, latest-frame behaviour, UI polling
+and the M0 lifecycle ownership are unchanged. The
+window chooses the processor (`--no-tracking` selects the passthrough) and
+hands it to `PipelineRuntime`.
+
+### M1 shutdown additions
+
+`ProcessingWorker` calls `processor.close()` in its `finally`, on the
+processor thread, so `PipelineRuntime.stop()` bounds it with the same
+deadline it already applies to the processor join. `TrackingProcessor.close()`
+signals the tracker thread and joins it for at most
+`tracking_join_timeout_s`; the tracker thread closes the tracker itself
+(that is the only thread that ever touches it). If the thread is inside an
+uncancellable native inference or model-load call it is abandoned and logged
+(`tracker_shutdown_timeout` by the worker, `tracker_thread_alive_at_close` by
+the window): it holds no camera, so camera release is unaffected, and it
+still closes the tracker when the native call returns. The tracker thread is
+a daemon and the tracking backend adds no Python threads of its own, so a
+wedged native call cannot hold the interpreter open: the entry point reports
+it (`tracker_thread_alive_at_exit`) and exits normally, with no forced
+termination. See docs/tracking.md section 14. The runtime's `STOPPED` latch keeps
+its M0 meaning (the runtime-owned capture and processor threads and
+prepared-camera cleanup); the tracker thread's state is reported separately
+and truthfully rather than folded into it.

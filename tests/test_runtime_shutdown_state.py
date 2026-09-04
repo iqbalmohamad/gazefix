@@ -23,6 +23,7 @@ from gazefix.camera.source import PreparedCamera
 from gazefix.config import AppSettings
 from gazefix.diagnostics.metrics import PipelineMetrics
 from gazefix.pipeline.frame_buffer import LatestValueBuffer
+from gazefix.pipeline.processor import ProcessorOutput
 from gazefix.pipeline.runtime import PipelineRuntime, RuntimeState
 
 
@@ -89,10 +90,13 @@ class GatedProcessor:
         self.gate = gate
         self.entered = Event()
 
-    def process(self, frame):  # type: ignore[no-untyped-def]
+    def process(self, frame, context=None):  # type: ignore[no-untyped-def]
         self.entered.set()
         self.gate.wait(10.0)
-        return frame
+        return ProcessorOutput(frame)
+
+    def close(self) -> None:
+        return None
 
 
 def prepared_camera(index: int) -> tuple[FakeCameraSource, PreparedCamera]:

@@ -27,6 +27,17 @@ def test_default_settings_are_valid() -> None:
         ("stalled_read_s", 0),
         ("open_validation_timeout_s", 0),
         ("reconnect_delay_max_s", 0.5),
+        ("tracking_wait_ms", 0),
+        ("tracking_max_faces", 5),
+        ("tracking_min_quality", 1.5),
+        ("tracking_min_in_frame_fraction", -0.1),
+        ("tracking_smoothing", 2.0),
+        ("tracking_init_retry_max_s", 0.5),
+        ("tracking_init_max_attempts", 0),
+        ("tracking_max_rebuilds", 0),
+        ("tracking_reset_gap_s", 0),
+        ("tracking_join_timeout_s", 0),
+        ("tracking_join_timeout_s", 3.0),  # 3.0 s + 0.1 s exceeds half of the 5 s worker deadline
     ],
 )
 def test_invalid_settings_are_rejected(field: str, value: int) -> None:

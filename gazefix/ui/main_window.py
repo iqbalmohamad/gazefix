@@ -1,4 +1,4 @@
-"""Minimal, responsive Milestone 0 application window."""
+"""Minimal, responsive application window (M0 preview, M1 tracking status)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import time
 from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QImage, QPixmap
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QGridLayout,
     QHBoxLayout,
@@ -24,7 +25,11 @@ from gazefix.camera.discovery import CameraDiscoveryService, DiscoveryResult
 from gazefix.camera.models import CameraDevice, CaptureState, CaptureStatus
 from gazefix.camera.source import PreparedCamera, PreparedCameraCloser
 from gazefix.config import AppSettings
+from gazefix.pipeline.processor import FrameProcessor, PassthroughProcessor
 from gazefix.pipeline.runtime import PipelineRuntime
+from gazefix.tracking.models import TrackingResult, TrackingStatus
+from gazefix.tracking.processor import TrackingProcessor
+from gazefix.tracking.tracker import TrackerFactory
 
 
 logger = logging.getLogger(__name__)
@@ -42,7 +47,15 @@ class MainWindow(QMainWindow):
         settings: AppSettings,
         log_path: str,
         source_factory: SourceFactory | None = None,
+        tracker_factory: TrackerFactory | None = None,
     ) -> None:
+        """``tracker_factory`` builds the face tracker on the tracker thread.
+
+        ``None`` selects the MediaPipe backend when ``settings.tracking_enabled``
+        is set; tests inject a fake. With tracking disabled the M0 passthrough
+        processor is used and no tracking code runs.
+        """
+
         super().__init__()
         self._settings = settings
         self._signals = UiSignals()
@@ -56,11 +69,27 @@ class MainWindow(QMainWindow):
         # separate one for discovery's unadopted prepared cameras. closeEvent
         # joins both, bounded, within the one shutdown deadline.
         self._discovery_closer = PreparedCameraCloser("gazefix-discovery-prepared-close")
+        # The tracking processor is built here and owned by the runtime's
+        # processing worker (created, used and closed on that thread). The
+        # window only flips its overlay flag and reads the results it publishes.
+        self._tracking: TrackingProcessor | None = None
+        processor: FrameProcessor = PassthroughProcessor()
+        if settings.tracking_enabled:
+            if tracker_factory is None:
+                from gazefix.tracking.mediapipe_tracker import mediapipe_tracker_factory
+
+                tracker_factory = mediapipe_tracker_factory(settings)
+            self._tracking = TrackingProcessor(
+                tracker_factory, settings, overlay_enabled=settings.overlay_enabled
+            )
+            processor = self._tracking
         self._runtime = PipelineRuntime(
             settings,
             on_status=self._signals.capture_status.emit,
+            processor=processor,
             source_factory=source_factory,
         )
+        self._last_tracking: TrackingResult | None = None
         discovery_kwargs = {} if source_factory is None else {"source_factory": source_factory}
         self._discovery = CameraDiscoveryService(
             settings,
@@ -127,6 +156,8 @@ class MainWindow(QMainWindow):
         self._display_fps = QLabel("0.0 FPS")
         self._processing_ms = QLabel("0.000 ms")
         self._dropped_frames = QLabel("0")
+        self._tracking_ms = QLabel("off" if self._tracking is None else "starting")
+        self._tracking_ms.setWordWrap(True)
         metrics.addWidget(QLabel("Capture FPS:"), 0, 0)
         metrics.addWidget(self._capture_fps, 0, 1)
         metrics.addWidget(QLabel("Display FPS:"), 0, 2)
@@ -135,13 +166,51 @@ class MainWindow(QMainWindow):
         metrics.addWidget(self._processing_ms, 1, 1)
         metrics.addWidget(QLabel("Replaced frames:"), 1, 2)
         metrics.addWidget(self._dropped_frames, 1, 3)
+        metrics.addWidget(QLabel("Tracking:"), 2, 0)
+        metrics.addWidget(self._tracking_ms, 2, 1)
         layout.addLayout(metrics)
+
+        # Development-only controls; never built in the consumer UI.
+        self._overlay_checkbox: QCheckBox | None = None
+        self._tracking_detail: QLabel | None = None
+        if self._settings.developer_mode and self._tracking is not None:
+            developer_row = QHBoxLayout()
+            developer_row.addWidget(QLabel("Developer:"))
+            self._overlay_checkbox = QCheckBox("Tracking overlay")
+            self._overlay_checkbox.setChecked(self._tracking.overlay_enabled)
+            self._overlay_checkbox.toggled.connect(self._set_overlay_enabled)
+            developer_row.addWidget(self._overlay_checkbox)
+            developer_row.addStretch(1)
+            layout.addLayout(developer_row)
+            self._tracking_detail = QLabel("Tracking: waiting for frames")
+            self._tracking_detail.setWordWrap(True)
+            self._tracking_detail.setStyleSheet("QLabel { color: #9aa3ad; font-family: monospace; }")
+            layout.addWidget(self._tracking_detail)
 
         self._status = QLabel("Starting…")
         self._status.setWordWrap(True)
         self._status.setToolTip(f"Local log: {log_path}")
         layout.addWidget(self._status)
         self.setCentralWidget(root)
+
+    @Slot(bool)
+    def _set_overlay_enabled(self, enabled: bool) -> None:
+        if self._tracking is not None:
+            self._tracking.set_overlay_enabled(enabled)
+            logger.info(
+                "Tracking overlay toggled",
+                extra={"event": "overlay_toggled", "enabled": bool(enabled)},
+            )
+
+    @property
+    def overlay_enabled(self) -> bool:
+        return self._tracking is not None and self._tracking.overlay_enabled
+
+    @property
+    def tracker_thread_alive(self) -> bool:
+        """Whether the tracker thread outlived shutdown (inside a native call)."""
+
+        return self._tracking is not None and self._tracking.worker_alive
 
     @Slot()
     def refresh_cameras(self) -> None:
@@ -251,6 +320,13 @@ class MainWindow(QMainWindow):
         if item is None:
             return
         self._last_output_sequence = item.sequence
+        # Metadata is used only if it names this very frame and generation.
+        tracking = item.value.tracking
+        if tracking is not None and not tracking.belongs_to(
+            item.value.capture_sequence, item.value.camera_request_id
+        ):
+            tracking = None
+        self._last_tracking = tracking
         frame = item.value.frame
         if frame.ndim != 3 or frame.shape[2] != 3:
             logger.error(
@@ -294,6 +370,21 @@ class MainWindow(QMainWindow):
         self._processing_ms.setText(f"{metrics.processing_ms:.3f} ms")
         replacements = metrics.capture_replacements + metrics.output_replacements
         self._dropped_frames.setText(str(replacements))
+        if self._tracking is not None:
+            tracking = self._last_tracking
+            if tracking is None:
+                self._tracking_ms.setText("starting")
+            elif tracking.status.has_landmarks:
+                self._tracking_ms.setText(
+                    f"{metrics.tracking_inference_ms:.1f} ms ({tracking.status.value})"
+                )
+            elif tracking.status is TrackingStatus.UNAVAILABLE and tracking.message:
+                # The consumer window must say what to do, not just "unavailable".
+                self._tracking_ms.setText(f"{tracking.status.value}: {tracking.message}")
+            else:
+                self._tracking_ms.setText(tracking.status.value)
+            if self._tracking_detail is not None:
+                self._tracking_detail.setText(_tracking_detail_text(tracking, metrics))
 
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().resizeEvent(event)
@@ -320,11 +411,20 @@ class MainWindow(QMainWindow):
                 "capture_fps": metrics.capture_fps,
                 "display_fps": metrics.display_fps,
                 "processing_ms": metrics.processing_ms,
+                "pipeline_latency_ms": metrics.pipeline_latency_ms,
                 "captured_frames": metrics.captured_frames,
                 "displayed_frames": metrics.displayed_frames,
                 "read_failures": metrics.read_failures,
                 "capture_replacements": metrics.capture_replacements,
                 "output_replacements": metrics.output_replacements,
+                "tracking_inference_ms": metrics.tracking_inference_ms,
+                "tracking_total_ms": metrics.tracking_total_ms,
+                "tracked_frames": metrics.tracked_frames,
+                "low_quality_frames": metrics.low_quality_frames,
+                "no_face_frames": metrics.no_face_frames,
+                "tracking_timeouts": metrics.tracking_timeouts,
+                "tracking_errors": metrics.tracking_errors,
+                "tracking_replaced": metrics.tracking_replaced,
             },
         )
         # Signal discovery first so both workers wind down concurrently, then
@@ -361,6 +461,14 @@ class MainWindow(QMainWindow):
                     "runtime_state": self._runtime.state.value,
                 },
             )
+        if self.tracker_thread_alive:
+            # The tracker thread is closed by the processing worker within the
+            # same deadline; if it is still inside a native call it holds no
+            # camera, and the entry point bounds process exit (see main.py).
+            logger.error(
+                "Tracker thread still alive at close",
+                extra={"event": "tracker_thread_alive_at_close"},
+            )
         if not (runtime_cleanup_done and discovery_cleanup_done):
             # Say which owner still has work; each count is that owner's own.
             logger.error(
@@ -375,5 +483,37 @@ class MainWindow(QMainWindow):
 
     def _clear_preview(self, message: str) -> None:
         self._last_image = None
+        self._last_tracking = None
         self._preview.clear()
         self._preview.setText(message)
+
+
+def _tracking_detail_text(tracking: TrackingResult | None, metrics) -> str:  # type: ignore[no-untyped-def]
+    if tracking is None:
+        return "Tracking: waiting for frames"
+    parts = [f"Tracking: {tracking.status.value}"]
+    if tracking.message:
+        parts.append(tracking.message)
+    if tracking.quality is not None:
+        parts.append(
+            f"quality {tracking.quality.score:.2f} faces {tracking.faces_detected} "
+            f"iris {'yes' if tracking.iris_available else 'no'}"
+        )
+    if tracking.left_eye is not None and tracking.right_eye is not None:
+        parts.append(
+            f"open R {tracking.right_eye.openness:.2f} L {tracking.left_eye.openness:.2f}"
+        )
+    if tracking.pose is not None:
+        pose = tracking.pose
+        parts.append(
+            f"head pose (not gaze) yaw {pose.yaw_deg:+.0f} pitch {pose.pitch_deg:+.0f} roll {pose.roll_deg:+.0f}"
+        )
+    timing = tracking.timing
+    inference = "n/a" if timing.inference_ms is None else f"{timing.inference_ms:.1f} ms"
+    total = "n/a" if timing.total_ms is None else f"{timing.total_ms:.1f} ms"
+    parts.append(
+        f"inference {inference} total {total} waited {timing.waited_ms:.1f} ms"
+        f" | pipeline {metrics.pipeline_latency_ms:.1f} ms"
+        f" | timeouts {metrics.tracking_timeouts} errors {metrics.tracking_errors} replaced {metrics.tracking_replaced}"
+    )
+    return " | ".join(parts)
