@@ -245,3 +245,19 @@ def test_eye_marks_follow_the_result_geometry_not_the_canvas_size() -> None:
     assert len(drawn) > 0
     # Everything lands inside the 320x180 region that the geometry describes.
     assert drawn[:, 0].max() < 180 + 2 and drawn[:, 1].max() < 320 + 2
+
+
+def test_landmarks_outside_the_image_are_not_pinned_to_the_border() -> None:
+    import numpy as np
+
+    from gazefix.tracking.models import FrameGeometry
+    from gazefix.tracking.overlay import OverlayStyle, render_overlay
+    from tracking_fakes import synthetic_landmarks, tracked_result
+
+    geometry = FrameGeometry(320, 180)
+    landmarks = synthetic_landmarks(center=(0.5, 0.5), face_height=0.5).copy()
+    landmarks[280:360, 0] = 5.0  # mesh-only indices (no eye contour or iris points), far outside to the right
+    result = tracked_result(landmarks, geometry)
+    frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    canvas = render_overlay(frame, result, OverlayStyle(face_oval=False, pose_axes=False, text=False))
+    assert canvas[:, 316:].max() == 0  # nothing drawn along the right border

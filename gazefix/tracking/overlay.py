@@ -80,8 +80,16 @@ def render_overlay(frame: Frame, result: TrackingResult, style: OverlayStyle | N
 
 
 def _draw_points(canvas: Frame, points: np.ndarray, colour: tuple[int, int, int], radius: int) -> None:
+    """Draw only points that lie inside the image.
+
+    Landmarks outside the frame are the model's extrapolation, not
+    observations; pinning them to the border would show a false contour.
+    """
+
+    height, width = canvas.shape[:2]
     for x, y in _clip(points, canvas):
-        cv2.circle(canvas, (x, y), radius, colour, -1, lineType=cv2.LINE_AA)
+        if 0 <= x < width and 0 <= y < height:
+            cv2.circle(canvas, (x, y), radius, colour, -1, lineType=cv2.LINE_AA)
 
 
 def _draw_polyline(canvas: Frame, points: np.ndarray, colour: tuple[int, int, int], closed: bool) -> None:
