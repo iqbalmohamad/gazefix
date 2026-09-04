@@ -754,3 +754,158 @@ def test_case_n_ownership_is_unambiguous_at_every_acceptance_boundary(broken_thr
         assert len(closer3._queue) == 1
     broken_thread.armed = False
     assert closer3.join(2.0) and warm3.close_calls == 1
+
+
+# --- Cleanup-worker launch state machine (Cases O-S of the final review) ----------
+
+
+class CountingFaultThread(Thread):
+    """Real Thread with injectable start() faults and construction counting.
+
+    ``mode`` selects the fault: ``None`` behaves normally; ``"pre_native"``
+    raises without creating the native thread (a launch that never happened);
+    ``"post_native"`` creates the real native thread first and then raises,
+    matching the reviewer's reproduction of a partial ``Thread.start()``.
+    """
+
+    mode: str | None = None
+    constructed = 0
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        CountingFaultThread.constructed += 1
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+
+    def start(self) -> None:
+        if CountingFaultThread.mode == "pre_native":
+            raise RuntimeError("can't start new thread")
+        super().start()
+        if CountingFaultThread.mode == "post_native":
+            raise RuntimeError("startup wait interrupted after native spawn")
+
+
+@pytest.fixture
+def fault_thread(monkeypatch):  # type: ignore[no-untyped-def]
+    from gazefix.camera import source as source_module
+
+    CountingFaultThread.mode = None
+    CountingFaultThread.constructed = 0
+    monkeypatch.setattr(source_module, "Thread", CountingFaultThread)
+    return CountingFaultThread
+
+
+def closer_workers(name: str) -> int:
+    import threading
+
+    return sum(1 for t in threading.enumerate() if t.name == name)
+
+
+def test_case_o_genuine_pre_launch_failure_recovers_with_exactly_one_worker(fault_thread) -> None:  # type: ignore[no-untyped-def]
+    closer = PreparedCameraCloser("test-close-o")
+    warm, token = prepared_token(0)
+
+    fault_thread.mode = "pre_native"  # start() raises with no native thread
+    closer.submit(token)
+    assert closer.outstanding == 1 and closer_workers("test-close-o") == 0
+    assert closer.join(0.2) is False  # bounded; resolves the launch as never-run
+
+    fault_thread.mode = None
+    assert closer.join(2.0)  # retry launches exactly one worker and drains
+    assert warm.close_calls == 1
+    assert closer_workers("test-close-o") == 0
+    # Failed attempts are serialized, never concurrent: each one is resolved
+    # dead before the next is tried (join retries once per wait slice), and
+    # exactly one worker ever emerges (no native thread existed until the
+    # fault was removed, as the workers count above showed throughout).
+    assert fault_thread.constructed >= 2
+
+
+def test_case_p_post_native_start_failure_keeps_the_first_worker_authoritative(fault_thread) -> None:  # type: ignore[no-untyped-def]
+    """The reviewer's reproduction, at runtime level: start() raises after the
+    native thread exists; that worker must stay the one and only drainer."""
+
+    gate = Event()
+    runtime = PipelineRuntime(settings(worker_join_timeout_s=0.2), source_factory=factory_for([]))
+    warm_a, token_a = prepared_token(0, gate)
+    runtime.select_camera(CameraDevice(0), token_a)
+    fault_thread.mode = "post_native"
+
+    assert runtime.stop() is False  # worker 1 exists and is blocked releasing A
+    assert wait_until(lambda: warm_a.close_calls == 1) and not warm_a.closed
+    assert runtime._closer._thread is not None  # remains authoritative, not lost
+    constructed_after_first = fault_thread.constructed
+    assert constructed_after_first == 1
+
+    fault_thread.mode = None
+    warm_b, token_b = prepared_token(1)
+    runtime.select_camera(CameraDevice(1), token_b)  # refused: submits token B
+    assert fault_thread.constructed == constructed_after_first  # NO second worker
+    assert runtime.cleanup_outstanding == 2  # A in flight + B queued: truthful
+    assert runtime.stop() is False  # cannot finalize while worker 1 is blocked
+    assert runtime.state is RuntimeState.STOPPING
+    assert not warm_b.closed  # nothing rivals the blocked drainer
+
+    gate.set()  # the release unblocks; the same worker finishes A then B
+    assert runtime.join_cleanup(2.0)
+    assert warm_a.close_calls == 1 and warm_b.close_calls == 1
+    assert runtime.stop() is True and runtime.state is RuntimeState.STOPPED
+    assert fault_thread.constructed == 1  # one worker served everything
+
+
+def test_case_q_submits_during_uncertain_launch_never_add_a_worker(fault_thread) -> None:  # type: ignore[no-untyped-def]
+    closer = PreparedCameraCloser("test-close-q")
+    fault_thread.mode = "pre_native"
+    warms = []
+    for index in range(3):  # repeated submits while the launch is unresolved
+        warm, token = prepared_token(index)
+        closer.submit(token)
+        warms.append(warm)
+    assert closer.outstanding == 3  # all owned and accounted
+    assert fault_thread.constructed == 1  # one attempt; no rival during uncertainty
+    assert closer_workers("test-close-q") == 0
+
+    fault_thread.mode = None
+    assert closer.join(2.0)  # resolution + relaunch: exactly one worker emerges
+    assert [w.close_calls for w in warms] == [1, 1, 1]
+    assert fault_thread.constructed == 2
+
+
+def test_case_r_restart_after_the_partial_start_worker_exits(fault_thread) -> None:  # type: ignore[no-untyped-def]
+    closer = PreparedCameraCloser("test-close-r")
+    fault_thread.mode = "post_native"
+    warm1, token1 = prepared_token(0)
+    closer.submit(token1)  # partial-start worker drains and exits idle
+    assert wait_until(lambda: warm1.close_calls == 1)
+    assert wait_until(lambda: closer._thread is None)  # exited and restartable
+
+    fault_thread.mode = None
+    warm2, token2 = prepared_token(1)
+    closer.submit(token2)  # later work starts a fresh worker safely
+    assert closer.join(2.0)
+    assert warm2.close_calls == 1
+    assert fault_thread.constructed == 2  # one worker per epoch, never two at once
+    assert closer_workers("test-close-r") == 0
+
+
+def test_case_s_join_during_uncertain_launch_is_bounded_truthful_and_recovers(fault_thread) -> None:  # type: ignore[no-untyped-def]
+    import time
+
+    closer = PreparedCameraCloser("test-close-s")
+    fault_thread.mode = "pre_native"
+    warms = []
+    for index in range(2):
+        warm, token = prepared_token(index)
+        closer.submit(token)
+        warms.append(warm)
+
+    started = time.perf_counter()
+    assert closer.join(0.2) is False  # bounded; never falsely complete
+    assert time.perf_counter() - started < 0.2 + 0.3
+    with closer._condition:
+        snapshot = list(closer._queue)
+    assert len(snapshot) == 2 and len({id(t) for t in snapshot}) == 2  # nothing lost/doubled
+    assert closer_workers("test-close-s") == 0  # no overlapping workers spawned
+
+    fault_thread.mode = None
+    assert closer.join(2.0)  # recovery once the original attempt's state is known
+    assert [w.close_calls for w in warms] == [1, 1]
+    assert closer_workers("test-close-s") == 0

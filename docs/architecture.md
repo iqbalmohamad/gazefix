@@ -313,8 +313,20 @@ Shared mechanics of every closer:
   or by two threads at once. Nobody reads an unclaimed source, so a release
   never overlaps a read.
 - A release counts as outstanding until the driver call returns; `join` waits
-  at most the time it is given, and a failed thread launch is retried on the
+  at most the time it is given, and a failed worker launch is retried on the
   next `submit` or `join` with the token still counted.
+- At most one worker ever drains a closer, enforced by a launch state machine:
+  the worker reference is assigned before `start()` is attempted, so a
+  `start()` that raises leaves the attempt UNCERTAIN (in CPython the native
+  thread is created before `start()` waits on its bootstrap, so the worker may
+  exist despite the exception) and no rival is launched until the attempt is
+  resolved — the worker announces itself on entry (running), or its bootstrap
+  provably ran and the thread terminated (restartable), or a dedicated wait
+  inside `join` passes with the bootstrap never begun (never launched). As
+  defense in depth, the drain loop admits exactly one active drainer: a
+  duplicate thread that materializes late retires on entry without touching
+  the queue or the in-flight slot, so overlapping drainers are structurally
+  impossible whatever a launch heuristic concludes.
 - A release that never returns keeps the daemon thread alive until process
   exit, exactly like a capture worker abandoned inside a driver call, and the
   tokens queued behind it stay counted rather than forgotten.

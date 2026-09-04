@@ -13,7 +13,7 @@ from collections import deque
 from dataclasses import dataclass
 import logging
 import os
-from threading import Condition, Event, Lock, Thread
+from threading import Condition, Event, Lock, Thread, current_thread
 import time
 from typing import Callable, Protocol
 
@@ -131,7 +131,19 @@ class PreparedCameraCloser:
         self._condition = Condition()
         self._queue: deque[PreparedCamera] = deque()
         self._in_flight: PreparedCamera | None = None
+        # Single-worker state machine, all guarded by the condition:
+        # ``_thread`` is the authoritative worker for the current launch
+        # epoch, assigned BEFORE ``start()`` is attempted so a launch whose
+        # outcome is unknown still has an owner; ``_thread_uncertain`` marks
+        # a launch whose ``start()`` raised, in which case the native thread
+        # may or may not exist and no rival may be launched until this
+        # attempt is proven running (it announces itself in ``_run``) or
+        # terminated; ``_drainer`` is set by the one thread actually draining
+        # and is the hard guarantee that at most one worker ever touches the
+        # queue and in-flight slot, whatever the launch heuristics conclude.
         self._thread: Thread | None = None
+        self._thread_uncertain = False
+        self._drainer: Thread | None = None
 
     def submit(self, prepared: PreparedCamera) -> None:
         """Take over closing ``prepared``; returns at once, never touching the driver.
@@ -166,27 +178,62 @@ class PreparedCameraCloser:
             self._ensure_thread()  # logged best effort; never raises Exception
 
     def _ensure_thread(self) -> None:
-        """Launch the thread if work is queued and none is running (condition held).
+        """Launch a worker if work is queued and none may be running (condition held).
 
-        Construction or start can fail (out of threads). That is recoverable:
-        the failure is logged, never raised, the queued tokens stay owned and
-        counted, and both the next ``submit`` and the next ``join`` try the
-        launch again — so a launch failure can neither strand a token nor
-        masquerade as a rejected submission.
+        Never raises for a recoverable failure, and never creates a second
+        worker while an earlier launch could still produce one. A failed
+        ``Thread`` construction definitely launched nothing, so a later call
+        simply retries. A ``start()`` that raises is treated as UNCERTAIN:
+        CPython creates the native thread and only then waits for its
+        bootstrap, so an exception from ``start()`` does not imply the worker
+        does not exist — the authoritative ``_thread`` reference (assigned
+        before the attempt) is therefore kept, and no rival is launched until
+        the attempt is resolved: either the worker announces itself in
+        ``_run`` (it is running; nothing to do), or its bootstrap provably
+        ran and the thread has terminated (``ident`` set and no longer
+        alive), or ``join`` proves the launch never reached its bootstrap.
+        ``thread.is_alive()`` alone right after the exception proves nothing
+        (the thread may still be entering bootstrap) and is never used that
+        way. Should any heuristic ever misjudge, the ``_drainer`` guard in
+        ``_run`` still makes a second drainer structurally impossible.
         """
 
-        if self._thread is not None or not self._queue:
+        if not self._queue:
             return
+        if self._thread is not None:
+            if not self._thread_uncertain:
+                return  # a worker is running or provably about to run
+            if self._thread.ident is not None and not self._thread.is_alive():
+                # Its bootstrap ran (ident set) and it has terminated: the
+                # attempt is resolved dead and a new launch is safe.
+                self._thread = None
+                self._thread_uncertain = False
+            else:
+                return  # unresolved: no rival worker may be launched
         try:
             thread = Thread(target=self._run, name=self._name, daemon=True)
-            thread.start()
         except Exception:
+            # Nothing was launched; the queued tokens stay owned and counted
+            # and the next submit/join retries.
             logger.exception(
-                "Prepared camera cleanup thread could not start",
+                "Prepared camera cleanup thread could not be created",
                 extra={"event": "prepared_camera_closer_start_error"},
             )
             return
+        # Authoritative before the attempt: however start() ends, this launch
+        # epoch has an owner and no rival can be created past it.
         self._thread = thread
+        self._thread_uncertain = True
+        try:
+            thread.start()
+        except Exception:
+            # The native thread may or may not exist; stay uncertain.
+            logger.exception(
+                "Prepared camera cleanup thread start failed; outcome uncertain",
+                extra={"event": "prepared_camera_closer_start_error"},
+            )
+            return
+        self._thread_uncertain = False
 
     @property
     def outstanding(self) -> int:
@@ -198,29 +245,88 @@ class PreparedCameraCloser:
     def join(self, timeout: float) -> bool:
         """Bounded best-effort wait for every accepted token to be released.
 
-        Retries the cleanup-thread launch first (a recoverable launch failure
-        is logged, never raised, and never touches the queue), then waits at
-        most ``timeout`` seconds. Returns ``True`` only when the queue and
-        the in-flight slot are actually empty, so a launch failure yields a
-        truthful ``False`` with every token still owned and counted.
+        Retries the cleanup-worker launch (a recoverable failure is logged,
+        never raised, and never touches the queue) and waits at most
+        ``timeout`` seconds, returning ``True`` only when the queue and the
+        in-flight slot are actually empty — a stuck or unresolved launch
+        yields a truthful ``False`` with every token still owned and counted.
+
+        While a launch is UNCERTAIN, the wait runs in short slices so this is
+        also where such a launch gets resolved: a worker that announces
+        itself ends the uncertainty; otherwise, once a dedicated slice of
+        real waiting has passed with the thread's bootstrap still not begun
+        (``ident`` unset — a created native thread sets it as soon as it is
+        scheduled at all), the attempt is declared never-launched and a new
+        worker may be tried. Even a misjudgement here cannot create a second
+        drainer: the ``_drainer`` guard retires a late-arriving duplicate
+        before it touches any shared state.
         """
 
+        deadline = time.monotonic() + max(0.0, timeout)
         with self._condition:
             self._ensure_thread()
-            return self._condition.wait_for(self._idle, timeout=max(0.0, timeout))
+            while not self._idle():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                uncertain = self._thread is not None and self._thread_uncertain
+                self._condition.wait(min(remaining, 0.05) if uncertain else remaining)
+                if (
+                    self._thread is not None
+                    and self._thread_uncertain
+                    and self._thread.ident is None
+                ):
+                    # A real slice of waiting passed and the bootstrap never
+                    # began: the launch is resolved as never having happened.
+                    self._thread = None
+                    self._thread_uncertain = False
+                self._ensure_thread()
+            return True
 
     def _idle(self) -> bool:
         return not self._queue and self._in_flight is None
 
     def _run(self) -> None:
+        me = current_thread()
+        with self._condition:
+            if self._drainer is not None:
+                # A drainer is already active. This thread is a duplicate (an
+                # uncertain launch that turned out real, arriving after its
+                # replacement): it retires without touching any shared state,
+                # which is what makes two concurrent drainers structurally
+                # impossible whatever the launch heuristics concluded.
+                return
+            self._drainer = me
+            # Whichever spawned thread got here is the authoritative worker;
+            # its arrival also resolves an uncertain launch as running.
+            self._thread = me
+            self._thread_uncertain = False
+            self._condition.notify_all()
+        try:
+            self._drain(me)
+        finally:
+            # Normally cleared at the idle exit inside _drain; this covers a
+            # drain loop that died unexpectedly so a restart stays possible.
+            with self._condition:
+                if self._drainer is me:
+                    self._drainer = None
+                if self._thread is me:
+                    self._thread = None
+                self._condition.notify_all()
+
+    def _drain(self, me: Thread) -> None:
         while True:
             with self._condition:
                 if not self._queue:
-                    # Exit when idle; ``submit`` starts a fresh thread when it
-                    # finds none, and it checks that under the same condition,
-                    # so a token can never be queued behind a thread that is
-                    # about to leave.
-                    self._thread = None
+                    # Exit when idle, clearing worker state in the same
+                    # critical section that observed the empty queue, so a
+                    # ``submit`` under this condition either sees work still
+                    # claimable by this worker or no worker at all — a token
+                    # can never be queued behind a thread that is leaving.
+                    if self._drainer is me:
+                        self._drainer = None
+                    if self._thread is me:
+                        self._thread = None
                     self._condition.notify_all()
                     return
                 prepared = self._queue.popleft()
