@@ -551,14 +551,42 @@ def test_smoothing_reduces_frame_to_frame_jitter_in_the_estimate() -> None:
 
 
 def test_the_estimator_drops_temporal_state_when_gaze_goes_unavailable() -> None:
+    """A dropped frame must not leave the filter primed with the old eye.
+
+    The comparison is against a FRESH estimator rather than against the true
+    angle, and the angles are small on purpose. The smoother is
+    velocity-adaptive: a large jump passes through unfiltered whether or not
+    the reset happened, so a test using one would pass against a missing
+    reset. A sub-degree step is inside the filtered band, where a stale
+    previous sample changes the answer.
+    """
+
+    settled, target = 3.0, 1.5
     engine = GeometricGazeEstimator(GazeSettings(smoothing=0.9))
-    engine.estimate(gaze_scene(25.0).result())
-    engine.estimate(gaze_scene(25.0).result())
-    # A frame with no iris clears the filter...
-    assert engine.estimate(gaze_scene(25.0, with_iris=False).result()).status is GazeStatus.UNAVAILABLE
-    # ...so the next frame is not blended with the old 25-degree state.
-    fresh = engine.estimate(gaze_scene(-25.0).result())
-    assert fresh.eye_yaw_deg == pytest.approx(-25.0, abs=1.0)
+    for _ in range(4):
+        engine.estimate(gaze_scene(settled).result())
+    assert (
+        engine.estimate(gaze_scene(settled, with_iris=False).result()).status
+        is GazeStatus.UNAVAILABLE
+    )
+    after_dropout = engine.estimate(gaze_scene(target).result())
+
+    unprimed = GeometricGazeEstimator(GazeSettings(smoothing=0.9)).estimate(
+        gaze_scene(target).result()
+    )
+    assert after_dropout.eye_yaw_deg is not None and unprimed.eye_yaw_deg is not None
+    # A fresh estimator passes its first sample through untouched, so equality
+    # here means the dropout really cleared the filter.
+    assert after_dropout.eye_yaw_deg == pytest.approx(unprimed.eye_yaw_deg, abs=1e-9)
+
+    # And confirm the step really is inside the filtered band, so the test
+    # cannot silently become vacuous if the smoother is retuned.
+    primed = GeometricGazeEstimator(GazeSettings(smoothing=0.9))
+    for _ in range(4):
+        primed.estimate(gaze_scene(settled).result())
+    blended = primed.estimate(gaze_scene(target).result())
+    assert blended.eye_yaw_deg is not None
+    assert abs(blended.eye_yaw_deg - unprimed.eye_yaw_deg) > 1e-6
 
 
 def test_reset_clears_the_estimator_state() -> None:
