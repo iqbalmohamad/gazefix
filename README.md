@@ -1,14 +1,23 @@
-# GazeFix — Milestones 0 and 1
+# GazeFix — Milestones 0, 1 and 2
 
 GazeFix is a local Windows desktop prototype that discovers validated OpenCV
 camera candidates, lets the user select and switch cameras, displays a
 responsive live preview (Milestone 0), and tracks the face of one person in
 that preview: 478 facial landmarks, anatomically labelled left/right eyes with
 eyelid contours, iris landmarks, head orientation, and a truthful quality
-signal (Milestone 1). Tracking runs on the CPU and entirely on the local
-machine. GazeFix's own code contains no gaze estimation, gaze correction,
-calibration, virtual-camera output, telemetry, or cloud processing, and it
-makes no network connection at runtime (see "Diagnostics and privacy").
+signal (Milestone 1). From that tracking it estimates an **approximate,
+uncalibrated gaze direction** — yaw, pitch and a heuristic confidence —
+derived from iris geometry rather than head pose (Milestone 2). Everything
+runs on the CPU and entirely on the local machine. GazeFix's own code contains
+no gaze correction, calibration, virtual-camera output, telemetry, or cloud
+processing, and it makes no network connection at runtime (see "Diagnostics
+and privacy").
+
+The gaze estimate is **not eye tracking**: it has no calibration, no camera
+intrinsics and no per-user anatomy, so treat its degrees as an indication of
+how far the eyes are looking away from the camera, not as a measurement. See
+[docs/gaze.md](docs/gaze.md) for the sign conventions, the model and its
+measured limitations.
 
 ## Requirements
 
@@ -95,7 +104,7 @@ the hardware-transform switch (GazeFix defaults to `0`, OpenCV's own default is
 .venv\Scripts\python -m gazefix --msmf-hw-transforms 1
 ```
 
-### Tracking and development mode
+### Tracking, gaze and development mode
 
 Tracking starts automatically. The consumer window shows only a
 `Tracking:` metric (inference time and status word). Development mode adds
@@ -105,17 +114,25 @@ the debug controls:
 .venv\Scripts\python -m gazefix --dev            # overlay checkbox + tracking detail line
 .venv\Scripts\python -m gazefix --dev --overlay  # start with the overlay on
 .venv\Scripts\python -m gazefix --no-tracking    # M0 passthrough preview, no model loaded
+.venv\Scripts\python -m gazefix --no-gaze       # track the face but do not estimate gaze
 .venv\Scripts\python -m gazefix --model-dir D:\models
 ```
 
 With the overlay off the preview shows the original camera pixels; with it
 on, landmarks, eyelid contours (right eye cyan `R`, left eye yellow `L`,
-anatomical sides), iris circles, head-pose axes ("head pose (not gaze)") and
-a status panel are drawn on a copy of the frame. If the model file is
-missing or invalid the preview keeps running and the `Tracking:` cell shows
-the reason and what to do (`python scripts/fetch_model.py`), as do the
-detail line (`--dev`) and the log. See `docs/tracking.md` for the result
-contract, coordinate conventions, quality semantics and failure policy.
+anatomical sides), iris circles, head-pose axes ("head pose (not gaze)"), a
+magenta gaze arrow from each iris and a status panel are drawn on a copy of
+the frame. If the model file is missing or invalid the preview keeps running
+and the `Tracking:` cell shows the reason and what to do
+(`python scripts/fetch_model.py`), as do the detail line (`--dev`) and the
+log. See `docs/tracking.md` for the tracking contract, coordinate
+conventions, quality semantics and failure policy, and `docs/gaze.md` for the
+gaze conventions and confidence.
+
+Gaze angles are printed as whole degrees with an "approx, uncalibrated"
+marker and the hint `+ = subject's left / up`. Note that gaze pitch is
+positive UP while head-pose pitch is positive DOWN; the two are different
+signals with different conventions and the overlay labels both.
 
 ## Run tests
 
@@ -246,8 +263,13 @@ The UI defines metrics as follows:
 - **Replaced frames:** unread values overwritten in the capture and preview buffers.
 - **Tracking:** smoothed tracker inference time (colour conversion plus the
   backend call on the tracker thread) and the status of the displayed frame's
-  result; `--dev` adds the total and waited times, the pipeline latency
-  (capture timestamp to processed frame), and timeout/error/replaced counters.
+  result, followed by the gaze status; `--dev` adds the total and waited
+  times, the gaze estimation time, the pipeline latency (capture timestamp to
+  processed frame), and timeout/error/replaced counters.
+- **Gaze:** smoothed time inside the gaze estimator, measured on the tracker
+  thread and already included in the tracking total. `--dev` also reports the
+  approximate gaze angles, the confidence and each of its five factors, and
+  the eye-in-head component that shows the estimate is not head pose.
 
 Structured JSON-line logs rotate locally at:
 
@@ -286,5 +308,7 @@ driver does not return in time the log says which owner still has work, and the
 daemon thread ends with the process.
 
 See [docs/architecture.md](docs/architecture.md) for the pipeline and shutdown
-details and [docs/tracking.md](docs/tracking.md) for the tracking contract,
-threads, overload policy and failure handling.
+details, [docs/tracking.md](docs/tracking.md) for the tracking contract,
+threads, overload policy and failure handling, and
+[docs/gaze.md](docs/gaze.md) for the gaze model, sign conventions, confidence
+heuristic and measured limitations.

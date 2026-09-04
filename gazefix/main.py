@@ -55,6 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="run the M0 passthrough preview without loading the face tracker",
     )
     parser.add_argument(
+        "--no-gaze",
+        action="store_true",
+        help="track the face but do not estimate gaze (every result reports gaze unavailable)",
+    )
+    parser.add_argument(
         "--model-dir",
         type=Path,
         default=None,
@@ -87,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
             developer_mode=args.dev,
             overlay_enabled=args.dev and args.overlay,
             tracking_enabled=not args.no_tracking,
+            gaze_enabled=not args.no_gaze,
             model_directory=args.model_dir or default_model_directory(),
         ).validated()
     except ValueError as exc:
@@ -116,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
             "platform": sys.platform,
             "tracking_enabled": settings.tracking_enabled,
             "developer_mode": settings.developer_mode,
+            "gaze_enabled": settings.gaze_enabled,
             "model_directory": str(settings.model_directory),
         },
     )

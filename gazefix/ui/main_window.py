@@ -1,4 +1,4 @@
-"""Minimal, responsive application window (M0 preview, M1 tracking status)."""
+"""Minimal, responsive application window (M0 preview, M1 tracking, M2 gaze)."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from gazefix.camera.discovery import CameraDiscoveryService, DiscoveryResult
 from gazefix.camera.models import CameraDevice, CaptureState, CaptureStatus
 from gazefix.camera.source import PreparedCamera, PreparedCameraCloser
 from gazefix.config import AppSettings
+from gazefix.gaze.models import GazeResult
 from gazefix.pipeline.processor import FrameProcessor, PassthroughProcessor
 from gazefix.pipeline.runtime import PipelineRuntime
 from gazefix.tracking.models import TrackingResult, TrackingStatus
@@ -375,8 +376,10 @@ class MainWindow(QMainWindow):
             if tracking is None:
                 self._tracking_ms.setText("starting")
             elif tracking.status.has_landmarks:
+                gaze = tracking.gaze
+                suffix = "" if gaze is None else f", gaze {gaze.status.value}"
                 self._tracking_ms.setText(
-                    f"{metrics.tracking_inference_ms:.1f} ms ({tracking.status.value})"
+                    f"{metrics.tracking_inference_ms:.1f} ms ({tracking.status.value}{suffix})"
                 )
             elif tracking.status is TrackingStatus.UNAVAILABLE and tracking.message:
                 # The consumer window must say what to do, not just "unavailable".
@@ -425,6 +428,10 @@ class MainWindow(QMainWindow):
                 "tracking_timeouts": metrics.tracking_timeouts,
                 "tracking_errors": metrics.tracking_errors,
                 "tracking_replaced": metrics.tracking_replaced,
+                "gaze_estimation_ms": metrics.gaze_estimation_ms,
+                "gaze_estimated_frames": metrics.gaze_estimated_frames,
+                "gaze_low_confidence_frames": metrics.gaze_low_confidence_frames,
+                "gaze_unavailable_frames": metrics.gaze_unavailable_frames,
             },
         )
         # Signal discovery first so both workers wind down concurrently, then
@@ -508,12 +515,36 @@ def _tracking_detail_text(tracking: TrackingResult | None, metrics) -> str:  # t
         parts.append(
             f"head pose (not gaze) yaw {pose.yaw_deg:+.0f} pitch {pose.pitch_deg:+.0f} roll {pose.roll_deg:+.0f}"
         )
+    parts.append(_gaze_detail_text(tracking.gaze))
     timing = tracking.timing
     inference = "n/a" if timing.inference_ms is None else f"{timing.inference_ms:.1f} ms"
     total = "n/a" if timing.total_ms is None else f"{timing.total_ms:.1f} ms"
     parts.append(
         f"inference {inference} total {total} waited {timing.waited_ms:.1f} ms"
+        f" | gaze {metrics.gaze_estimation_ms:.2f} ms"
         f" | pipeline {metrics.pipeline_latency_ms:.1f} ms"
         f" | timeouts {metrics.tracking_timeouts} errors {metrics.tracking_errors} replaced {metrics.tracking_replaced}"
     )
     return " | ".join(parts)
+
+
+def _gaze_detail_text(gaze: GazeResult | None) -> str:
+    """The developer gaze readout: approximate whole degrees, never decimals.
+
+    The estimate is uncalibrated, so the text says so and prints degrees
+    without a fractional part. It also states the sign convention, because
+    gaze pitch is positive UP while head-pose pitch is positive DOWN.
+    """
+
+    if gaze is None:
+        return "gaze: not estimated"
+    if not gaze.status.has_direction or gaze.yaw_deg is None or gaze.pitch_deg is None:
+        return f"gaze: {gaze.status.value}" + (f" ({gaze.message})" if gaze.message else "")
+    return (
+        f"gaze (approx, uncalibrated; + = subject's left / up) "
+        f"yaw {gaze.yaw_deg:+.0f} pitch {gaze.pitch_deg:+.0f} deg "
+        f"conf {gaze.confidence.score:.2f} [{gaze.status.value}] "
+        f"eye-in-head yaw {gaze.eye_yaw_deg:+.0f} pitch {gaze.eye_pitch_deg:+.0f} "
+        f"eyes {gaze.confidence.eyes_used} "
+        f"head pose {'applied' if gaze.confidence.head_pose_applied else 'unavailable'}"
+    )

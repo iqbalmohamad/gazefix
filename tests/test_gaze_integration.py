@@ -1,0 +1,390 @@
+"""Gaze in the live pipeline: frame identity, resets, metrics and continuity.
+
+These exercise the real ``TrackerWorker``/``TrackingProcessor`` path with a
+scripted tracker, so the gaze stage is verified where it actually runs: on the
+tracker thread, attached to the frame it describes.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+import time
+
+import numpy as np
+import pytest
+
+from gazefix.diagnostics.metrics import PipelineMetrics
+from gazefix.gaze.models import GazeResult, GazeStatus, unavailable
+from gazefix.pipeline.processor import FrameContext
+from gazefix.tracking.models import TrackingStatus
+from gazefix.tracking.processor import TrackingProcessor
+from gazefix.tracking.tracker import RawFace
+from gaze_fakes import gaze_scene
+from tracker_fakes import (
+    ScriptedFactory,
+    blank_frame,
+    init_error,
+    tracking_settings,
+    wait_until,
+)
+
+
+FRAME = blank_frame(1280, 720)
+
+
+def scene_face(**kwargs: object) -> RawFace:
+    """A ``RawFace`` whose eyes look where ``gaze_scene`` was asked to look."""
+
+    scene = gaze_scene(**kwargs)  # type: ignore[arg-type]
+    return RawFace(landmarks=scene.landmarks, transform=scene.transform)
+
+
+def ready_processor(factory: ScriptedFactory, **overrides: object):  # type: ignore[no-untyped-def]
+    metrics = PipelineMetrics()
+    processor = TrackingProcessor(factory, tracking_settings(**overrides), metrics)
+    processor.start()
+    assert wait_until(lambda: processor.status().state == "ready")
+    return processor, metrics
+
+
+class Driver:
+    def __init__(self, processor: TrackingProcessor) -> None:
+        self.processor = processor
+        self.sequence = 0
+
+    def once(self, generation: int = 1):  # type: ignore[no-untyped-def]
+        self.sequence += 1
+        context = FrameContext(self.sequence, time.perf_counter_ns(), generation)
+        return self.processor.process(FRAME, context), context
+
+    def until_tracked(self, generation: int = 1, attempts: int = 200):  # type: ignore[no-untyped-def]
+        for _ in range(attempts):
+            output, context = self.once(generation)
+            if output.tracking is not None and output.tracking.status is TrackingStatus.TRACKED:
+                return output, context
+            time.sleep(0.005)
+        raise AssertionError("never reached TRACKED")
+
+
+# --- gaze rides on the tracking result ---
+
+
+def test_a_tracked_frame_carries_a_gaze_estimate_for_that_same_frame() -> None:
+    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(eye_yaw_deg=20.0),)})
+    processor, _ = ready_processor(factory)
+    try:
+        output, context = Driver(processor).until_tracked()
+        tracking = output.tracking
+        assert tracking is not None and tracking.gaze is not None
+        assert tracking.belongs_to(context.capture_sequence, context.camera_request_id)
+        assert tracking.gaze.status is GazeStatus.ESTIMATED
+        assert tracking.gaze.eye_yaw_deg == pytest.approx(20.0, abs=1.5)
+        assert tracking.gaze_available is True
+    finally:
+        processor.close()
+
+
+def test_the_gaze_estimate_moves_with_the_iris_through_the_real_pipeline() -> None:
+    """The hard acceptance property, verified end to end rather than in isolation."""
+
+    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(eye_yaw_deg=-20.0),)})
+    processor, _ = ready_processor(factory)
+    try:
+        driver = Driver(processor)
+        looking_right = driver.until_tracked()[0].tracking
+        # Same head pose, different iris position.
+        factory.trackers[0].faces = (scene_face(eye_yaw_deg=20.0),)
+        looking_left = driver.until_tracked()[0].tracking
+        assert looking_right is not None and looking_right.gaze is not None
+        assert looking_left is not None and looking_left.gaze is not None
+        assert looking_right.pose is not None and looking_left.pose is not None
+        # The head did not move...
+        assert looking_left.pose.yaw_deg == pytest.approx(looking_right.pose.yaw_deg, abs=0.01)
+        # ...but the gaze did, by a lot.
+        assert looking_left.gaze.eye_yaw_deg - looking_right.gaze.eye_yaw_deg > 30.0
+        assert looking_left.gaze.yaw_deg - looking_right.gaze.yaw_deg > 30.0
+    finally:
+        processor.close()
+
+
+def test_gaze_is_estimated_on_the_tracker_thread_not_the_processor_thread() -> None:
+    """Blocking work stays off the processor thread; gaze adds no wait there."""
+
+    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(),)})
+    processor, _ = ready_processor(factory)
+    try:
+        output, _ = Driver(processor).until_tracked()
+        tracking = output.tracking
+        assert tracking is not None and tracking.gaze is not None
+        # The gaze time is inside the tracker's total, not added to the wait.
+        assert tracking.gaze.estimation_ms is not None
+        assert tracking.timing.total_ms is not None
+        assert tracking.gaze.estimation_ms <= tracking.timing.total_ms + 1.0
+    finally:
+        processor.close()
+
+
+# --- results without landmarks still carry an explicit gaze ---
+
+
+def test_an_initializing_frame_carries_an_unavailable_gaze_not_a_missing_one() -> None:
+    from threading import Event
+
+    gate = Event()
+    factory = ScriptedFactory(gate=gate)
+    processor = TrackingProcessor(factory, tracking_settings(), PipelineMetrics())
+    try:
+        output, _ = Driver(processor).once()
+        tracking = output.tracking
+        assert tracking is not None
+        assert tracking.status is TrackingStatus.INITIALIZING
+        assert tracking.gaze is not None
+        assert tracking.gaze.status is GazeStatus.UNAVAILABLE
+        assert tracking.gaze.yaw_deg is None
+        assert tracking.gaze_available is False
+    finally:
+        gate.set()
+        processor.close()
+
+
+def test_a_no_face_frame_reports_gaze_unavailable() -> None:
+    factory = ScriptedFactory(tracker_kwargs={"faces": ()})
+    processor, _ = ready_processor(factory)
+    try:
+        for _ in range(50):
+            output, _ = Driver(processor).once()
+            tracking = output.tracking
+            if tracking is not None and tracking.status is TrackingStatus.NO_FACE:
+                assert tracking.gaze is not None
+                assert tracking.gaze.status is GazeStatus.UNAVAILABLE
+                assert tracking.gaze.confidence.score == 0.0
+                return
+            time.sleep(0.005)
+        raise AssertionError("never reached NO_FACE")
+    finally:
+        processor.close()
+
+
+def test_an_unavailable_tracker_still_publishes_frames_with_an_unavailable_gaze() -> None:
+    """Stream continuity: a failed tracker must not stop the preview."""
+
+    factory = ScriptedFactory(failures=[init_error()])
+    processor = TrackingProcessor(factory, tracking_settings(), PipelineMetrics())
+    try:
+        driver = Driver(processor)
+        for _ in range(200):
+            output, _ = driver.once()
+            tracking = output.tracking
+            assert output.frame is FRAME  # the frame itself always gets through
+            if tracking is not None and tracking.status is TrackingStatus.UNAVAILABLE:
+                assert tracking.gaze is not None
+                assert tracking.gaze.status is GazeStatus.UNAVAILABLE
+                return
+            time.sleep(0.005)
+        raise AssertionError("never reached UNAVAILABLE")
+    finally:
+        processor.close()
+
+
+# --- temporal state is reset with everything else the tracker learned ---
+
+
+def test_a_camera_generation_change_clears_the_gaze_smoother() -> None:
+    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(eye_yaw_deg=25.0),)})
+    processor, _ = ready_processor(factory, gaze_smoothing=0.9)
+    try:
+        driver = Driver(processor)
+        driver.until_tracked(generation=1)
+        driver.until_tracked(generation=1)
+        factory.trackers[0].faces = (scene_face(eye_yaw_deg=-25.0),)
+        # A new generation resets every piece of temporal state, so the first
+        # frame of the new camera is not blended with the old eye position.
+        fresh = driver.until_tracked(generation=2)[0].tracking
+        assert fresh is not None and fresh.gaze is not None
+        assert fresh.gaze.eye_yaw_deg == pytest.approx(-25.0, abs=2.0)
+    finally:
+        processor.close()
+
+
+def test_losing_the_face_clears_the_gaze_smoother() -> None:
+    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(eye_yaw_deg=25.0),)})
+    processor, _ = ready_processor(factory, gaze_smoothing=0.9)
+    try:
+        driver = Driver(processor)
+        driver.until_tracked()
+        driver.until_tracked()
+        factory.trackers[0].faces = ()
+        for _ in range(50):
+            output, _ = driver.once()
+            if output.tracking is not None and output.tracking.status is TrackingStatus.NO_FACE:
+                break
+            time.sleep(0.005)
+        factory.trackers[0].faces = (scene_face(eye_yaw_deg=-25.0),)
+        reacquired = driver.until_tracked()[0].tracking
+        assert reacquired is not None and reacquired.gaze is not None
+        assert reacquired.gaze.eye_yaw_deg == pytest.approx(-25.0, abs=2.0)
+    finally:
+        processor.close()
+
+
+# --- settings ---
+
+
+def test_gaze_can_be_disabled_and_then_no_gaze_code_runs_on_the_frame() -> None:
+    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(eye_yaw_deg=20.0),)})
+    processor, _ = ready_processor(factory, gaze_enabled=False)
+    try:
+        output, _ = Driver(processor).until_tracked()
+        tracking = output.tracking
+        assert tracking is not None and tracking.gaze is not None
+        assert tracking.gaze.status is GazeStatus.UNAVAILABLE
+        assert "disabled" in tracking.gaze.message
+    finally:
+        processor.close()
+
+
+def test_the_worker_reports_the_gaze_algorithm_for_the_overlay() -> None:
+    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(),)})
+    processor, _ = ready_processor(factory)
+    try:
+        assert "uncalibrated" in processor._worker.gaze_description
+    finally:
+        processor.close()
+    disabled, _ = ready_processor(ScriptedFactory(), gaze_enabled=False)
+    try:
+        assert disabled._worker.gaze_description == "gaze estimation disabled"
+    finally:
+        disabled.close()
+
+
+# --- metrics ---
+
+
+def test_gaze_outcomes_and_latency_are_recorded_in_the_metrics() -> None:
+    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(eye_yaw_deg=15.0),)})
+    processor, metrics = ready_processor(factory)
+    try:
+        driver = Driver(processor)
+        for _ in range(5):
+            driver.until_tracked()
+        snapshot = metrics.snapshot()
+        assert snapshot.gaze_estimated_frames >= 5
+        assert snapshot.gaze_estimation_ms > 0.0
+        # The gaze stage is a small fraction of the tracking stage it sits in.
+        assert snapshot.gaze_estimation_ms < 50.0
+    finally:
+        processor.close()
+
+
+def test_unavailable_gaze_frames_are_counted_separately() -> None:
+    metrics = PipelineMetrics()
+    metrics.record_gaze("estimated", 0.2)
+    metrics.record_gaze("low_confidence", 0.3)
+    metrics.record_gaze("unavailable", None)
+    metrics.record_gaze("unavailable", None)
+    snapshot = metrics.snapshot()
+    assert snapshot.gaze_estimated_frames == 1
+    assert snapshot.gaze_low_confidence_frames == 1
+    assert snapshot.gaze_unavailable_frames == 2
+    assert snapshot.gaze_estimation_ms > 0.0
+
+
+def test_an_unknown_gaze_status_is_ignored_rather_than_miscounted() -> None:
+    metrics = PipelineMetrics()
+    metrics.record_gaze("something-else", 1.0)
+    snapshot = metrics.snapshot()
+    assert snapshot.gaze_estimated_frames == 0
+    assert snapshot.gaze_low_confidence_frames == 0
+    assert snapshot.gaze_unavailable_frames == 0
+
+
+# --- the tracking contract itself ---
+
+
+def test_untracked_results_always_carry_an_explicit_unavailable_gaze() -> None:
+    from gazefix.tracking.models import FrameGeometry, untracked
+
+    for status in (
+        TrackingStatus.NO_FACE,
+        TrackingStatus.INITIALIZING,
+        TrackingStatus.UNAVAILABLE,
+        TrackingStatus.ERROR,
+        TrackingStatus.TIMEOUT,
+    ):
+        result = untracked(status, 1, 1, 1, FrameGeometry(640, 480), "why")
+        assert result.gaze is not None
+        assert result.gaze.status is GazeStatus.UNAVAILABLE
+        assert status.value in result.gaze.message
+        assert result.gaze_available is False
+
+
+def test_untracked_accepts_a_caller_supplied_gaze() -> None:
+    from gazefix.tracking.models import FrameGeometry, untracked
+
+    supplied = unavailable("custom reason")
+    result = untracked(
+        TrackingStatus.NO_FACE, 1, 1, 1, FrameGeometry(640, 480), "why", gaze=supplied
+    )
+    assert result.gaze is supplied
+
+
+def test_mirroring_a_tracking_result_mirrors_its_gaze() -> None:
+    from gazefix.gaze.models import direction_from_angles
+
+    tracking = gaze_scene(eye_yaw_deg=20.0).result()
+    gaze = GazeResult(
+        status=GazeStatus.ESTIMATED,
+        confidence=unavailable("x").confidence,
+        yaw_deg=20.0,
+        pitch_deg=5.0,
+        eye_yaw_deg=20.0,
+        eye_pitch_deg=5.0,
+        direction=direction_from_angles(20.0, 5.0),
+    )
+    mirrored = replace(tracking, gaze=gaze).mirrored()
+    assert mirrored.gaze is not None
+    assert mirrored.gaze.yaw_deg == -20.0
+    assert mirrored.gaze.pitch_deg == 5.0
+
+
+def test_a_tracking_result_without_a_gaze_field_mirrors_cleanly() -> None:
+    tracking = gaze_scene(eye_yaw_deg=20.0).result()
+    assert tracking.gaze is None
+    assert tracking.mirrored().gaze is None
+
+
+def test_gaze_available_requires_an_estimated_status() -> None:
+    tracking = gaze_scene().result()
+    for status, expected in (
+        (GazeStatus.ESTIMATED, True),
+        (GazeStatus.LOW_CONFIDENCE, False),
+        (GazeStatus.UNAVAILABLE, False),
+    ):
+        gaze = replace(unavailable("x"), status=status)
+        assert replace(tracking, gaze=gaze).gaze_available is expected
+
+
+# --- settings validation ---
+
+
+def test_gaze_settings_are_validated_by_app_settings() -> None:
+    from dataclasses import replace as dc_replace
+
+    from gazefix.config import AppSettings
+
+    for overrides in (
+        {"gaze_min_confidence": 1.5},
+        {"gaze_smoothing": -0.2},
+        {"gaze_eye_model_ratio": 0.0},
+    ):
+        with pytest.raises(ValueError):
+            dc_replace(AppSettings(), **overrides).validated()  # type: ignore[arg-type]
+
+
+def test_app_settings_carry_the_documented_gaze_defaults() -> None:
+    from gazefix.config import AppSettings
+
+    settings = AppSettings().validated()
+    assert settings.gaze_enabled is True
+    assert settings.gaze_eye_model_ratio == pytest.approx(1.25)
+    assert 0.0 < settings.gaze_min_confidence < 1.0

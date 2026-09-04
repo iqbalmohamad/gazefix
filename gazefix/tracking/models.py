@@ -17,7 +17,9 @@ Coordinates and conventions (see docs/tracking.md):
 - Left and right are ANATOMICAL: the subject's own left and right. In an
   unmirrored frame the subject's right eye appears on the image's left.
 - ``HeadPose`` is head orientation only. It says nothing about where the eyes
-  look; eye-direction estimation is not part of this milestone.
+  look. Estimated eye direction is a separate field, ``gaze``, produced by
+  ``gazefix.gaze`` from iris geometry and documented in ``docs/gaze.md``;
+  the two carry different conventions and must never be conflated.
 - ``TrackingQuality.score`` is a documented geometric availability signal, not
   a model probability: the tracking backend applies its own detection,
   presence and tracking thresholds internally and does not expose the scores.
@@ -33,6 +35,8 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from gazefix.gaze.models import GazeResult, GazeStatus
+from gazefix.gaze.models import unavailable as gaze_unavailable
 from gazefix.tracking import landmarks as topology
 
 
@@ -246,6 +250,10 @@ class TrackingResult:
     pose: HeadPose | None = None
     quality: TrackingQuality | None = None
     stabilized: bool = False
+    #: The M2 gaze estimate for this same frame, or ``None`` on a result built
+    #: before the gaze stage ran. Every result the pipeline publishes carries
+    #: one, so a consumer that sees ``None`` is looking at a hand-built result.
+    gaze: GazeResult | None = None
 
     @property
     def face_valid(self) -> bool:
@@ -266,6 +274,12 @@ class TrackingResult:
     @property
     def pose_available(self) -> bool:
         return self.pose is not None
+
+    @property
+    def gaze_available(self) -> bool:
+        """A trusted gaze estimate is attached (the safe per-consumer check)."""
+
+        return self.gaze is not None and self.gaze.status is GazeStatus.ESTIMATED
 
     def belongs_to(self, capture_sequence: int, camera_request_id: int) -> bool:
         return self.capture_sequence == capture_sequence and self.camera_request_id == camera_request_id
@@ -290,6 +304,7 @@ class TrackingResult:
             left_eye=None if self.left_eye is None else self.left_eye.mirrored(),
             right_eye=None if self.right_eye is None else self.right_eye.mirrored(),
             pose=None if self.pose is None else self.pose.mirrored(),
+            gaze=None if self.gaze is None else self.gaze.mirrored(),
         )
 
 
@@ -309,8 +324,15 @@ def untracked(
     message: str = "",
     timing: TrackingTiming | None = None,
     faces_detected: int = 0,
+    gaze: GazeResult | None = None,
 ) -> TrackingResult:
-    """A result without landmarks for any status that carries none."""
+    """A result without landmarks for any status that carries none.
+
+    A frame with no landmarks can carry no gaze either, so the result is given
+    an explicit UNAVAILABLE gaze naming the tracking status. Publishing
+    ``None`` instead would leave consumers with two different ways to say
+    "no gaze".
+    """
 
     if status.has_landmarks:
         raise ValueError(f"{status.value} results carry landmarks; use the analysis path")
@@ -323,6 +345,7 @@ def untracked(
         timing=timing or TrackingTiming(),
         message=message,
         faces_detected=faces_detected,
+        gaze=gaze or gaze_unavailable(f"no gaze: {status.value}"),
     )
 
 

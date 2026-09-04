@@ -66,6 +66,15 @@ class AppSettings:
     between consecutive tracked frames resets the temporal state.
     ``tracking_join_timeout_s`` bounds the wait for the tracker thread at
     shutdown and must leave room inside ``worker_join_timeout_s``.
+
+    Gaze (M2): ``gaze_enabled`` turns the estimator on; with it off every
+    result carries an explicit UNAVAILABLE gaze and no gaze code runs on the
+    frame path. ``gaze_eye_model_ratio`` is the palpebral half-width divided
+    by the eyeball radius, the single population-average anatomy constant of
+    the geometric model. ``gaze_min_confidence`` separates an ESTIMATED gaze
+    from a LOW_CONFIDENCE one, and ``gaze_smoothing`` (0 = off) damps iris
+    jitter in the eye-in-head direction. See docs/gaze.md; the remaining
+    model constants live in ``gazefix.gaze.estimator.GazeSettings``.
     """
 
     capture_width: int = 1280
@@ -105,6 +114,10 @@ class AppSettings:
     tracking_max_rebuilds: int = 3
     tracking_reset_gap_s: float = 1.0
     tracking_join_timeout_s: float = 2.0
+    gaze_enabled: bool = True
+    gaze_eye_model_ratio: float = 1.25
+    gaze_min_confidence: float = 0.35
+    gaze_smoothing: float = 0.5
 
     def validated(self) -> "AppSettings":
         if self.capture_width <= 0 or self.capture_height <= 0:
@@ -138,6 +151,8 @@ class AppSettings:
             "tracking_min_quality",
             "tracking_min_in_frame_fraction",
             "tracking_smoothing",
+            "gaze_min_confidence",
+            "gaze_smoothing",
         ):
             if not 0.0 <= getattr(self, name) <= 1.0:
                 raise ValueError(f"{name} must be between 0 and 1")
@@ -155,6 +170,8 @@ class AppSettings:
             raise ValueError("Tracker reset gap must be positive")
         if self.tracking_join_timeout_s <= 0:
             raise ValueError("Tracker join timeout must be positive")
+        if self.gaze_eye_model_ratio <= 0:
+            raise ValueError("Gaze eye model ratio must be positive")
         if self.tracking_join_timeout_s + self.tracking_wait_ms / 1000.0 > 0.5 * self.worker_join_timeout_s:
             raise ValueError(
                 "Tracker join timeout plus tracking wait must fit in half the worker join timeout"

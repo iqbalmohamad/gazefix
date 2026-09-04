@@ -130,6 +130,12 @@ per-consumer check: it is `True` only on a `TRACKED` result.
 
 ## 5. Head pose (orientation, never gaze)
 
+`HeadPose` answers "which way is the head pointing", never "where are the
+eyes looking". The estimated gaze direction is a separate M2 field,
+`TrackingResult.gaze`, derived from iris geometry and documented in
+[`gaze.md`](gaze.md) — including the trap that gaze pitch is positive UP
+while the head pose pitch below is positive DOWN.
+
 `HeadPose` is derived from the backend's facial transformation matrix
 (canonical face → camera, right-handed camera frame: `x` right, `y` up, `z`
 toward the viewer; the face sits at negative `z`). Note the two frames: the

@@ -50,7 +50,9 @@ class MetricsSnapshot:
     handing a frame to the tracker until its result was available;
     ``pipeline_latency_ms`` runs from capture timestamp to the processed
     frame being published (it excludes camera driver latency and preview
-    presentation).
+    presentation); ``gaze_estimation_ms`` is the gaze stage alone, measured
+    inside the tracker thread immediately after analysis, and is therefore
+    already included in ``tracking_total_ms``.
     """
 
     capture_fps: float
@@ -71,6 +73,10 @@ class MetricsSnapshot:
     tracking_errors: int = 0
     tracking_unavailable: int = 0
     tracking_replaced: int = 0
+    gaze_estimation_ms: float = 0.0
+    gaze_estimated_frames: int = 0
+    gaze_low_confidence_frames: int = 0
+    gaze_unavailable_frames: int = 0
 
 
 class PipelineMetrics:
@@ -92,6 +98,10 @@ class PipelineMetrics:
         self._tracking_errors = 0
         self._tracking_unavailable = 0
         self._tracking_replaced = 0
+        self._gaze_estimation_ms = 0.0
+        self._gaze_estimated_frames = 0
+        self._gaze_low_confidence_frames = 0
+        self._gaze_unavailable_frames = 0
 
     def record_capture(self) -> None:
         self.capture_rate.record()
@@ -145,6 +155,24 @@ class PipelineMetrics:
             if total_ms is not None and total_ms > 0:
                 self._tracking_total_ms = _smooth(self._tracking_total_ms, total_ms)
 
+    def record_gaze(self, status: str, estimation_ms: float | None = None) -> None:
+        """Count one gaze outcome by status value and smooth its duration.
+
+        Counted for every processed frame, including those whose gaze is
+        unavailable, so the ratio of estimated to unavailable frames is
+        visible rather than inferred.
+        """
+
+        with self._lock:
+            if status == "estimated":
+                self._gaze_estimated_frames += 1
+            elif status == "low_confidence":
+                self._gaze_low_confidence_frames += 1
+            elif status == "unavailable":
+                self._gaze_unavailable_frames += 1
+            if estimation_ms is not None and estimation_ms > 0:
+                self._gaze_estimation_ms = _smooth(self._gaze_estimation_ms, estimation_ms)
+
     def record_tracking_replaced(self) -> None:
         """A frame handed to the tracker was replaced before it was processed."""
 
@@ -174,6 +202,10 @@ class PipelineMetrics:
                 tracking_errors=self._tracking_errors,
                 tracking_unavailable=self._tracking_unavailable,
                 tracking_replaced=self._tracking_replaced,
+                gaze_estimation_ms=self._gaze_estimation_ms,
+                gaze_estimated_frames=self._gaze_estimated_frames,
+                gaze_low_confidence_frames=self._gaze_low_confidence_frames,
+                gaze_unavailable_frames=self._gaze_unavailable_frames,
             )
 
 

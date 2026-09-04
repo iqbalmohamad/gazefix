@@ -14,8 +14,8 @@ Ownership and threads (see docs/tracking.md):
   is simply never picked up.
 - A frame from a new camera generation makes the thread reset every piece
   of temporal state (the backend's own face-tracking state through
-  ``FaceTracker.reset``, primary-face memory, stabiliser), so nothing learned
-  on one camera can attach to another; the backend instance is kept (a
+  ``FaceTracker.reset``, primary-face memory, stabiliser, gaze smoother), so
+  nothing learned on one camera can attach to another; the backend instance is kept (a
   rebuild costs a model load and, with the current backend, a network
   attempt inside ``close``). The attempt budget for initialisation is
   re-armed at the same time. A gap of more than ``tracking_reset_gap_s``
@@ -44,6 +44,9 @@ import numpy as np
 
 from gazefix.config import AppSettings
 from gazefix.diagnostics.metrics import PipelineMetrics
+from gazefix.gaze.estimator import GazeEstimator, GazeSettings, GeometricGazeEstimator
+from gazefix.gaze.models import GazeResult
+from gazefix.gaze.models import unavailable as gaze_unavailable
 from gazefix.pipeline.processor import Frame, FrameContext
 from gazefix.tracking.analysis import (
     AnalysisSettings,
@@ -113,6 +116,7 @@ class TrackerWorker:
         settings: AppSettings,
         metrics: PipelineMetrics | None = None,
         clock: Callable[[], float] = time.perf_counter,
+        gaze_estimator: GazeEstimator | None = None,
     ) -> None:
         self._factory = factory
         self._settings = settings
@@ -125,6 +129,19 @@ class TrackerWorker:
         )
         self._selector = PrimaryFaceSelector(SelectionSettings())
         self._stabilizer = LandmarkStabilizer(settings.tracking_smoothing)
+        # The gaze stage runs on this thread, right after analysis, so its
+        # temporal state has exactly one owner and is reset with everything
+        # else the tracker learned from earlier frames.
+        self._gaze: GazeEstimator | None = None
+        if settings.gaze_enabled:
+            self._gaze = gaze_estimator or GeometricGazeEstimator(
+                GazeSettings(
+                    eye_model_ratio=settings.gaze_eye_model_ratio,
+                    min_confidence=settings.gaze_min_confidence,
+                    smoothing=settings.gaze_smoothing,
+                ),
+                clock=clock,
+            )
         self._condition = Condition()
         self._pending: _Submission | None = None
         self._latest: TrackingResult | None = None
@@ -147,6 +164,12 @@ class TrackerWorker:
     # ------------------------------------------------------------ lifecycle
     def start(self) -> None:
         self._thread.start()
+
+    @property
+    def gaze_description(self) -> str:
+        """One line naming the gaze algorithm, or why there is none."""
+
+        return "gaze estimation disabled" if self._gaze is None else self._gaze.description
 
     @property
     def started(self) -> bool:
@@ -475,6 +498,8 @@ class TrackerWorker:
 
         self._selector.reset()
         self._stabilizer.reset()
+        if self._gaze is not None:
+            self._gaze.reset()
         self._last_captured_at_ns = None
         tracker = self._tracker
         if tracker is None:
@@ -504,6 +529,8 @@ class TrackerWorker:
 
         self._selector.reset()
         self._stabilizer.reset()
+        if self._gaze is not None:
+            self._gaze.reset()
         if submission is not None:
             self._publish(self._untracked(submission, TrackingStatus.ERROR, f"tracking error: {exc}"))
         self._rebuild_or_give_up(f"tracker failure: {exc}")
@@ -553,6 +580,8 @@ class TrackerWorker:
             message += "; restarting tracker"
         self._selector.reset()
         self._stabilizer.reset()
+        if self._gaze is not None:
+            self._gaze.reset()
         # Publish the frame's own ERROR result before any state change: the
         # processor wakes on either, and must attach this result (with its
         # message) to the frame rather than a later, state-derived label.
@@ -578,6 +607,8 @@ class TrackerWorker:
         selection = self._selector.select(candidates)
         if selection is None:
             self._stabilizer.reset()
+            if self._gaze is not None:
+                self._gaze.reset()
             return untracked(
                 TrackingStatus.NO_FACE, context.capture_sequence, context.captured_at_ns,
                 context.camera_request_id, geometry, "no face detected", timing, 0,
@@ -589,6 +620,8 @@ class TrackerWorker:
             raise MalformedLandmarks(f"malformed landmarks: {exc}") from exc
         if selection.identity_changed:
             self._stabilizer.reset()
+            if self._gaze is not None:
+                self._gaze.reset()
         stabilized = self._stabilizer.enabled
         landmarks = self._stabilizer.apply(landmarks)
         tracker = self._tracker
@@ -609,7 +642,7 @@ class TrackerWorker:
         if not left_eye.valid:
             reasons.append("left eye outside the frame or too small")
         status = TrackingStatus.TRACKED if not reasons else TrackingStatus.LOW_QUALITY
-        return TrackingResult(
+        result = TrackingResult(
             status=status,
             capture_sequence=context.capture_sequence,
             captured_at_ns=context.captured_at_ns,
@@ -626,6 +659,14 @@ class TrackerWorker:
             quality=quality,
             stabilized=stabilized,
         )
+        return replace(result, gaze=self._estimate_gaze(result))
+
+    def _estimate_gaze(self, result: TrackingResult) -> GazeResult:
+        """Gaze for this frame; never raises, never blocks the frame path."""
+
+        if self._gaze is None:
+            return gaze_unavailable("no gaze: gaze estimation is disabled")
+        return self._gaze.estimate(result)
 
     def _untracked(self, submission: _Submission, status: TrackingStatus, message: str) -> TrackingResult:
         context = submission.context
