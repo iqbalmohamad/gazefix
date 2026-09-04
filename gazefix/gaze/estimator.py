@@ -69,7 +69,6 @@ from gazefix.gaze.models import (
     GazeConfidence,
     GazeResult,
     GazeStatus,
-    Side,
     angles_from_direction,
     unavailable,
 )
