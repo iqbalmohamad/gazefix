@@ -262,3 +262,32 @@ def test_processor_end_to_end_with_the_real_tracker(cv2, still) -> None:  # type
     finally:
         processor.close()
     assert not processor.worker_alive
+
+
+def test_backend_adds_no_python_threads_so_a_wedged_call_cannot_hold_the_process(cv2, still, clock) -> None:  # type: ignore[no-untyped-def]
+    """The premise behind removing the forced-exit path, checked on the real backend.
+
+    GazeFix runs the tracker on a daemon thread. That only guarantees a
+    wedged native call cannot keep the interpreter alive if the backend does
+    not add non-daemon Python threads of its own (MediaPipe 1.0.1 did: one
+    ``ThreadPoolExecutor`` worker per landmarker, which CPython joins at
+    exit).
+    """
+
+    import threading
+
+    from gazefix.tracking.mediapipe_tracker import create_mediapipe_tracker
+
+    before = {t.ident for t in threading.enumerate()}
+    tracker = create_mediapipe_tracker(replace(AppSettings(), model_directory=MODEL_DIR))
+    try:
+        frame = canvas(cv2, still)
+        for _ in range(3):
+            tracker.detect(frame, clock.next())
+        added = [t for t in threading.enumerate() if t.ident not in before]
+        assert [t for t in added if not t.daemon] == [], (
+            "the backend added a non-daemon Python thread; a wedged native call on it "
+            f"would block interpreter exit: {[t.name for t in added if not t.daemon]}"
+        )
+    finally:
+        tracker.close()

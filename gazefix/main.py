@@ -5,14 +5,11 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 import logging
+from pathlib import Path
 import sys
-import time
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
-
-import os
-from pathlib import Path
 
 from gazefix.camera.environment import apply_capture_environment
 from gazefix.config import AppSettings, default_model_directory
@@ -135,22 +132,20 @@ def main(argv: list[str] | None = None) -> int:
         extra={"event": "application_exited", "exit_code": exit_code},
     )
     if window.tracker_thread_alive:
-        # The tracking backend runs its native calls on a non-daemon worker
-        # thread that the interpreter joins at exit; a call that never
-        # returns would therefore hang the process after the window is gone.
-        # Give it one more bounded grace period, then end the process.
-        grace_s = settings.worker_join_timeout_s
-        deadline = time.perf_counter() + grace_s
-        while window.tracker_thread_alive and time.perf_counter() < deadline:
-            time.sleep(0.05)
-        if window.tracker_thread_alive:
-            logger.error(
-                "Tracker thread still inside a native call after the grace period; "
-                "terminating the process",
-                extra={"event": "forced_exit", "grace_s": grace_s, "exit_code": exit_code},
-            )
-            logging.shutdown()
-            os._exit(exit_code)
+        # The tracker thread is a daemon and the tracking backend adds no
+        # Python threads of its own (verified for mediapipe 0.10.21: a
+        # landmarker creates no thread, and inference runs synchronously on
+        # the calling thread). CPython joins only non-daemon threads at exit,
+        # so a native call that never returns cannot hold the process open;
+        # it ends with the process, and the camera is not held by it (the
+        # capture worker owns and releases the camera on its own thread).
+        # This is therefore reported, not forced: no os._exit is used, so
+        # normal interpreter finalisation and log flushing still happen.
+        logger.warning(
+            "Tracker thread was still inside a native call at exit; it is a "
+            "daemon thread and ends with the process",
+            extra={"event": "tracker_thread_alive_at_exit"},
+        )
     return exit_code
 
 

@@ -496,11 +496,11 @@ signals the tracker thread and joins it for at most
 uncancellable native inference or model-load call it is abandoned and logged
 (`tracker_shutdown_timeout` by the worker, `tracker_thread_alive_at_close` by
 the window): it holds no camera, so camera release is unaffected, and it
-still closes the tracker when the native call returns. Because the backend
-runs native calls on a non-daemon worker thread that the interpreter joins
-at exit, the entry point waits one more `worker_join_timeout_s` after the
-window closed and then terminates the process (`forced_exit`) instead of
-hanging. The runtime's `STOPPED` latch keeps
+still closes the tracker when the native call returns. The tracker thread is
+a daemon and the tracking backend adds no Python threads of its own, so a
+wedged native call cannot hold the interpreter open: the entry point reports
+it (`tracker_thread_alive_at_exit`) and exits normally, with no forced
+termination. See docs/tracking.md section 14. The runtime's `STOPPED` latch keeps
 its M0 meaning (the runtime-owned capture and processor threads and
 prepared-camera cleanup); the tracker thread's state is reported separately
 and truthfully rather than folded into it.
