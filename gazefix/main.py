@@ -10,13 +10,15 @@ import sys
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from pathlib import Path
+
 from gazefix.camera.environment import apply_capture_environment
-from gazefix.config import AppSettings
+from gazefix.config import AppSettings, default_model_directory
 from gazefix.logging_config import configure_logging
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="GazeFix Milestone 0 camera preview")
+    parser = argparse.ArgumentParser(description="GazeFix camera preview with face and eye tracking")
     parser.add_argument(
         "--probe-limit",
         type=int,
@@ -37,6 +39,27 @@ def build_parser() -> argparse.ArgumentParser:
             "hardware transforms during camera open (OpenCV's own default), 0 "
             "skips them (GazeFix default; avoids multi-second MSMF opens)"
         ),
+    )
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help="development mode: show the tracking overlay toggle and tracking details",
+    )
+    parser.add_argument(
+        "--overlay",
+        action="store_true",
+        help="start with the tracking overlay enabled (development mode only)",
+    )
+    parser.add_argument(
+        "--no-tracking",
+        action="store_true",
+        help="run the M0 passthrough preview without loading the face tracker",
+    )
+    parser.add_argument(
+        "--model-dir",
+        type=Path,
+        default=None,
+        help=f"directory containing face_landmarker.task (default: {default_model_directory()})",
     )
     parser.add_argument(
         "--auto-exit-ms",
@@ -62,9 +85,16 @@ def main(argv: list[str] | None = None) -> int:
                 if args.msmf_hw_transforms is None
                 else bool(args.msmf_hw_transforms)
             ),
+            developer_mode=args.dev,
+            overlay_enabled=args.dev and args.overlay,
+            tracking_enabled=not args.no_tracking,
+            model_directory=args.model_dir or default_model_directory(),
         ).validated()
     except ValueError as exc:
         print(f"Invalid settings: {exc}", file=sys.stderr)
+        return 2
+    if args.overlay and not args.dev:
+        print("--overlay requires --dev", file=sys.stderr)
         return 2
 
     log_path = configure_logging(settings.log_directory, settings.log_level)
@@ -85,6 +115,9 @@ def main(argv: list[str] | None = None) -> int:
             "event": "application_starting",
             "python": sys.version,
             "platform": sys.platform,
+            "tracking_enabled": settings.tracking_enabled,
+            "developer_mode": settings.developer_mode,
+            "model_directory": str(settings.model_directory),
         },
     )
 
