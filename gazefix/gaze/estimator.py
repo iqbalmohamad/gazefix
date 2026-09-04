@@ -240,14 +240,18 @@ class GeometricGazeEstimator:
                 "mirror the result after estimation, not before",
                 started,
             )
-        if not result.face_valid:
-            # Gate on the face, not on both eyes: one eye covered, squinting
-            # or missing its iris must degrade the estimate rather than
-            # abolish it. The per-eye loop below decides which eyes are
-            # usable, and the result says how many contributed.
+        if not result.status.has_landmarks:
             return self._give_up(
-                f"no gaze: face tracking is not valid ({result.status.value})", started
+                f"no gaze: no face landmarks for this frame ({result.status.value})", started
             )
+        # Deliberately NOT gated on TRACKED. M1 downgrades a frame to
+        # LOW_QUALITY if either eye fails its own validity check, so a gate on
+        # TRACKED would mean that covering one eye abolishes gaze instead of
+        # degrading it. The per-eye loop below decides which eyes are usable,
+        # and nothing is waved through: an eye is used only if its own contour
+        # and iris are inside the frame and wide enough, and M1's quality score
+        # is a factor of the confidence, so a partly-visible face reports a low
+        # confidence rather than a confident wrong answer.
         if not result.iris_available:
             return self._give_up(
                 "no gaze: the tracker delivered no iris landmarks", started

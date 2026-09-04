@@ -381,6 +381,8 @@ class TrackerWorker:
         self._consecutive_errors = 0
         self._selector.reset()
         self._stabilizer.reset()
+        if self._gaze is not None:
+            self._gaze.reset()
         with self._condition:
             self._description = tracker.description
         self._set_state(STATE_READY, "")

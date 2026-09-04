@@ -388,3 +388,56 @@ def test_app_settings_carry_the_documented_gaze_defaults() -> None:
     assert settings.gaze_enabled is True
     assert settings.gaze_eye_model_ratio == pytest.approx(1.25)
     assert 0.0 < settings.gaze_min_confidence < 1.0
+
+
+def test_building_a_fresh_tracker_also_clears_the_gaze_smoother() -> None:
+    """The gaze smoother resets everywhere the other temporal state does.
+
+    A rebuilt tracker starts from nothing; leaving the gaze filter primed with
+    the pre-failure eye position would blend it into the first frame after
+    recovery.
+    """
+
+    import inspect
+
+    from gazefix.tracking import worker as module
+
+    source = inspect.getsource(module.TrackerWorker)
+    stabiliser_resets = source.count("self._stabilizer.reset()")
+    gaze_resets = source.count("self._gaze.reset()")
+    assert gaze_resets >= stabiliser_resets, (
+        f"{stabiliser_resets} stabiliser resets but only {gaze_resets} gaze resets; "
+        "every site that drops landmark history must drop the gaze filter too"
+    )
+
+
+def test_a_low_quality_frame_still_carries_a_gaze_estimate_through_the_pipeline() -> None:
+    """A covered eye downgrades tracking, and gaze must degrade rather than stop."""
+
+    from gazefix.tracking import landmarks as topology
+
+    scene = gaze_scene(eye_yaw_deg=15.0)
+    landmarks = np.array(scene.landmarks, dtype=np.float32)
+    # Push the subject's left eye out of the frame so M1 marks it invalid and
+    # downgrades the frame to LOW_QUALITY, exactly as covering it would.
+    for index in topology.eye_contour("left") + topology.iris_indices("left"):
+        landmarks[index, 0] = np.float32(-0.05)
+    factory = ScriptedFactory(
+        tracker_kwargs={"faces": (RawFace(landmarks=landmarks, transform=scene.transform),)}
+    )
+    processor, _ = ready_processor(factory)
+    try:
+        driver = Driver(processor)
+        for _ in range(200):
+            output, _ = driver.once()
+            tracking = output.tracking
+            if tracking is not None and tracking.status is TrackingStatus.LOW_QUALITY:
+                assert tracking.gaze is not None
+                assert tracking.gaze.status.has_direction, tracking.gaze.message
+                assert tracking.gaze.confidence.eyes_used == 1
+                assert tracking.gaze.eye_yaw_deg == pytest.approx(15.0, abs=2.0)
+                return
+            time.sleep(0.005)
+        raise AssertionError("never reached LOW_QUALITY")
+    finally:
+        processor.close()

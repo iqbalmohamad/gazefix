@@ -316,13 +316,40 @@ def test_a_mesh_without_iris_landmarks_yields_no_gaze() -> None:
     assert result.confidence.score == 0.0
 
 
-@pytest.mark.parametrize(
-    "status", [TrackingStatus.LOW_QUALITY]
-)
-def test_gaze_needs_valid_eye_tracking(status: TrackingStatus) -> None:
-    result = estimator().estimate(gaze_scene(10.0).result(status=status))
-    assert result.status is GazeStatus.UNAVAILABLE
-    assert status.value in result.message
+def test_gaze_degrades_on_a_low_quality_frame_instead_of_vanishing() -> None:
+    """M1 downgrades a frame whose eyes are individually fine, so gaze must not
+    treat LOW_QUALITY as "no gaze": it estimates and lets the quality factor
+    carry the loss of trust."""
+
+    from dataclasses import replace
+
+    from gazefix.tracking.models import TrackingQuality
+
+    tracking = gaze_scene(15.0).result(status=TrackingStatus.LOW_QUALITY)
+    assert tracking.quality is not None
+    degraded = replace(
+        tracking, quality=TrackingQuality(0.4, 0.85, 0.5, tracking.quality.backend_thresholds)
+    )
+    result = estimator().estimate(degraded)
+    assert result.status.has_direction
+    assert result.eye_yaw_deg == pytest.approx(15.0, abs=1.0)
+    assert result.confidence.tracking_quality == pytest.approx(0.4)
+    assert result.confidence.score < 0.5
+
+
+def test_covering_one_eye_degrades_the_estimate_rather_than_abolishing_it() -> None:
+    """The production shape of a covered eye: LOW_QUALITY with one eye invalid."""
+
+    from dataclasses import replace
+
+    tracking = gaze_scene(15.0).result(status=TrackingStatus.LOW_QUALITY)
+    assert tracking.left_eye is not None
+    covered = replace(tracking, left_eye=replace(tracking.left_eye, valid=False))
+    result = estimator().estimate(covered)
+    assert result.status.has_direction
+    assert result.confidence.eyes_used == 1
+    assert result.confidence.agreement_term == pytest.approx(GazeSettings().single_eye_factor)
+    assert result.eye_yaw_deg == pytest.approx(15.0, abs=1.0)
 
 
 def test_an_untracked_result_yields_no_gaze() -> None:

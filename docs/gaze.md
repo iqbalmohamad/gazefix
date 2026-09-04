@@ -386,11 +386,13 @@ and turns any exception into an `UNAVAILABLE` result carrying the message.
 
 | Situation | Result |
 | --- | --- |
-| face not `TRACKED` (no face, low quality, error, timeout, initialising) | `UNAVAILABLE`, message names the tracking status |
+| the frame carries no landmarks (no face, error, timeout, initialising, unavailable) | `UNAVAILABLE`, message names the tracking status |
+| the frame is `LOW_QUALITY` but its eyes are individually usable | estimated, with M1's low quality carried straight into the confidence |
 | tracker delivered a 468-point mesh (no iris refinement) | `UNAVAILABLE`, "no iris landmarks" |
 | both eyes degenerate (collapsed contour, non-finite geometry) | `UNAVAILABLE`, "no eye had usable iris geometry" |
 | eyelids too closed to locate the iris (blink) | `UNAVAILABLE`, names the eyelid term |
-| one eye unusable | estimate from the other, `eyes_used = 1`, agreement term fixed at 0.6 |
+| one eye unusable (covered, squinting, no iris) | estimate from the other, `eyes_used = 1`, agreement term fixed at 0.6 |
+| head pose present but non-finite | treated as no head pose at all, not as a zero angle |
 | head pose unavailable | estimate from eye-in-head angles alone, `head_pose_applied = False`, `pose_term` 0.7 |
 | confidence below `gaze_min_confidence` | `LOW_CONFIDENCE`: angles carried, `available` is `False` |
 | gaze disabled in settings | `UNAVAILABLE`, "gaze estimation is disabled"; no gaze code runs |
@@ -515,7 +517,7 @@ well lit and filling a reasonable part of the frame.
 
 | # | Do this | Expect |
 | --- | --- | --- |
-| 1 | Look straight at the **camera lens**, head still. | Gaze arrows point roughly at you (short, toward the lens). `yaw` and `pitch` both within about +/-10. `conf` above 0.5. Status `estimated`. |
+| 1 | Look straight at the **camera lens**, head still, sitting roughly **in front of** it. | Gaze arrows point roughly at you (short, toward the lens). `yaw` and `pitch` both within about +/-10. `conf` above 0.5. Status `estimated`. Sitting well off to one side legitimately reads a large yaw: zero means "parallel to the camera's optical axis", not "aimed at the camera". |
 | 2 | **Keep the head still** and look to your **left** (the image's right), then back. | `yaw` goes clearly **positive** (+15 or more) and returns near 0. The arrows swing while the head-pose axes at the nose stay put. |
 | 3 | **Keep the head still** and look to your **right**, then back. | `yaw` goes clearly **negative** and returns near 0. |
 | 4 | **Keep the head still** and look **up**, then **down**, then back. | `pitch` goes **positive** looking up and **negative** looking down. Downward gaze may be noisier — that is the documented eyelid-occlusion limit. |
@@ -523,7 +525,7 @@ well lit and filling a reasonable part of the frame.
 | 6 | Now **turn your head** left and right while keeping your **eyes on the lens**. | `yaw` stays near 0-ish while `eye-in-head yaw` moves the opposite way to the head. The two must not move together identically. |
 | 7 | **Turn the head with the eyes centred** (look where the face points). | `eye-in-head` stays near 0 and `yaw` follows the head. This is correct, not a bug: centred eyes look where the face points. |
 | 8 | **Blink**, then close your eyes for two seconds. | Gaze reports `unavailable` mentioning the eyelids. **The preview keeps running smoothly.** |
-| 9 | **Cover one eye** with a hand. | Gaze still reports a direction with `eyes 1` and a lower `conf`. Preview unaffected. |
+| 9 | **Cover one eye** with a hand. | Gaze keeps reporting a direction, now with `eyes 1` and a clearly lower `conf`. Tracking itself drops to `low_quality` — that is expected, and gaze deliberately keeps going rather than vanishing. Preview unaffected. |
 | 10 | **Leave the frame** entirely, then come back. | Gaze goes `unavailable`, then recovers. No stale arrow is left behind, and the first frame back is not blended with your old eye position. |
 | 11 | Look at the printed numbers. | They are **whole degrees** with "approx, uncalibrated" and the hint `+ = subject's left / up`. Nothing claims decimal-degree precision. |
 | 12 | Watch **Capture FPS**, **Display FPS**, **Processing** and the `gaze <n> ms` figure for ~30 s of ordinary use. | FPS and processing time are in line with the M1 baseline; `gaze` is well under a millisecond. No visible stutter. |
@@ -535,5 +537,8 @@ display FPS, processing ms, `gaze` ms, whether you wear glasses, and the
 lighting. Anything not measured is `NOT MEASURED`.
 
 Note on step 1: a small non-zero reading with the eyes on the lens is
-expected, not a failure. The estimator is uncalibrated and carries a per-user
-anatomy error of roughly +/-3 degrees (section 5), plus the angle-kappa offset.
+expected, not a failure. Adding up section 5's terms — per-user `k` (about
++/-3 degrees at a true 20), angle kappa (4-6), the head-pose depth residual (a
+few degrees at a large head turn) and pixel noise — **a realistic per-user
+error budget is on the order of +/-10 degrees**, not the whole degree the
+readout prints. The readout is a magnitude and a direction, not a measurement.
