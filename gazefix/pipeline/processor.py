@@ -42,13 +42,13 @@ class CapturedFrame:
 class FrameContext:
     """Identity of the frame a processor is handed.
 
-    ``sequence`` is the capture buffer's sequence number (unique and
+    ``capture_sequence`` is the capture buffer's sequence number (unique and
     increasing for the life of the runtime, never reset by a camera change),
     ``captured_at_ns`` the capture timestamp, ``camera_request_id`` the camera
     generation the frame belongs to.
     """
 
-    sequence: int
+    capture_sequence: int
     captured_at_ns: int
     camera_request_id: int
 
@@ -73,7 +73,7 @@ class ProcessedFrame:
     captured_at_ns: int
     processed_at_ns: int
     camera_request_id: int
-    sequence: int = 0
+    capture_sequence: int = 0
     tracking: "TrackingResult | None" = None
 
 
@@ -172,17 +172,21 @@ class ProcessingWorker:
                 last_sequence = item.sequence
                 source = item.value
                 context = FrameContext(
-                    sequence=item.sequence,
+                    capture_sequence=item.sequence,
                     captured_at_ns=source.captured_at_ns,
                     camera_request_id=source.camera_request_id,
                 )
                 started_ns = time.perf_counter_ns()
                 try:
                     output = self._processor.process(source.frame, context)
-                    if not isinstance(output, ProcessorOutput):
+                    if isinstance(output, np.ndarray):
                         # A processor that returns a bare array is accepted as
                         # "this frame, no metadata".
                         output = ProcessorOutput(output)
+                    if not isinstance(output, ProcessorOutput) or not isinstance(output.frame, np.ndarray):
+                        raise TypeError(
+                            f"processor returned {type(output).__name__}, expected ProcessorOutput"
+                        )
                 except Exception:
                     logger.exception(
                         "Frame processor failed; preserving original frame",
@@ -202,7 +206,7 @@ class ProcessingWorker:
                         captured_at_ns=source.captured_at_ns,
                         processed_at_ns=processed_at_ns,
                         camera_request_id=source.camera_request_id,
-                        sequence=item.sequence,
+                        capture_sequence=item.sequence,
                         tracking=output.tracking,
                     )
                 )

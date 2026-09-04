@@ -82,9 +82,9 @@ class TrackingProcessor:
         self.start()
         started = time.perf_counter()
         self._worker.submit(frame, context)
-        result = self._worker.wait_for(context.sequence, self._settings.tracking_wait_ms / 1000.0)
+        result = self._worker.wait_for(context.capture_sequence, self._settings.tracking_wait_ms / 1000.0)
         waited_ms = (time.perf_counter() - started) * 1000.0
-        if result is None or not result.belongs_to(context.sequence, context.camera_request_id):
+        if result is None or not result.belongs_to(context.capture_sequence, context.camera_request_id):
             status = self._worker.status()
             if status.state == STATE_READY:
                 tracking_status, message = TrackingStatus.TIMEOUT, "tracking result not ready in time"
@@ -94,7 +94,7 @@ class TrackingProcessor:
                 tracking_status, message = TrackingStatus.UNAVAILABLE, status.message
             result = untracked(
                 tracking_status,
-                context.sequence,
+                context.capture_sequence,
                 context.captured_at_ns,
                 context.camera_request_id,
                 FrameGeometry(frame.shape[1], frame.shape[0]),
@@ -105,9 +105,7 @@ class TrackingProcessor:
             result = replace(result, timing=replace(result.timing, waited_ms=waited_ms))
         if self._metrics is not None:
             self._metrics.record_tracking(
-                result.status.value,
-                result.timing.inference_ms or None,
-                result.timing.total_ms or None,
+                result.status.value, result.timing.inference_ms, result.timing.total_ms
             )
         output = frame
         if self.overlay_enabled:

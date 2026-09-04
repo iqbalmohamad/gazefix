@@ -45,7 +45,17 @@ py -3.12 -m venv .venv
 .venv\Scripts\python scripts\fetch_model.py
 ```
 
-Python 3.11 can be substituted for 3.12. The last command downloads the
+Python 3.11 can be substituted for 3.12; the project declares `>=3.11,<3.13`
+because MediaPipe 1.0.1 is classified for Python 3.9–3.12 only. **Upgrading an
+existing M0 environment:** create a fresh `.venv` (recommended) or run
+`pip uninstall -y opencv-python` first. pip does not notice that
+`opencv-python` and `opencv-contrib-python` install the same `cv2` package;
+installing one over the other leaves both registered and a later uninstall
+of either breaks `cv2`. The tracker logs a warning
+(`opencv_duplicate_distributions`) when it finds more than one.
+`constraints-windows-py312.txt` lists the exact versions pip resolved for
+Windows x64 / Python 3.12 on 2026-09-04; pass it with `-c` for a
+reproducible install. The last command downloads the
 face landmarker model (3.7 MB) from its documented official source into
 `%LOCALAPPDATA%\GazeFix\models`, verifies its size and SHA-256, and prints a
 JSON report; it is the only step that uses the network and it is never run by
@@ -243,7 +253,18 @@ Structured JSON-line logs rotate locally at:
 Logs contain lifecycle and diagnostic metadata, never raw frames. Webcam frames
 remain in local process memory and are never transmitted; the tracker receives
 an in-memory copy of each frame and the model file is read from disk. The only
-network access in the project is the explicit `scripts/fetch_model.py` command.
+network access in GazeFix's own code is the explicit `scripts/fetch_model.py`
+command.
+
+**Third-party disclosure:** the MediaPipe 1.0.1 native library itself contacts
+`play.googleapis.com` (Google's usage-logging endpoint) when a face landmarker
+is closed — once per GazeFix session, at exit — sending usage statistics and
+system information, not frames (measured and documented in
+`docs/tracking.md`, section 13). There is no switch for it in MediaPipe's
+API. Until the Product Manager decides how to handle it, users who want to
+prevent that connection can block outbound traffic for the GazeFix Python
+interpreter in Windows Defender Firewall; GazeFix needs no network access
+after `scripts/fetch_model.py` has run.
 
 Closing the window waits at most `worker_join_timeout_s` in total. A camera
 release is a driver call with no upper bound, so the window never performs one:

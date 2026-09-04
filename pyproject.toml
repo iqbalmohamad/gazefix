@@ -7,7 +7,8 @@ name = "gazefix"
 version = "0.2.0"
 description = "Local Windows webcam pipeline with face and eye tracking for GazeFix"
 readme = "README.md"
-requires-python = ">=3.11"
+# MediaPipe 1.0.1 declares Python 3.9-3.12 only; 3.11 and 3.12 are supported here.
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "numpy>=1.26,<3",
     # MediaPipe requires opencv-contrib-python (unpinned). It is the same OpenCV

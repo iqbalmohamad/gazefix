@@ -1,6 +1,6 @@
 """Tracking-result contract: immutable values tied to one captured frame.
 
-Every ``TrackingResult`` names the frame it describes (``sequence``,
+Every ``TrackingResult`` names the frame it describes (``capture_sequence``,
 ``captured_at_ns``) and the camera generation it belongs to
 (``camera_request_id``); consumers compare those to the frame they display and
 never pair a result with a different frame.
@@ -55,7 +55,6 @@ class TrackingStatus(str, Enum):
     UNAVAILABLE = "unavailable"
     ERROR = "error"
     TIMEOUT = "timeout"
-    DISABLED = "disabled"
 
     @property
     def has_landmarks(self) -> bool:
@@ -92,10 +91,17 @@ class HeadPose:
     """Head ORIENTATION relative to the camera (never eye gaze).
 
     Right-handed camera frame: ``x`` to the image's right, ``y`` up, ``z``
-    toward the viewer. ``rotation`` (3×3) maps the canonical face frame into
-    it and ``translation_cm`` is the face origin in that frame (the backend's
-    canonical-face metric units; approximate, negative ``z`` = in front of
-    the camera). The Euler angles decompose ``rotation = Rz(roll) · Ry(yaw)
+    toward the viewer (this frame differs from the landmark frame, whose
+    ``y`` points down and whose ``z`` is a model-relative depth that
+    decreases toward the camera). ``rotation`` (3×3) maps canonical-face
+    coordinates into the camera frame: ``rotation[:, 2]`` is the direction
+    the face points, ``rotation[:, 1]`` the direction of the top of the head.
+    ``translation`` is the face origin in the camera frame in the backend's
+    canonical-face-model units (nominally centimetres, uncalibrated: no
+    camera intrinsics are known, so use it for relative motion only;
+    negative ``z`` = in front of the camera). The class carries orientation
+    plus that uncalibrated position estimate and nothing about where the
+    eyes look. The Euler angles decompose ``rotation = Rz(roll) · Ry(yaw)
     · Rx(pitch)`` in degrees:
 
     - ``yaw_deg > 0``: the head is turned toward the subject's LEFT (the nose
@@ -111,7 +117,7 @@ class HeadPose:
     pitch_deg: float
     roll_deg: float
     rotation: Array
-    translation_cm: Array
+    translation: Array
 
     def mirrored(self) -> "HeadPose":
         """The same pose seen in a horizontally mirrored image (yaw and roll flip)."""
@@ -122,7 +128,7 @@ class HeadPose:
             pitch_deg=self.pitch_deg,
             roll_deg=-self.roll_deg,
             rotation=readonly(flip @ self.rotation @ flip, (3, 3)),
-            translation_cm=readonly(self.translation_cm * np.array([-1.0, 1.0, 1.0]), (3,)),
+            translation=readonly(self.translation * np.array([-1.0, 1.0, 1.0]), (3,)),
         )
 
 
@@ -137,8 +143,10 @@ class EyeLandmarks:
     landmarks. ``openness`` is the mean vertical lid separation divided by the
     corner-to-corner width, both in pixels: a geometric eyelid-aperture ratio
     (roughly 0.25–0.4 open, near 0 during a blink), not an eye direction.
-    ``valid`` requires every contour (and iris) point inside the frame and a
-    corner width of at least the configured minimum in pixels.
+    ``valid`` is eye geometry only: every contour (and iris) point inside the
+    frame and a corner width of at least the configured minimum in pixels.
+    It can be ``True`` on a ``LOW_QUALITY`` result; the safe check is
+    ``TrackingResult.eyes_valid``, which also requires ``face_valid``.
     """
 
     side: Side
@@ -208,10 +216,14 @@ class TrackingTiming:
       inference).
     - ``waited_ms``: how long the processor thread actually waited for this
       frame's result before publishing (bounded by ``tracking_wait_ms``).
+
+    ``inference_ms`` and ``total_ms`` are ``None`` for results the processor
+    thread built itself (``INITIALIZING``, ``UNAVAILABLE``, ``TIMEOUT``): no
+    inference was measured for that frame and no value is invented.
     """
 
-    inference_ms: float = 0.0
-    total_ms: float = 0.0
+    inference_ms: float | None = None
+    total_ms: float | None = None
     waited_ms: float = 0.0
 
 
@@ -220,7 +232,7 @@ class TrackingResult:
     """Everything the tracking stage knows about one captured frame."""
 
     status: TrackingStatus
-    sequence: int
+    capture_sequence: int
     captured_at_ns: int
     camera_request_id: int
     geometry: FrameGeometry
@@ -241,8 +253,11 @@ class TrackingResult:
 
     @property
     def eyes_valid(self) -> bool:
+        """Both eyes usable: requires ``face_valid`` (status ``TRACKED``)."""
+
         return (
-            self.left_eye is not None
+            self.face_valid
+            and self.left_eye is not None
             and self.right_eye is not None
             and self.left_eye.valid
             and self.right_eye.valid
@@ -252,8 +267,8 @@ class TrackingResult:
     def pose_available(self) -> bool:
         return self.pose is not None
 
-    def belongs_to(self, sequence: int, camera_request_id: int) -> bool:
-        return self.sequence == sequence and self.camera_request_id == camera_request_id
+    def belongs_to(self, capture_sequence: int, camera_request_id: int) -> bool:
+        return self.capture_sequence == capture_sequence and self.camera_request_id == camera_request_id
 
     def landmark_pixels(self) -> Array | None:
         """``(N, 2)`` pixel coordinates of ``landmarks`` in ``geometry``."""
@@ -287,7 +302,7 @@ def _mirror_x(points: Array) -> Array:
 
 def untracked(
     status: TrackingStatus,
-    sequence: int,
+    capture_sequence: int,
     captured_at_ns: int,
     camera_request_id: int,
     geometry: FrameGeometry,
@@ -301,7 +316,7 @@ def untracked(
         raise ValueError(f"{status.value} results carry landmarks; use the analysis path")
     return TrackingResult(
         status=status,
-        sequence=sequence,
+        capture_sequence=capture_sequence,
         captured_at_ns=captured_at_ns,
         camera_request_id=camera_request_id,
         geometry=geometry,

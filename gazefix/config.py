@@ -54,15 +54,18 @@ class AppSettings:
     waiting). ``tracking_max_faces`` is how many faces the backend may report
     so that primary-face selection has a second candidate; only the primary
     face is output. The ``tracking_min_*_confidence`` values are the backend's
-    own internal thresholds. ``tracking_min_quality`` and
-    ``tracking_min_eye_width_px`` decide ``TRACKED`` versus ``LOW_QUALITY``
-    (see docs/tracking.md). ``tracking_smoothing`` (0 = off) sets the
+    own internal thresholds. ``tracking_min_quality``,
+    ``tracking_min_in_frame_fraction`` and ``tracking_min_eye_width_px``
+    decide ``TRACKED`` versus ``LOW_QUALITY`` (see docs/tracking.md). ``tracking_smoothing`` (0 = off) sets the
     velocity-adaptive landmark smoothing strength. Tracker initialisation is
     retried with exponential backoff from ``tracking_init_retry_s`` to
     ``tracking_init_retry_max_s`` for at most ``tracking_init_max_attempts``
     per camera generation; ``tracking_max_consecutive_errors`` inference
-    failures in a row rebuild the tracker. ``tracking_join_timeout_s`` bounds
-    the wait for the tracker thread at shutdown.
+    failures in a row rebuild the tracker, at most ``tracking_max_rebuilds``
+    times per camera generation. A gap of more than ``tracking_reset_gap_s``
+    between consecutive tracked frames resets the temporal state.
+    ``tracking_join_timeout_s`` bounds the wait for the tracker thread at
+    shutdown and must leave room inside ``worker_join_timeout_s``.
     """
 
     capture_width: int = 1280
@@ -86,18 +89,21 @@ class AppSettings:
     tracking_enabled: bool = True
     overlay_enabled: bool = False
     model_directory: Path = default_model_directory()
-    tracking_wait_ms: int = 200
+    tracking_wait_ms: int = 100
     tracking_max_faces: int = 2
     tracking_min_detection_confidence: float = 0.5
     tracking_min_presence_confidence: float = 0.5
     tracking_min_tracking_confidence: float = 0.5
     tracking_min_quality: float = 0.5
+    tracking_min_in_frame_fraction: float = 0.9
     tracking_min_eye_width_px: float = 12.0
     tracking_smoothing: float = 0.5
     tracking_init_retry_s: float = 2.0
     tracking_init_retry_max_s: float = 30.0
     tracking_init_max_attempts: int = 5
     tracking_max_consecutive_errors: int = 3
+    tracking_max_rebuilds: int = 3
+    tracking_reset_gap_s: float = 1.0
     tracking_join_timeout_s: float = 2.0
 
     def validated(self) -> "AppSettings":
@@ -130,6 +136,7 @@ class AppSettings:
             "tracking_min_presence_confidence",
             "tracking_min_tracking_confidence",
             "tracking_min_quality",
+            "tracking_min_in_frame_fraction",
             "tracking_smoothing",
         ):
             if not 0.0 <= getattr(self, name) <= 1.0:
@@ -138,9 +145,19 @@ class AppSettings:
             raise ValueError("Minimum eye width cannot be negative")
         if self.tracking_init_retry_s <= 0 or self.tracking_init_retry_max_s < self.tracking_init_retry_s:
             raise ValueError("Tracker retry delays must be positive and ordered")
-        if self.tracking_init_max_attempts < 1 or self.tracking_max_consecutive_errors < 1:
+        if (
+            self.tracking_init_max_attempts < 1
+            or self.tracking_max_consecutive_errors < 1
+            or self.tracking_max_rebuilds < 1
+        ):
             raise ValueError("Tracker attempt limits must be positive")
+        if self.tracking_reset_gap_s <= 0:
+            raise ValueError("Tracker reset gap must be positive")
         if self.tracking_join_timeout_s <= 0:
             raise ValueError("Tracker join timeout must be positive")
+        if self.tracking_join_timeout_s + self.tracking_wait_ms / 1000.0 > 0.5 * self.worker_join_timeout_s:
+            raise ValueError(
+                "Tracker join timeout plus tracking wait must fit in half the worker join timeout"
+            )
         return replace(self, log_level=self.log_level.upper())
 

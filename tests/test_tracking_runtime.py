@@ -46,13 +46,13 @@ def test_results_are_tied_to_the_displayed_frame_and_generation() -> None:
         )
         processed = outputs[-1]
         assert processed.camera_request_id == first_request
-        assert processed.tracking.belongs_to(processed.sequence, first_request)
+        assert processed.tracking.belongs_to(processed.capture_sequence, first_request)
         assert processed.tracking.captured_at_ns == processed.captured_at_ns
         assert int(processed.frame[0, 0, 0]) == 1  # original pixels of camera 1
         # Every published frame carries a result that names that frame.
         for value in outputs:
             assert value.tracking is not None
-            assert value.tracking.belongs_to(value.sequence, value.camera_request_id)
+            assert value.tracking.belongs_to(value.capture_sequence, value.camera_request_id)
 
         second_request = runtime.select_camera(CameraDevice(2))
         outputs = _outputs_until(
@@ -67,8 +67,8 @@ def test_results_are_tied_to_the_displayed_frame_and_generation() -> None:
             assert value.camera_request_id == second_request
             assert value.tracking is not None and value.tracking.camera_request_id == second_request
             assert int(value.frame[0, 0, 0]) == 2
-        assert wait_until(lambda: factory.trackers[0].close_calls == 1)
-        assert len(factory.trackers) == 2
+        assert wait_until(lambda: factory.trackers[0].reset_calls == 1)
+        assert len(factory.trackers) == 1 and factory.trackers[0].close_calls == 0
         snapshot = runtime.metrics()
         assert snapshot.tracked_frames > 0 and snapshot.pipeline_latency_ms > 0
     finally:
@@ -133,6 +133,6 @@ def test_passthrough_processor_output_remains_metadata_free() -> None:
         runtime.select_camera(CameraDevice(5))
         outputs = _outputs_until(runtime, lambda p: int(p.frame[0, 0, 0]) == 5)
         assert all(v.tracking is None for v in outputs)
-        assert outputs[-1].sequence > 0
+        assert outputs[-1].capture_sequence > 0
     finally:
         assert runtime.stop()

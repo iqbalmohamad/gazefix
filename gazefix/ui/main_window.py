@@ -205,6 +205,12 @@ class MainWindow(QMainWindow):
     def overlay_enabled(self) -> bool:
         return self._tracking is not None and self._tracking.overlay_enabled
 
+    @property
+    def tracker_thread_alive(self) -> bool:
+        """Whether the tracker thread outlived shutdown (inside a native call)."""
+
+        return self._tracking is not None and self._tracking.worker_alive
+
     @Slot()
     def refresh_cameras(self) -> None:
         if self._closing or self._discovery.is_running:
@@ -316,7 +322,7 @@ class MainWindow(QMainWindow):
         # Metadata is used only if it names this very frame and generation.
         tracking = item.value.tracking
         if tracking is not None and not tracking.belongs_to(
-            item.value.sequence, item.value.camera_request_id
+            item.value.capture_sequence, item.value.camera_request_id
         ):
             tracking = None
         self._last_tracking = tracking
@@ -451,13 +457,13 @@ class MainWindow(QMainWindow):
                     "runtime_state": self._runtime.state.value,
                 },
             )
-        if self._tracking is not None and self._tracking.worker_alive:
+        if self.tracker_thread_alive:
             # The tracker thread is closed by the processing worker within the
-            # same deadline; if it is still inside a native inference call it
-            # is a daemon that ends with the process and holds no camera.
+            # same deadline; if it is still inside a native call it holds no
+            # camera, and the entry point bounds process exit (see main.py).
             logger.error(
                 "Tracker thread still alive at close",
-                extra={"event": "tracker_shutdown_timeout"},
+                extra={"event": "tracker_thread_alive_at_close"},
             )
         if not (runtime_cleanup_done and discovery_cleanup_done):
             # Say which owner still has work; each count is that owner's own.
@@ -499,8 +505,10 @@ def _tracking_detail_text(tracking: TrackingResult | None, metrics) -> str:  # t
             f"head pose (not gaze) yaw {pose.yaw_deg:+.0f} pitch {pose.pitch_deg:+.0f} roll {pose.roll_deg:+.0f}"
         )
     timing = tracking.timing
+    inference = "n/a" if timing.inference_ms is None else f"{timing.inference_ms:.1f} ms"
+    total = "n/a" if timing.total_ms is None else f"{timing.total_ms:.1f} ms"
     parts.append(
-        f"inference {timing.inference_ms:.1f} ms total {timing.total_ms:.1f} ms waited {timing.waited_ms:.1f} ms"
+        f"inference {inference} total {total} waited {timing.waited_ms:.1f} ms"
         f" | pipeline {metrics.pipeline_latency_ms:.1f} ms"
         f" | timeouts {metrics.tracking_timeouts} errors {metrics.tracking_errors} replaced {metrics.tracking_replaced}"
     )

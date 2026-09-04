@@ -91,7 +91,7 @@ def test_result_without_iris_renders() -> None:
         (TrackingStatus.TIMEOUT, "inference exceeded 40 ms"),
         (TrackingStatus.INITIALIZING, "loading model"),
         (TrackingStatus.ERROR, "backend raised"),
-        (TrackingStatus.DISABLED, ""),
+        (TrackingStatus.TIMEOUT, ""),
     ],
 )
 def test_results_without_landmarks_render_a_text_panel(status: TrackingStatus, message: str) -> None:
@@ -196,3 +196,33 @@ def test_stabilized_and_quality_fields_are_rendered_without_raising() -> None:
     frame = _frame()
     result = replace(_tracked(), stabilized=True, message="note", faces_detected=4)
     _assert_drawn_on_a_copy(frame, render_overlay(frame, result))
+
+
+def test_overlay_marks_are_drawn_at_the_landmark_pixel_positions() -> None:
+    """AC4 alignment: the iris circle lands where landmark_pixels says it is."""
+
+    import numpy as np
+
+    from gazefix.tracking.models import FrameGeometry
+    from gazefix.tracking.overlay import OverlayStyle, render_overlay
+    from tracking_fakes import synthetic_landmarks, tracked_result
+
+    geometry = FrameGeometry(640, 360)
+    landmarks = synthetic_landmarks(center=(0.5, 0.5), face_height=0.5)
+    result = tracked_result(landmarks, geometry)
+    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+    frame.setflags(write=False)
+    canvas = render_overlay(frame, result, OverlayStyle(mesh_points=False, face_oval=False, pose_axes=False, text=False))
+    pixels = result.landmark_pixels()
+    assert pixels is not None
+    for eye in (result.right_eye, result.left_eye):
+        assert eye is not None and eye.iris is not None
+        cx, cy = (eye.iris[0][:2] * np.array([640, 360])).astype(int)
+        radius = int(np.mean(np.hypot(*((eye.iris[1:, :2] - eye.iris[0, :2]) * np.array([640, 360])).T)))
+        window = canvas[max(0, cy - radius - 3) : cy + radius + 4, max(0, cx - radius - 3) : cx + radius + 4]
+        drawn = np.argwhere(window.max(axis=2) > 0)
+        assert len(drawn) > 0
+        centroid_y, centroid_x = drawn.mean(axis=0) + np.array([max(0, cy - radius - 3), max(0, cx - radius - 3)])
+        assert abs(centroid_x - cx) <= 2.0 and abs(centroid_y - cy) <= 2.0
+    # Nothing is drawn far away from the face.
+    assert canvas[:20, :20].max() == 0

@@ -33,6 +33,7 @@ class AnalysisSettings:
     """Thresholds that decide validity; documented in docs/tracking.md."""
 
     min_quality: float = 0.5
+    min_in_frame_fraction: float = 0.9
     min_eye_width_px: float = 12.0
     size_floor_fraction: float = 0.10
     size_full_fraction: float = 0.20
@@ -155,7 +156,7 @@ def head_pose_from_matrix(matrix: object) -> HeadPose | None:
         pitch_deg=math.degrees(pitch),
         roll_deg=math.degrees(roll),
         rotation=readonly(rotation, (3, 3)),
-        translation_cm=readonly(translation, (3,)),
+        translation=readonly(translation, (3,)),
     )
 
 

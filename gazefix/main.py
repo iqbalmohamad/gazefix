@@ -6,10 +6,12 @@ import argparse
 from dataclasses import replace
 import logging
 import sys
+import time
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+import os
 from pathlib import Path
 
 from gazefix.camera.environment import apply_capture_environment
@@ -132,6 +134,23 @@ def main(argv: list[str] | None = None) -> int:
         "Application exited",
         extra={"event": "application_exited", "exit_code": exit_code},
     )
+    if window.tracker_thread_alive:
+        # The tracking backend runs its native calls on a non-daemon worker
+        # thread that the interpreter joins at exit; a call that never
+        # returns would therefore hang the process after the window is gone.
+        # Give it one more bounded grace period, then end the process.
+        grace_s = settings.worker_join_timeout_s
+        deadline = time.perf_counter() + grace_s
+        while window.tracker_thread_alive and time.perf_counter() < deadline:
+            time.sleep(0.05)
+        if window.tracker_thread_alive:
+            logger.error(
+                "Tracker thread still inside a native call after the grace period; "
+                "terminating the process",
+                extra={"event": "forced_exit", "grace_s": grace_s, "exit_code": exit_code},
+            )
+            logging.shutdown()
+            os._exit(exit_code)
     return exit_code
 
 

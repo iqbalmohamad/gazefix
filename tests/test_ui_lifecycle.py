@@ -33,6 +33,9 @@ def pump_until(predicate, timeout: float = 3.0) -> bool:  # type: ignore[no-unty
 
 
 def settings(probe_limit: int) -> AppSettings:
+    # M0 regression tests exercise the camera lifecycle only: tracking is
+    # disabled so no tracker thread, model, or MediaPipe import is involved
+    # (tests/test_tracking_ui.py covers the window with a fake tracker).
     return replace(
         AppSettings(),
         camera_probe_limit=probe_limit,
@@ -40,6 +43,7 @@ def settings(probe_limit: int) -> AppSettings:
         read_retry_delay_s=0.001,
         worker_join_timeout_s=1.0,
         preview_poll_ms=5,
+        tracking_enabled=False,
     )
 
 

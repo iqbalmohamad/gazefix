@@ -148,7 +148,7 @@ def _draw_text_panel(canvas: Frame, result: TrackingResult, style: OverlayStyle)
         )
     timing = result.timing
     lines.append(
-        f"inference {timing.inference_ms:.1f} ms  total {timing.total_ms:.1f} ms  waited {timing.waited_ms:.1f} ms"
+        f"inference {_ms(timing.inference_ms)}  total {_ms(timing.total_ms)}  waited {timing.waited_ms:.1f} ms"
     )
     if result.message:
         lines.append(result.message[:110])
@@ -160,6 +160,10 @@ def _draw_text_panel(canvas: Frame, result: TrackingResult, style: OverlayStyle)
         cv2.rectangle(canvas, (x - 4, y - th - 4), (x + tw + 4, y + 5), (20, 20, 20), -1)
         cv2.putText(canvas, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1, cv2.LINE_AA)
         y += th + 10
+
+
+def _ms(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.1f} ms"
 
 
 def _clip(points: np.ndarray, canvas: Frame) -> list[tuple[int, int]]:

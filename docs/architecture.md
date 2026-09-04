@@ -42,8 +42,9 @@ replaced, so Qt owns the displayed pixels safely.
 - The long-lived capture thread owns camera open/read/release and automatic retry.
 - The processor thread waits for and processes only the latest captured frame.
 - The tracker thread (M1, owned by the tracking processor) creates, calls,
-  rebuilds and closes the face tracker; the processor thread hands it frames
-  and waits a bounded time for each frame's own result.
+  resets, rebuilds after repeated errors, and closes the face tracker; the
+  processor thread hands it frames and waits a bounded time for each frame's
+  own result.
 
 Capture state explicitly moves through idle, starting, running, degraded, retrying,
 error, stopping, and stopped states. Status changes cross into Qt using signals;
@@ -492,10 +493,14 @@ deadline it already applies to the processor join. `TrackingProcessor.close()`
 signals the tracker thread and joins it for at most
 `tracking_join_timeout_s`; the tracker thread closes the tracker itself
 (that is the only thread that ever touches it). If the thread is inside an
-uncancellable native inference or model-load call it is abandoned as a
-daemon and logged (`tracker_shutdown_timeout`, also by the window at close):
-it holds no camera, so camera release is unaffected, and it still closes the
-tracker when the native call returns. The runtime's `STOPPED` latch keeps
+uncancellable native inference or model-load call it is abandoned and logged
+(`tracker_shutdown_timeout` by the worker, `tracker_thread_alive_at_close` by
+the window): it holds no camera, so camera release is unaffected, and it
+still closes the tracker when the native call returns. Because the backend
+runs native calls on a non-daemon worker thread that the interpreter joins
+at exit, the entry point waits one more `worker_join_timeout_s` after the
+window closed and then terminates the process (`forced_exit`) instead of
+hanging. The runtime's `STOPPED` latch keeps
 its M0 meaning (the runtime-owned capture and processor threads and
 prepared-camera cleanup); the tracker thread's state is reported separately
 and truthfully rather than folded into it.

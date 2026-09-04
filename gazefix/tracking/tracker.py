@@ -82,6 +82,13 @@ class FaceTracker(Protocol):
         ``TrackerError`` (or any exception, treated the same) on failure.
         """
 
+    def reset(self) -> None:
+        """Forget temporal state so the next frame is detected afresh.
+
+        Called on a camera change instead of rebuilding the backend; an
+        implementation that keeps no state may do nothing.
+        """
+
     def close(self) -> None:
         """Release native resources; idempotent."""
 

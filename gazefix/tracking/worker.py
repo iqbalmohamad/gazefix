@@ -12,15 +12,21 @@ Ownership and threads (see docs/tracking.md):
 - Results are published to a single latest-result slot keyed by the capture
   sequence; a result that arrives after the processor stopped waiting for it
   is simply never picked up.
-- A frame from a new camera generation makes the thread close the tracker,
-  reset every piece of temporal state (primary-face memory, stabiliser), and
-  build a fresh tracker, so nothing learned on one camera can attach to
-  another. The attempt budget for initialisation is re-armed at the same
-  time.
+- A frame from a new camera generation makes the thread reset every piece
+  of temporal state (the backend's own face-tracking state through
+  ``FaceTracker.reset``, primary-face memory, stabiliser), so nothing learned
+  on one camera can attach to another; the backend instance is kept (a
+  rebuild costs a model load and, with the current backend, a network
+  attempt inside ``close``). The attempt budget for initialisation is
+  re-armed at the same time. A gap of more than ``tracking_reset_gap_s``
+  between consecutive frames (camera reopen, stall) resets the same state.
 - Initialisation failures retry with exponential backoff up to a bounded
   number of attempts per generation; inference failures rebuild the tracker
-  after a bounded number of consecutive errors. Logging is per attempt and
-  rate-limited, never per frame.
+  after a bounded number of consecutive errors, at most
+  ``tracking_max_rebuilds`` times per generation; an unexpected exception
+  anywhere else in the loop is logged once and handled the same way, so the
+  thread never dies silently. Logging is per attempt and rate-limited,
+  never per frame.
 - ``stop`` asks the thread to exit and joins it for a bounded time. If the
   thread is inside an uncancellable native call it is abandoned as a daemon
   (logged); it still closes the tracker itself when the call returns.
@@ -102,6 +108,7 @@ class TrackerWorker:
         self._clock = clock
         self._analysis = AnalysisSettings(
             min_quality=settings.tracking_min_quality,
+            min_in_frame_fraction=settings.tracking_min_in_frame_fraction,
             min_eye_width_px=settings.tracking_min_eye_width_px,
         )
         self._selector = PrimaryFaceSelector(SelectionSettings())
@@ -120,7 +127,9 @@ class TrackerWorker:
         self._init_attempts = 0
         self._next_init_at = 0.0
         self._consecutive_errors = 0
+        self._rebuilds = 0
         self._last_error_log_at: float | None = None
+        self._last_captured_at_ns: int | None = None
         self._thread = Thread(target=self._run, name="gazefix-tracker", daemon=True)
 
     # ------------------------------------------------------------ lifecycle
@@ -186,7 +195,7 @@ class TrackerWorker:
         with self._condition:
             while True:
                 latest = self._latest
-                if latest is not None and latest.sequence == sequence:
+                if latest is not None and latest.capture_sequence == sequence:
                     return latest
                 if self._stop.is_set() or self._state != STATE_READY:
                     return None
@@ -211,20 +220,25 @@ class TrackerWorker:
         logger.info("Tracker worker started", extra={"event": "tracker_worker_started"})
         try:
             while not self._stop.is_set():
-                submission = self._next_submission()
-                if self._stop.is_set():
-                    break
-                if submission is None:
-                    if self._tracker is None and self._init_due():
-                        self._initialize()
-                    continue
-                self._handle(submission)
-        except Exception:
-            logger.exception(
-                "Tracker worker crashed; tracking is unavailable until restart",
-                extra={"event": "tracker_worker_error"},
-            )
-            self._set_state(STATE_UNAVAILABLE, "tracker worker crashed; see log")
+                try:
+                    submission = self._next_submission()
+                    if self._stop.is_set():
+                        break
+                    if submission is None:
+                        if self._tracker is None and self._init_due():
+                            self._initialize()
+                        continue
+                    self._handle(submission)
+                except Exception as exc:  # noqa: BLE001  (supervised loop)
+                    # Anything outside the per-frame inference path (a reset,
+                    # a close, analysis) is treated like an inference failure
+                    # burst: the tracker is rebuilt through the bounded path
+                    # and the frame, if any, is published as an error.
+                    logger.exception(
+                        "Tracker worker iteration failed; rebuilding through the bounded path",
+                        extra={"event": "tracker_worker_error"},
+                    )
+                    self._recover_from_crash(exc, submission if "submission" in locals() else None)
         finally:
             self._close_tracker("worker exit")
             with self._condition:
@@ -332,6 +346,13 @@ class TrackerWorker:
             self._generation = context.camera_request_id
         elif context.camera_request_id != self._generation:
             self._on_generation_change(context.camera_request_id)
+        elif (
+            self._last_captured_at_ns is not None
+            and context.captured_at_ns - self._last_captured_at_ns
+            > self._settings.tracking_reset_gap_s * 1_000_000_000
+        ):
+            self._reset_temporal_state("frame gap")
+        self._last_captured_at_ns = context.captured_at_ns
         if self._tracker is None and self._init_due():
             self._initialize()
         if self._tracker is None:
@@ -339,7 +360,7 @@ class TrackerWorker:
             self._publish(self._untracked(submission, status, self._message))
             return
         with self._condition:
-            self._in_flight = (context.sequence, self._clock())
+            self._in_flight = (context.capture_sequence, self._clock())
         try:
             detection = self._tracker.detect(submission.frame, context.captured_at_ns // 1_000_000)
         except Exception as exc:  # noqa: BLE001  (a backend exception is a frame failure)
@@ -354,18 +375,15 @@ class TrackerWorker:
     def _on_generation_change(self, generation: int) -> None:
         previous = self._generation
         self._generation = generation
-        self._selector.reset()
-        self._stabilizer.reset()
         with self._condition:
             self._latest = None
-        # Re-arm the attempt budget: a fixed installation or a different
-        # camera deserves fresh attempts, bounded again.
+        # Re-arm the attempt and rebuild budgets: a fixed installation or a
+        # different camera deserves fresh attempts, bounded again.
         self._init_attempts = 0
+        self._rebuilds = 0
         self._next_init_at = 0.0
-        if self._tracker is not None:
-            self._close_tracker("camera generation change")
-            self._set_state(STATE_INITIALIZING, "tracker restarting for the new camera")
-        elif self._state == STATE_UNAVAILABLE:
+        self._reset_temporal_state("camera generation change")
+        if self._tracker is None and self._state == STATE_UNAVAILABLE:
             self._set_state(STATE_INITIALIZING, "tracker initializing")
         logger.info(
             "Tracker reset for a new camera generation",
@@ -375,6 +393,66 @@ class TrackerWorker:
                 "generation": generation,
             },
         )
+
+    def _reset_temporal_state(self, reason: str) -> None:
+        """Forget everything learned from earlier frames; keep the backend."""
+
+        self._selector.reset()
+        self._stabilizer.reset()
+        self._last_captured_at_ns = None
+        tracker = self._tracker
+        if tracker is None:
+            return
+        reset = getattr(tracker, "reset", None)
+        if not callable(reset):
+            return
+        started = self._clock()
+        with self._condition:
+            self._in_flight = (-1, started)
+        try:
+            reset()
+        finally:
+            with self._condition:
+                self._in_flight = None
+        logger.info(
+            "Tracker state reset",
+            extra={
+                "event": "tracker_state_reset",
+                "reason": reason,
+                "reset_ms": round((self._clock() - started) * 1000.0, 1),
+            },
+        )
+
+    def _recover_from_crash(self, exc: BaseException, submission: _Submission | None) -> None:
+        """A failure outside inference: rebuild through the bounded path."""
+
+        self._selector.reset()
+        self._stabilizer.reset()
+        self._rebuild_or_give_up(f"tracker failure: {exc}")
+        if submission is not None:
+            self._publish(self._untracked(submission, TrackingStatus.ERROR, f"tracking error: {exc}"))
+
+    def _rebuild_or_give_up(self, reason: str) -> None:
+        """Close the tracker and schedule a rebuild, bounded per generation."""
+
+        self._close_tracker(reason)
+        self._consecutive_errors = 0
+        self._rebuilds += 1
+        if self._rebuilds > self._settings.tracking_max_rebuilds:
+            self._next_init_at = float("inf")
+            self._set_state(
+                STATE_UNAVAILABLE,
+                f"tracking unavailable: {reason} (rebuilt {self._settings.tracking_max_rebuilds} "
+                "times; change or refresh the camera to retry)",
+            )
+            logger.error(
+                "Tracker rebuild budget exhausted",
+                extra={"event": "tracker_rebuild_exhausted", "reason": reason,
+                       "max_rebuilds": self._settings.tracking_max_rebuilds},
+            )
+            return
+        self._next_init_at = self._clock() + self._settings.tracking_init_retry_s
+        self._set_state(STATE_INITIALIZING, f"tracker restarting ({reason})")
 
     def _inference_failed(self, exc: BaseException, submission: _Submission) -> None:
         self._consecutive_errors += 1
@@ -387,15 +465,12 @@ class TrackerWorker:
                 extra={
                     "event": "tracker_inference_error",
                     "consecutive_errors": self._consecutive_errors,
-                    "sequence": submission.context.sequence,
+                    "sequence": submission.context.capture_sequence,
                 },
             )
         message = f"tracking error: {exc}"
         if self._consecutive_errors >= self._settings.tracking_max_consecutive_errors:
-            self._close_tracker("repeated inference errors")
-            self._consecutive_errors = 0
-            self._next_init_at = now + self._settings.tracking_init_retry_s
-            self._set_state(STATE_INITIALIZING, "tracker restarting after repeated errors")
+            self._rebuild_or_give_up("repeated inference errors")
             message += "; restarting tracker"
         self._selector.reset()
         self._stabilizer.reset()
@@ -408,11 +483,12 @@ class TrackerWorker:
             inference_ms=detection.inference_ms,
             total_ms=(self._clock() - submission.submitted_at) * 1000.0,
         )
+        analysis = self._analysis
         selection = self._selector.select(detection.faces)
         if selection is None:
             self._stabilizer.reset()
             return untracked(
-                TrackingStatus.NO_FACE, context.sequence, context.captured_at_ns,
+                TrackingStatus.NO_FACE, context.capture_sequence, context.captured_at_ns,
                 context.camera_request_id, geometry, "no face detected", timing, 0,
             )
         face = detection.faces[selection.index]
@@ -421,7 +497,7 @@ class TrackerWorker:
         except MalformedLandmarks as exc:
             self._stabilizer.reset()
             return untracked(
-                TrackingStatus.ERROR, context.sequence, context.captured_at_ns,
+                TrackingStatus.ERROR, context.capture_sequence, context.captured_at_ns,
                 context.camera_request_id, geometry, f"malformed landmarks: {exc}", timing,
                 len(detection.faces),
             )
@@ -436,8 +512,12 @@ class TrackerWorker:
         left_eye = extract_eye(landmarks, "left", geometry, self._analysis, iris_available)
         pose = head_pose_from_matrix(face.transform) if face.transform is not None else None
         reasons = []
-        if quality.score < self._analysis.min_quality:
-            reasons.append(f"quality {quality.score:.2f} below {self._analysis.min_quality:.2f}")
+        if quality.in_frame_fraction < analysis.min_in_frame_fraction:
+            reasons.append(
+                f"face partially outside the frame ({quality.in_frame_fraction:.2f} of landmarks inside)"
+            )
+        if quality.score < analysis.min_quality:
+            reasons.append(f"quality {quality.score:.2f} below {analysis.min_quality:.2f}")
         if not right_eye.valid:
             reasons.append("right eye outside the frame or too small")
         if not left_eye.valid:
@@ -445,7 +525,7 @@ class TrackerWorker:
         status = TrackingStatus.TRACKED if not reasons else TrackingStatus.LOW_QUALITY
         return TrackingResult(
             status=status,
-            sequence=context.sequence,
+            capture_sequence=context.capture_sequence,
             captured_at_ns=context.captured_at_ns,
             camera_request_id=context.camera_request_id,
             geometry=geometry,
@@ -465,12 +545,12 @@ class TrackerWorker:
         context = submission.context
         return untracked(
             status,
-            context.sequence,
+            context.capture_sequence,
             context.captured_at_ns,
             context.camera_request_id,
             FrameGeometry(submission.frame.shape[1], submission.frame.shape[0]),
             message,
-            TrackingTiming(total_ms=(self._clock() - submission.submitted_at) * 1000.0),
+            TrackingTiming(inference_ms=None, total_ms=(self._clock() - submission.submitted_at) * 1000.0),
         )
 
     def _publish(self, result: TrackingResult) -> None:

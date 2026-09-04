@@ -32,7 +32,9 @@ contract, overlay, tests and pipeline never import MediaPipe.
 | Model licence | Apache License 2.0, stated on each model card in the bundle: BlazeFace short-range (face detector), Face Mesh V2 (landmarks, iris), Blendshape V2 (present in the bundle, not executed) |
 | Model file | size 3,758,596 bytes, SHA-256 `64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff`, object last modified 2023-05-03 |
 | CPU | XNNPACK CPU delegate; 1280×720, one face: ~14 ms median on a 4-core Xeon 2.8 GHz (Linux); no GPU/NPU/network used |
-| Windows DLL | `libmediapipe.dll` (x64) imports Windows system DLLs only (kernel32, advapi32, user32, bcrypt, dbghelp, ntdll, wininet, api-ms-win-core-*); no OpenGL/EGL and no separate MSVC runtime DLL |
+| Windows DLL | `libmediapipe.dll` (x64) imports Windows system DLLs only (kernel32, advapi32, user32, bcrypt, dbghelp, ntdll, wininet, api-ms-win-core-*); no OpenGL/EGL and no separate MSVC runtime DLL; contains the `play.googleapis.com/log` endpoint string (consequence 7) |
+| Windows OpenCV | `opencv_contrib_python-4.14.0.94-cp37-abi3-win_amd64` `cv2.pyd` build info: Media Foundation YES, DirectShow YES, DXVA YES; `OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS` present; bundles `opencv_videoio_ffmpeg4140_64.dll` — the M0 backends and switch exist in the contrib build |
+| Windows resolution | pip resolves (win_amd64, CPython 3.12, 2026-09-04): mediapipe 1.0.1, opencv-contrib-python 4.14.0.94, numpy 2.5.2, PySide6 6.11.2, absl-py 2.5.0, flatbuffers 25.12.19, sounddevice 0.5.6, cffi 2.1.1, matplotlib 3.11.1, pillow 12.3.0 (full list: `constraints-windows-py312.txt`) |
 | Linux .so | additionally links `libEGL.so.1` and `libGLESv2.so.2` (system packages) even for CPU inference |
 | Project status | actively released (three releases in 2026); classifier still "Development Status :: 3 - Alpha", as it has been for every MediaPipe release |
 
@@ -63,9 +65,25 @@ contract, overlay, tests and pipeline never import MediaPipe.
 6. **Pin.** `mediapipe==1.0.1` is a hard pin because it is an alpha-classified
    ctypes binding whose only tested version is this one. Upgrades go through
    a new tested release, not a range.
-7. **Privacy note.** The Windows DLL imports `wininet.dll`; GazeFix calls no
-   networking API of the library and passes only in-memory frames; no frame
-   leaves the process.
+7. **Network activity inside the library (escalated).** The library contains
+   an HTTP logging client and contacts `play.googleapis.com` (Clearcut usage
+   logging) on every landmarker `close()`, uploading session/invocation
+   statistics and system information — never frames (payload types verified
+   from the binary; GazeFix passes only in-memory frames). It is not
+   disclosed in the package metadata and has no API switch. The Windows
+   build uses WinINet (system proxy settings); Linux uses libcurl. GazeFix
+   closes the landmarker once per session and resets state on camera
+   changes instead of rebuilding, discloses the behaviour in the README and
+   `docs/tracking.md`, and escalates the decision (accept with disclosure,
+   block at the firewall, pin 0.10.21 which has no logging client, or
+   change backend) to the Product Manager. See the M1 report.
+8. **Python range.** `requires-python = ">=3.11,<3.13"`: MediaPipe 1.0.1
+   ships `py3-none` wheels without a `Requires-Python` marker, so nothing
+   else would stop an untested 3.13/3.14 install.
+9. **Environment upgrade.** Installing over an M0 environment leaves
+   `opencv-python` and `opencv-contrib-python` both registered over one
+   `cv2` directory; recreate the environment (README) — the tracker logs
+   `opencv_duplicate_distributions` when it detects this.
 
 ## Alternatives considered
 

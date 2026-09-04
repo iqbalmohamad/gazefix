@@ -46,7 +46,7 @@ def test_untracked_builds_a_result_without_landmarks() -> None:
         result = untracked(status, 7, 123, 2, GEOMETRY, message="why", faces_detected=3)
 
         assert result.status is status
-        assert (result.sequence, result.captured_at_ns, result.camera_request_id) == (7, 123, 2)
+        assert (result.capture_sequence, result.captured_at_ns, result.camera_request_id) == (7, 123, 2)
         assert result.geometry == GEOMETRY
         assert result.message == "why"
         assert result.faces_detected == 3
@@ -64,7 +64,7 @@ def test_untracked_keeps_an_explicit_timing() -> None:
 
 
 def test_belongs_to_requires_both_sequence_and_camera_generation() -> None:
-    result = untracked(TrackingStatus.NO_FACE, sequence=5, captured_at_ns=1, camera_request_id=3, geometry=GEOMETRY)
+    result = untracked(TrackingStatus.NO_FACE, capture_sequence=5, captured_at_ns=1, camera_request_id=3, geometry=GEOMETRY)
 
     assert result.belongs_to(5, 3)
     assert not result.belongs_to(6, 3)
@@ -109,8 +109,11 @@ def test_eyes_valid_requires_both_eyes_present_and_valid() -> None:
     assert not replace(tracked, right_eye=None).eyes_valid
     assert not replace(tracked, left_eye=replace(tracked.left_eye, valid=False)).eyes_valid
     assert not replace(tracked, right_eye=replace(tracked.right_eye, valid=False)).eyes_valid
-    # Eye validity is independent of the status flag.
-    assert replace(tracked, status=TrackingStatus.LOW_QUALITY).eyes_valid
+    # eyes_valid is the safe consumer check: it also requires face_valid, while
+    # the per-eye geometric flag stays as computed on a LOW_QUALITY result.
+    low_quality = replace(tracked, status=TrackingStatus.LOW_QUALITY)
+    assert not low_quality.eyes_valid
+    assert low_quality.left_eye is not None and low_quality.left_eye.valid
 
 
 def test_eye_landmark_accessors_follow_the_contour_positions() -> None:
@@ -163,7 +166,7 @@ def test_mirrored_flips_x_and_keeps_anatomical_sides() -> None:
     assert mirrored.pose.yaw_deg == -original.pose.yaw_deg
     assert mirrored.pose.roll_deg == -original.pose.roll_deg
     assert mirrored.pose.pitch_deg == original.pose.pitch_deg
-    assert mirrored.pose.translation_cm == pytest.approx((-0.0, 0.0, -45.0))
+    assert mirrored.pose.translation == pytest.approx((-0.0, 0.0, -45.0))
 
     for field in ("status", "sequence", "captured_at_ns", "camera_request_id", "timing", "message",
                   "faces_detected", "iris_available", "quality", "stabilized"):

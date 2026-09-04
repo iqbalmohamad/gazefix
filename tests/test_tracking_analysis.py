@@ -306,9 +306,9 @@ def test_identity_transform_gives_zero_angles_and_keeps_the_translation() -> Non
     assert pose is not None
     assert _angles(pose) == pytest.approx((0.0, 0.0, 0.0), abs=1e-9)
     assert np.array_equal(pose.rotation, np.eye(3, dtype=np.float32))
-    assert np.array_equal(pose.translation_cm, np.array([0.0, 0.0, -45.0], dtype=np.float32))
+    assert np.array_equal(pose.translation, np.array([0.0, 0.0, -45.0], dtype=np.float32))
     assert pose.rotation.dtype == np.float32 and not pose.rotation.flags.writeable
-    assert pose.translation_cm.dtype == np.float32 and not pose.translation_cm.flags.writeable
+    assert pose.translation.dtype == np.float32 and not pose.translation.flags.writeable
 
 
 def test_rotation_about_camera_z_is_roll() -> None:
@@ -329,7 +329,7 @@ def test_combined_rotation_is_decomposed_as_rz_ry_rx() -> None:
 
     assert _angles(pose) == pytest.approx((25.0, -8.0, -12.0), abs=1e-4)
     assert pose is not None
-    assert pose.translation_cm == pytest.approx((1.5, -2.0, -50.0), abs=1e-6)
+    assert pose.translation == pytest.approx((1.5, -2.0, -50.0), abs=1e-6)
     assert pose.rotation == pytest.approx(rotation.astype(np.float32), abs=1e-6)
 
 
@@ -338,8 +338,8 @@ def test_three_by_three_matrix_is_accepted_with_zero_translation() -> None:
 
     assert pose is not None
     assert _angles(pose) == pytest.approx((20.0, 0.0, 0.0), abs=1e-4)
-    assert np.array_equal(pose.translation_cm, np.zeros(3, dtype=np.float32))
-    assert pose.translation_cm.shape == (3,)
+    assert np.array_equal(pose.translation, np.zeros(3, dtype=np.float32))
+    assert pose.translation.shape == (3,)
 
 
 def test_gimbal_lock_at_ninety_degrees_yaw_does_not_raise() -> None:
@@ -380,10 +380,10 @@ def test_mirrored_pose_negates_yaw_and_roll_only() -> None:
     assert mirrored.yaw_deg == pytest.approx(-20.0, abs=1e-4)
     assert mirrored.pitch_deg == pytest.approx(15.0, abs=1e-4)
     assert mirrored.roll_deg == pytest.approx(-10.0, abs=1e-4)
-    assert mirrored.translation_cm == pytest.approx((-3.0, -1.0, -45.0), abs=1e-6)
+    assert mirrored.translation == pytest.approx((-3.0, -1.0, -45.0), abs=1e-6)
     flip = np.diag([-1.0, 1.0, 1.0])
     assert mirrored.rotation == pytest.approx(flip @ pose.rotation @ flip, abs=1e-6)
-    assert not mirrored.rotation.flags.writeable and not mirrored.translation_cm.flags.writeable
+    assert not mirrored.rotation.flags.writeable and not mirrored.translation.flags.writeable
     # The mirrored rotation decomposes to the mirrored angles: the two views agree.
     assert _angles(head_pose_from_matrix(mirrored.rotation)) == pytest.approx((-20.0, 15.0, -10.0), abs=1e-3)
     # Mirroring twice restores the original.

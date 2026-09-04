@@ -45,12 +45,17 @@ MODEL_DIR = Path(os.environ.get("GAZEFIX_MODEL_DIR") or default_model_directory(
 
 def _skip_unless_enabled() -> None:
     if os.environ.get("GAZEFIX_REAL_MODEL_TESTS") != "1":
-        pytest.skip("real-model tests are opt-in: set GAZEFIX_REAL_MODEL_TESTS=1")
-    pytest.importorskip("mediapipe")
+        pytest.skip("GAZEFIX_REAL_MODEL_TESTS not set (real-model tests are opt-in)")
     try:
         verify_model(FACE_LANDMARKER.path_in(MODEL_DIR))
     except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"verified model not available in {MODEL_DIR}: {exc}")
+        pytest.skip(f"model missing or invalid at {MODEL_DIR} (run scripts/fetch_model.py): {exc}")
+    try:
+        import mediapipe  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        # With the tests explicitly enabled, a broken MediaPipe installation is
+        # an AC6 failure, not a reason to skip.
+        pytest.fail(f"mediapipe cannot be imported although real-model tests were requested: {exc}")
 
 
 @pytest.fixture(scope="module")
@@ -132,7 +137,7 @@ def test_fixture_face_is_tracked_with_anatomical_eyes_iris_and_pose(cv2, still, 
     assert 0.1 < right.openness < 0.6 and 0.1 < left.openness < 0.6
     assert quality.score == pytest.approx(1.0)
     assert pose is not None and abs(pose.yaw_deg) < 15 and abs(pose.roll_deg) < 15 and abs(pose.pitch_deg) < 30
-    assert pose.translation_cm[2] < 0  # in front of the camera
+    assert pose.translation[2] < 0  # in front of the camera
     assert 1.0 < detection.inference_ms < 1000.0
 
 
@@ -162,7 +167,11 @@ def test_mirrored_frame_negates_yaw_and_roll_and_keeps_pitch(cv2, still, clock) 
     from gazefix.tracking.mediapipe_tracker import create_mediapipe_tracker
 
     settings = replace(AppSettings(), model_directory=MODEL_DIR)
-    frame = canvas(cv2, still)
+    # Rotate the frontal fixture by 8° so roll is well above the model's jitter
+    # and the sign flip is a real measurement rather than noise around zero.
+    matrix = cv2.getRotationMatrix2D((640, 360), 8, 1.0)
+    frame = cv2.warpAffine(np.array(canvas(cv2, still)), matrix, (1280, 720))
+    frame.setflags(write=False)
     mirrored = np.ascontiguousarray(frame[:, ::-1])
     mirrored.setflags(write=False)
     plain, flipped = create_mediapipe_tracker(settings), create_mediapipe_tracker(settings)
@@ -176,6 +185,7 @@ def test_mirrored_frame_negates_yaw_and_roll_and_keeps_pitch(cv2, still, clock) 
     pose_a = head_pose_from_matrix(a.faces[0].transform)
     pose_b = head_pose_from_matrix(b.faces[0].transform)
     assert pose_a is not None and pose_b is not None
+    assert abs(pose_a.roll_deg) > 4.0  # a real signal, not jitter
     assert pose_b.yaw_deg == pytest.approx(-pose_a.yaw_deg, abs=2.5)
     assert pose_b.roll_deg == pytest.approx(-pose_a.roll_deg, abs=2.5)
     # The landmark model is not exactly mirror-symmetric (about 3° of pitch
@@ -225,7 +235,9 @@ def test_pitch_sign_agrees_with_landmark_depth_ordering(cv2, still, tracker, clo
 def test_processor_end_to_end_with_the_real_tracker(cv2, still) -> None:  # type: ignore[no-untyped-def]
     from gazefix.tracking.mediapipe_tracker import mediapipe_tracker_factory
 
-    settings = tracking_settings(model_directory=MODEL_DIR, tracking_wait_ms=500, tracking_smoothing=0.5)
+    settings = tracking_settings(
+        model_directory=MODEL_DIR, tracking_wait_ms=500, tracking_smoothing=0.5, worker_join_timeout_s=2.0
+    )
     metrics = PipelineMetrics()
     processor = TrackingProcessor(mediapipe_tracker_factory(settings), settings, metrics)
     processor.start()

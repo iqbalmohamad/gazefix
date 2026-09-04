@@ -197,3 +197,29 @@ def test_selection_is_deterministic_for_the_same_input_sequence() -> None:
         (0, True),
         (1, False),
     ]
+
+
+def test_smaller_nearby_face_cannot_capture_the_memory_while_the_primary_is_missing() -> None:
+    from gazefix.tracking.selection import PrimaryFaceSelector, SelectionSettings
+    from tracking_fakes import make_raw_face, synthetic_landmarks
+
+    selector = PrimaryFaceSelector(SelectionSettings(identity_max_jump=0.3, identity_area_ratio=2.0))
+    primary = make_raw_face(synthetic_landmarks(center=(0.5, 0.5), face_height=0.5))
+    background = make_raw_face(synthetic_landmarks(center=(0.6, 0.45), face_height=0.15))
+    first = selector.select((primary, background))
+    assert first is not None and first.index == 0
+    # The primary is undetected for a frame; the small background face is
+    # near the remembered centre but far outside the area ratio: it is
+    # selected (largest available) with an explicit identity change, and it
+    # does not inherit the memory. When the user reappears they are matched
+    # again without an identity change.
+    second = selector.select((background,))
+    assert second is not None and second.identity_changed
+    third = selector.select((primary, background))
+    assert third is not None and third.index == 0 and not third.identity_changed
+    # A clearly larger newcomer does take over at once.
+    newcomer = make_raw_face(synthetic_landmarks(center=(0.3, 0.5), face_height=0.8))
+    fourth = selector.select((newcomer, background))
+    assert fourth is not None and fourth.index == 0 and fourth.identity_changed
+    fifth = selector.select((newcomer, primary))
+    assert fifth is not None and fifth.index == 0 and not fifth.identity_changed

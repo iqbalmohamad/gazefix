@@ -55,7 +55,7 @@ def test_consumer_mode_has_no_debug_controls_but_shows_tracking_latency(qapp) ->
         assert not window.overlay_enabled
         assert pump_until(lambda: window._last_tracking is not None and window._last_tracking.status is TrackingStatus.TRACKED)
         assert pump_until(lambda: "tracked" in window._tracking_ms.text())
-        assert window._last_tracking.belongs_to(window._last_tracking.sequence, window._runtime.current_request_id)
+        assert window._last_tracking.belongs_to(window._last_tracking.capture_sequence, window._runtime.current_request_id)
     finally:
         window.close()
         assert window._runtime.state is RuntimeState.STOPPED
@@ -140,7 +140,8 @@ def test_close_with_a_blocked_tracker_is_bounded_and_truthful(qapp, caplog) -> N
         # thread is reported separately.
         assert window._runtime.state is RuntimeState.STOPPED
         assert window._tracking.worker_alive
-        assert any(getattr(r, "event", None) == "tracker_shutdown_timeout" for r in caplog.records)
+        assert any(getattr(r, "event", None) == "tracker_thread_alive_at_close" for r in caplog.records)
+        assert window.tracker_thread_alive
         assert all(s.closed for s in sources)  # the camera was released normally
     finally:
         gate.set()
@@ -162,6 +163,6 @@ def test_camera_switch_clears_stale_tracking_from_the_window(qapp) -> None:  # t
             and window._last_tracking.camera_request_id == window._runtime.current_request_id
             and window._last_tracking.status is TrackingStatus.TRACKED
         )
-        assert wait_until(lambda: len(factory.trackers) == 2)
+        assert wait_until(lambda: factory.trackers[0].reset_calls == 1)
     finally:
         window.close()

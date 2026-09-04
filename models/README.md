@@ -14,9 +14,21 @@ and read offline from the per-user model directory afterwards.
 | SHA-256 | `64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff` |
 | MD5 (storage ETag) | `b0e7274907a1644404fef66b28dd6d85` |
 | Contents (zip bundle) | `face_detector.tflite` (BlazeFace short-range), `face_landmarks_detector.tflite` (Face Mesh V2 with attention: 468 mesh + 10 iris points), `face_blendshapes.tflite` (not executed by GazeFix), `geometry_pipeline_metadata_landmarks.binarypb` (canonical face geometry for the head-pose matrix) |
-| Model licence | Apache License, Version 2.0 — stated on the model cards "MediaPipe BlazeFace Model Card (Short Range)", "Model Card MediaPipe Face Mesh V2" and "Model Card Blendshape V2" (Google, `mediapipe-assets` storage) |
+| Model licence | Apache License, Version 2.0 — stated ("LICENSED UNDER Apache License, Version 2.0") on the three model cards below; the bundle itself contains no licence file |
 | Code licence of the runtime (`mediapipe` 1.0.1) | Apache-2.0 |
 | Redistribution | Apache-2.0 permits redistribution with attribution and licence notice; GazeFix nevertheless does not vendor the file so that provenance is always the official source |
+
+## Model cards (licence evidence, retrieved 2026-09-04)
+
+| Card | URL | SHA-256 | Size |
+| --- | --- | --- | --- |
+| MediaPipe BlazeFace Model Card (Short Range) — face detector | `https://storage.googleapis.com/mediapipe-assets/MediaPipe%20BlazeFace%20Model%20Card%20%28Short%20Range%29.pdf` | `cd335c06fc0de7807cd815a0777a697932598bcdb28fa98adaaabf847485f758` | 434,425 |
+| Model Card MediaPipe Face Mesh V2 — landmarks and iris | `https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Face%20Mesh%20V2.pdf` | `c6add060f4ebfb37b2690136b6c711c7e5fcb7038baa2649ae3338b83979565a` | 3,476,420 |
+| Model Card Blendshape V2 — bundled, not executed by GazeFix | `https://storage.googleapis.com/mediapipe-assets/Model%20Card%20Blendshape%20V2.pdf` | `c8e9cf60a39998f4b341740623917590e050d1c97004e2de4568d84e026445ae` | 2,324,099 |
+
+The bundle is listed by Google's Face Landmarker documentation
+(`https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker`)
+under the storage path recorded above.
 
 ## Local location
 

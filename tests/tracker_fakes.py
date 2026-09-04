@@ -63,6 +63,8 @@ class ScriptedTracker:
         self.threads: list[str] = []
         self.close_calls = 0
         self.close_thread: str | None = None
+        self.reset_calls = 0
+        self.reset_threads: list[str] = []
         self.detect_started = Event()
 
     def detect(self, frame_bgr, timestamp_ms: int) -> RawDetection:  # type: ignore[no-untyped-def]
@@ -77,6 +79,10 @@ class ScriptedTracker:
         if self.failure is not None:
             raise self.failure
         return RawDetection(self.faces, inference_ms=1.0, iris_available=all(f.landmarks.shape[0] == 478 for f in self.faces))
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+        self.reset_threads.append(current_thread().name)
 
     def close(self) -> None:
         self.close_calls += 1

@@ -65,7 +65,7 @@ def test_tracked_result_belongs_to_its_frame_and_frame_object_is_untouched() -> 
         output, context = driver.until_status(TrackingStatus.TRACKED)
         tracking = output.tracking
         assert tracking is not None
-        assert tracking.belongs_to(context.sequence, context.camera_request_id)
+        assert tracking.belongs_to(context.capture_sequence, context.camera_request_id)
         assert tracking.captured_at_ns == context.captured_at_ns
         assert output.frame is driver.frame  # overlay off: the input object itself
         assert tracking.face_valid and tracking.eyes_valid and tracking.iris_available
@@ -113,7 +113,7 @@ def test_frames_pass_through_immediately_while_the_tracker_initializes() -> None
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         assert output.tracking is not None
         assert output.tracking.status is TrackingStatus.INITIALIZING
-        assert output.tracking.belongs_to(context.sequence, context.camera_request_id)
+        assert output.tracking.belongs_to(context.capture_sequence, context.camera_request_id)
         assert output.frame is driver.frame
         assert elapsed_ms < tracking_settings().tracking_wait_ms / 2
         assert set(factory.threads) == {"gazefix-tracker"}  # never on the caller's thread
@@ -124,25 +124,61 @@ def test_frames_pass_through_immediately_while_the_tracker_initializes() -> None
         processor.close()
 
 
-def test_generation_change_rebuilds_the_tracker_and_never_attaches_old_results() -> None:
+def test_generation_change_resets_the_tracker_and_never_attaches_old_results() -> None:
     processor, factory = ready_processor()
     driver = Driver(processor)
     try:
         driver.until_status(TrackingStatus.TRACKED, generation=1)
-        first = factory.trackers[0]
+        tracker = factory.trackers[0]
         output, context = driver.until_status(TrackingStatus.TRACKED, generation=2)
         assert output.tracking is not None and output.tracking.camera_request_id == 2
-        assert first.close_calls == 1 and first.close_thread == "gazefix-tracker"
-        assert len(factory.trackers) == 2
-        assert factory.trackers[1].calls >= 1
+        # The backend instance is kept; its temporal state is flushed on the
+        # tracker thread before the first frame of the new generation.
+        assert tracker.reset_calls == 1 and tracker.reset_threads == ["gazefix-tracker"]
+        assert tracker.close_calls == 0 and len(factory.trackers) == 1
         # Every result published for generation 2 names generation 2 and its own frame.
         for _ in range(5):
             out, ctx = driver.frame_once(generation=2)
             assert out.tracking is not None
-            assert out.tracking.belongs_to(ctx.sequence, 2)
+            assert out.tracking.belongs_to(ctx.capture_sequence, 2)
     finally:
         processor.close()
-    assert factory.trackers[1].close_calls == 1
+    assert tracker.close_calls == 1
+
+
+def test_long_frame_gap_resets_temporal_state_without_rebuilding() -> None:
+    processor, factory = ready_processor(tracking_reset_gap_s=0.05)
+    driver = Driver(processor)
+    try:
+        driver.until_status(TrackingStatus.TRACKED)
+        tracker = factory.trackers[0]
+        time.sleep(0.12)  # a capture gap longer than the reset threshold
+        driver.until_status(TrackingStatus.TRACKED)
+        assert tracker.reset_calls >= 1 and tracker.close_calls == 0
+    finally:
+        processor.close()
+
+
+def test_rebuild_budget_is_bounded_per_generation() -> None:
+    processor, factory = ready_processor(tracking_max_rebuilds=1, tracking_max_consecutive_errors=1)
+    driver = Driver(processor)
+    try:
+        driver.until_status(TrackingStatus.TRACKED)
+        factory.trackers[0].failure = RuntimeError("boom")
+        driver.until_status(TrackingStatus.ERROR)
+        assert wait_until(lambda: len(factory.trackers) == 2)  # first rebuild
+        factory.trackers[1].failure = RuntimeError("boom again")
+        driver.until_status(TrackingStatus.ERROR)
+        output, _ = driver.until_status(TrackingStatus.UNAVAILABLE)
+        assert "rebuilt 1 times" in output.tracking.message
+        time.sleep(0.15)
+        assert len(factory.trackers) == 2  # no further rebuilds
+        assert factory.trackers[1].close_calls == 1
+        # A camera change re-arms the rebuild budget.
+        driver.until_status(TrackingStatus.TRACKED, generation=2)
+        assert len(factory.trackers) == 3
+    finally:
+        processor.close()
 
 
 def test_stalled_tracker_times_out_once_then_passes_through_without_waiting() -> None:
@@ -170,7 +206,7 @@ def test_stalled_tracker_times_out_once_then_passes_through_without_waiting() ->
         gate.set()
         tracker.gate = None
         output, context = driver.until_status(TrackingStatus.TRACKED)
-        assert output.tracking is not None and output.tracking.sequence == context.sequence
+        assert output.tracking is not None and output.tracking.capture_sequence == context.capture_sequence
         snapshot = metrics.snapshot()
         assert snapshot.tracking_timeouts >= 6
         assert snapshot.tracking_replaced >= 1  # frames replaced in the tracker's slot while stalled
@@ -199,6 +235,13 @@ def test_inference_errors_are_bounded_rebuild_the_tracker_and_log_once(caplog: p
         driver.until_status(TrackingStatus.TRACKED)
         error_logs = [r for r in caplog.records if getattr(r, "event", None) == "tracker_inference_error"]
         assert len(error_logs) == 1  # rate-limited, not per frame
+        # A result built without inference carries no invented timing.
+        tracker2 = factory.trackers[1]
+        tracker2.gate = Event()
+        out, _ = driver.frame_once()
+        assert out.tracking is not None and out.tracking.status is TrackingStatus.TIMEOUT
+        assert out.tracking.timing.inference_ms is None and out.tracking.timing.total_ms is None
+        tracker2.gate.set()
     finally:
         processor.close()
 
@@ -345,8 +388,9 @@ def test_primary_face_is_the_largest_and_stays_stable() -> None:
         output, _ = driver.until_status(TrackingStatus.TRACKED)
         assert output.tracking is not None and output.tracking.faces_detected == 2
         assert abs(float(output.tracking.landmarks[1, 0]) - 0.7) < 0.02  # nose tip of the large face
-        # The large face shrinks below the small one but is still nearby: identity is kept.
-        factory.trackers[0].faces = (small, face(center=(0.72, 0.5), face_height=0.2))
+        # The primary shrinks a little and the other face grows past it, but the
+        # primary is still nearby and of comparable size: identity is kept.
+        factory.trackers[0].faces = (face(center=(0.25, 0.5), face_height=0.36), face(center=(0.72, 0.5), face_height=0.34))
         output, _ = driver.until_status(TrackingStatus.TRACKED)
         assert abs(float(output.tracking.landmarks[1, 0]) - 0.72) < 0.02
     finally:
@@ -373,21 +417,32 @@ def test_metrics_count_outcomes_by_status() -> None:
         processor.close()
 
 
-def test_smoothing_marks_results_and_resets_on_loss() -> None:
+def test_smoothing_resets_on_loss_and_camera_change_even_for_tiny_steps() -> None:
+    """A step below the stabiliser's motion scale would be blended (not passed
+    through) unless the filter was reset; the exact position proves the reset."""
+
     processor, factory = ready_processor(tracking_smoothing=0.8)
     driver = Driver(processor)
     try:
         output, _ = driver.until_status(TrackingStatus.TRACKED)
         assert output.tracking is not None and output.tracking.stabilized
         tracker = factory.trackers[0]
-        tracker.faces = (face(center=(0.3, 0.5)),)
-        # After a jump the smoothed position lags; after loss + re-entry it snaps.
+        nose_x = float(output.tracking.landmarks[1, 0])
+        # Same face, a sub-motion-scale step, no reset: the output lags.
+        tracker.faces = (face(center=(0.5 + 0.005, 0.5)),)
         output, _ = driver.until_status(TrackingStatus.TRACKED)
+        lagged = float(output.tracking.landmarks[1, 0])
+        assert nose_x < lagged < 0.505 - 1e-4
+        # Loss then re-entry with another tiny step: exact, no bleed.
         tracker.faces = ()
         driver.until_status(TrackingStatus.NO_FACE)
-        tracker.faces = (face(center=(0.7, 0.5)),)
+        tracker.faces = (face(center=(0.51, 0.5)),)
         output, _ = driver.until_status(TrackingStatus.TRACKED)
-        assert abs(float(output.tracking.landmarks[1, 0]) - 0.7) < 1e-4  # no bleed from the old face
+        assert float(output.tracking.landmarks[1, 0]) == pytest.approx(0.51, abs=1e-6)
+        # Camera change with a tiny step: exact again.
+        tracker.faces = (face(center=(0.515, 0.5)),)
+        output, _ = driver.until_status(TrackingStatus.TRACKED, generation=2)
+        assert float(output.tracking.landmarks[1, 0]) == pytest.approx(0.515, abs=1e-6)
     finally:
         processor.close()
 

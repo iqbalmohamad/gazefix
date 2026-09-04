@@ -181,7 +181,7 @@ def tracked_result(
     points, iris_available = validate_landmarks(landmarks)
     return TrackingResult(
         status=status,
-        sequence=sequence,
+        capture_sequence=sequence,
         captured_at_ns=captured_at_ns,
         camera_request_id=camera_request_id,
         geometry=geometry,

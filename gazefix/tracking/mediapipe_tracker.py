@@ -20,8 +20,10 @@ Backend facts the adapter relies on (verified against mediapipe 1.0.1):
 
 from __future__ import annotations
 
+import importlib.metadata
 import logging
 from pathlib import Path
+import sys
 import time
 from typing import Any
 
@@ -99,6 +101,22 @@ class MediaPipeFaceTracker:
         iris_available = bool(faces) and all(f.landmarks.shape[0] == 478 for f in faces)
         return RawDetection(tuple(faces), inference_ms, iris_available)
 
+    def reset(self) -> None:
+        """Drop the backend's face-tracking state without rebuilding it.
+
+        In video mode the landmarker re-uses the previous face region until
+        the face presence check fails. Feeding one small black frame makes
+        that check fail, so the next real frame runs the face detector
+        first, exactly as on a fresh instance. The black frame is synthetic
+        (no camera pixels) and costs a few milliseconds; rebuilding would
+        cost a model load and a ``close()``.
+        """
+
+        if self._closed:
+            raise TrackerClosedError("MediaPipe tracker used after close")
+        blank = np.zeros((64, 64, 3), dtype=np.uint8)
+        self.detect(blank, (self._last_timestamp_ms or 0) + 1)
+
     def close(self) -> None:
         if self._closed:
             return
@@ -132,6 +150,13 @@ def create_mediapipe_tracker(settings: AppSettings, model_path: Path | None = No
         raise TrackerInitializationError(str(exc), retryable=False, kind=f"model_{exc.kind}") from exc
     verify_ms = (time.perf_counter() - started) * 1000.0
 
+    _warn_about_duplicate_opencv()
+    # MediaPipe's audio package imports ``sounddevice`` at import time and
+    # tolerates its absence; registering ``None`` makes that import fail
+    # cleanly so PortAudio is never loaded or initialised (GazeFix uses no
+    # audio, and on Windows the bundled PortAudio DLL would otherwise be
+    # loaded and initialised inside the import).
+    sys.modules.setdefault("sounddevice", None)  # type: ignore[assignment]
     try:
         import cv2  # already loaded by the camera modules; kept explicit
         import mediapipe as mp
@@ -194,6 +219,38 @@ def create_mediapipe_tracker(settings: AppSettings, model_path: Path | None = No
     return MediaPipeFaceTracker(
         landmarker, mp.Image, mp.ImageFormat.SRGB, cv2, thresholds, description
     )
+
+
+def installed_opencv_distributions() -> list[str]:
+    """Names of the OpenCV distributions present in this environment."""
+
+    names = set()
+    for distribution in importlib.metadata.distributions():
+        name = (distribution.metadata["Name"] or "").lower()
+        if name.startswith("opencv-"):
+            names.add(name)
+    return sorted(names)
+
+
+def _warn_about_duplicate_opencv() -> None:
+    """Two OpenCV distributions share one ``cv2`` directory; pip does not notice.
+
+    Upgrading an M0 environment in place installs opencv-contrib-python over
+    opencv-python; both remain registered, ``pip check`` stays silent, and a
+    later uninstall of either breaks ``cv2``. Say so once, in the log.
+    """
+
+    try:
+        installed = installed_opencv_distributions()
+    except Exception:  # noqa: BLE001  (diagnostic only)
+        return
+    if len(installed) > 1:
+        logger.warning(
+            "More than one OpenCV distribution is installed; they overwrite the "
+            "same cv2 package. Recreate the virtual environment or uninstall the "
+            "extra distributions and reinstall opencv-contrib-python.",
+            extra={"event": "opencv_duplicate_distributions", "distributions": installed},
+        )
 
 
 def mediapipe_tracker_factory(settings: AppSettings) -> TrackerFactory:
