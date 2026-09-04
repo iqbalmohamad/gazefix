@@ -31,16 +31,25 @@ complexity: speculative worker fan-out, in-place mutation, or frame queues.
    M4.
 
 2. **A measurement-gated split trigger, designed now and built only if
-   needed.** With submit-then-wait, per-frame cost is ≈ tracking inference
-   (~14 ms measured, ADR-0001) + correction, in series; the frame period is
-   33 ms at 30 FPS and 41 ms at the 24 FPS floor. If, after M4 measurement
-   and per-stage optimization (and re-checked at M7), inference +
-   correction exceeds the 41 ms floor on the target machine, correction
-   moves to a dedicated worker fed by a one-slot latest-value hand-off —
-   the tracker thread's proven pattern — so inference of frame N+1 overlaps
-   correction of frame N. Cost of splitting: one extra frame of latency and
-   a second stale-result guard (the same `belongs_to` identity check).
-   Until the trigger fires, the split does not exist.
+   needed.** With submit-then-wait, per-frame cost is ≈
+   `min(inference, tracking_wait_ms) + correction` in series; the frame
+   period is 33 ms at 30 FPS and ~42 ms at the 24 FPS floor. Tracking
+   inference measured 14.3 ms median on the Linux development machine
+   (ADR-0001); the target laptop is unmeasured until M4, and a tracker
+   that misses `tracking_wait_ms` (100 ms) breaks the arithmetic outright
+   (a timed-out frame costs up to the full wait and passes uncorrected) —
+   whether 100 ms remains the right wait bound once the same thread also
+   corrects is an M4 revisit item. If, after M4 measurement and per-stage
+   optimization (and re-checked at M7), inference + correction exceeds the
+   ~42 ms floor on the target machine, correction moves to a dedicated
+   worker fed by a one-slot latest-value hand-off — the tracker thread's
+   proven pattern — so inference of frame N+1 overlaps correction of
+   frame N. Splitting helps only when each term individually fits the
+   frame period (post-split throughput is `max(inference, correction)`);
+   an inference-dominated miss is remedied tracker-side, not with more
+   workers. Cost of splitting: one extra frame of latency and a second
+   stale-result guard (the same `belongs_to` identity check). Until the
+   trigger fires, the split does not exist.
 
 3. **Backpressure stays newest-wins at every boundary.** Slow correction
    lowers output FPS by replacement in the capture buffer; it never grows
@@ -54,34 +63,42 @@ complexity: speculative worker fan-out, in-place mutation, or frame queues.
    otherwise, as today); the copy is re-frozen (`setflags(write=False)`)
    before publication, so `ProcessedFrame.frame` is immutable for all
    consumers. Uncorrected frames pass through as the original read-only
-   array with zero copies. Per corrected 720p frame: one ≈2.7 MB copy plus
-   the preview's existing QImage copy; a backend that needs another pixel
-   format converts in its own adapter buffer.
+   array with zero copies. Per corrected 720p frame: one ≈2.8 MB copy
+   (2,764,800 bytes) plus the preview's existing QImage copy; a backend
+   that needs another pixel format converts in its own adapter buffer.
 
 5. **Per-consumer one-slot output buffers.** The processing worker
    publishes the same immutable `ProcessedFrame` reference into one buffer
    per consumer: the preview buffer (today's behavior, unchanged) and, from
    M8, an output buffer drained by a dedicated virtual-camera worker
-   thread. `LatestValueBuffer` stays single-consumer per instance;
-   fan-out is N buffers, not a multicast buffer. Each consumer's
-   replacement counter is its own staleness metric.
+   thread. The runtime owns both buffers and the worker always publishes to
+   both — starting/stopping the virtual camera changes only consumption, so
+   no buffer is attached to or detached from a running worker.
+   `select_camera` clears every consumer buffer on a camera switch, and the
+   output worker applies the same `camera_request_id` check before sending
+   that the preview path applies on consume. `LatestValueBuffer` stays
+   single-consumer per instance; fan-out is N buffers, not a multicast
+   buffer. Each consumer's replacement counter is its own staleness metric.
 
-6. **The virtual-camera worker is an isolated consumer.** It waits on its
-   own buffer, converts and sends inside the backend adapter, stops itself
-   after a bounded run of send errors, and is joined against a bounded
-   deadline at shutdown like every other worker. It can never backpressure
-   or fail the pipeline; a wedged driver call abandons a daemon thread at
-   process exit, the same rule the capture and tracker threads already
-   follow.
+6. **The virtual-camera worker is an isolated, window-owned consumer.**
+   Like the discovery service, it is started and stopped from the UI and
+   joined in `closeEvent` against the single shutdown deadline with its own
+   timeout attribution; `PipelineRuntime`, its `STOPPED` latch and its
+   cleanup accounting are untouched. It waits on its own buffer, converts
+   and sends inside the backend adapter, stops itself after a bounded run
+   of send errors, and can never backpressure or fail the pipeline; a
+   wedged driver call abandons a daemon thread at process exit, the same
+   rule the capture and tracker threads already follow.
 
 ## Consequences
 
 - M4 integration is a composition change inside the existing
   `FrameProcessor` seam; capture, buffers, runtime lifecycle and UI polling
   are untouched.
-- Frame-rate arithmetic is explicit: correction has a ~15–25 ms CPU budget
-  to hold 24–30 FPS in the single-worker model. That budget, not taste,
-  decides the split.
+- Frame-rate arithmetic is explicit: correction has a derived ~19–27 ms CPU
+  budget to hold 24–30 FPS in the single-worker model, extrapolated from
+  the Linux measurement until M4 measures on target hardware. That budget,
+  not taste, decides the split.
 - The immutability invariant survives correction: only the engine, only on
   its own working copy, only before publication. Consumers can never
   observe a mutating frame, and cross-thread mutation stays structurally

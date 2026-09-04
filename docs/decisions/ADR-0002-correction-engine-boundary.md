@@ -53,13 +53,19 @@ throwaway.
    Inputs: the immutable captured frame, the frame's `TrackingResult`
    (which already carries landmarks, eyes, iris, head pose and the source
    gaze), the target gaze as a unit direction in the `GazeResult` camera
-   frame (default `(0, 0, 1)`, the camera), and the **effective** strength
-   in `[0, 1]`. Output: a `CorrectionResult` — status `CORRECTED` /
-   `SKIPPED(reason)` / `FAILED(reason)`, the output frame (the engine's own
-   working copy when corrected, otherwise the input reference), applied
-   strength, `correction_ms`, optional debug metadata. Strength `0` is a
-   guaranteed no-op passthrough; interpolation is required (PRD §9),
-   binary correction is not acceptable.
+   frame (default `(0, 0, 1)` — the camera's optical axis; see
+   `docs/gaze.md` §5 for the off-axis caveat that M6 calibration
+   addresses), and the **effective** strength in `[0, 1]`. Output: the
+   output frame and a `CorrectionResult`, as a small frozen output pair
+   mirroring the existing `ProcessorOutput` shape — the frame slot carries
+   the engine's own working copy when corrected, otherwise the input
+   reference, and is what the staged processor publishes as
+   `ProcessedFrame.frame`; `CorrectionResult` itself is **metadata only**
+   (status `CORRECTED` / `SKIPPED(reason)` / `FAILED(reason)`, applied
+   strength, `correction_ms`, optional debug metadata) and is what
+   `ProcessedFrame.correction` carries. Strength `0` is a guaranteed no-op
+   passthrough; interpolation is required (PRD §9, PR-5), binary correction
+   is not acceptable.
 
 3. **Policy sits outside engines.** The deviation-dependent strength curve
    (PRD §10), confidence gating, and fade ramps are a policy layer in the
