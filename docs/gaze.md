@@ -81,7 +81,19 @@ in both.
 `GazeResult.mirrored()` follows the same rule as `HeadPose.mirrored()`: the
 direction's `x` component and both yaw angles flip sign, pitch is unchanged,
 and eye sides stay anatomical. `TrackingResult.mirrored()` mirrors the gaze
-with everything else, so a mirrored preview stays self-consistent.
+with everything else, so a mirrored preview stays self-consistent and the
+overlay arrow points the right way.
+
+**Mirroring is a display transform applied AFTER estimation, and the two are
+not interchangeable.** `mirrored()` re-expresses the angles in the mirrored
+image's frame, so yaw flips. The estimator's eye axis, by contrast, is defined
+anatomically (toward the subject's left) and follows the mirrored geometry, so
+running the estimator on mirrored landmarks would return the *unflipped* sign
+and a different composition with the mirrored head pose. To make that trap
+impossible, `GeometricGazeEstimator.estimate` refuses a result whose
+`geometry.mirrored` is set and returns `UNAVAILABLE` saying so. The pipeline
+never hits this: the worker estimates on the captured frame, and any mirroring
+happens downstream of it.
 
 ### Unavailable
 

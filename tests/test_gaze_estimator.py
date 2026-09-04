@@ -614,3 +614,29 @@ def test_a_result_without_a_quality_signal_cannot_claim_confidence() -> None:
     result = estimator().estimate(replace(base, quality=None))
     assert result.status is GazeStatus.UNAVAILABLE
     assert result.confidence.score == 0.0
+
+
+def test_the_estimator_refuses_mirrored_coordinates() -> None:
+    """Mirroring is a display transform; estimating from it would disagree.
+
+    ``mirrored()`` re-expresses angles in the mirrored image's frame so yaw
+    flips, but the estimator's eye axis is anatomical and would read the same
+    mirrored geometry with the unflipped sign. Rather than quietly return a
+    different answer, the estimator refuses.
+    """
+
+    tracking = gaze_scene(eye_yaw_deg=20.0, head_yaw_deg=15.0).result()
+    assert tracking.geometry.mirrored is False
+    result = estimator().estimate(tracking.mirrored())
+    assert result.status is GazeStatus.UNAVAILABLE
+    assert "unmirrored" in result.message
+
+
+def test_mirroring_the_estimate_is_the_supported_path() -> None:
+    tracking = gaze_scene(eye_yaw_deg=20.0, head_yaw_deg=15.0).result()
+    direct = estimator().estimate(tracking)
+    mirrored = direct.mirrored()
+    assert direct.yaw_deg is not None and mirrored.yaw_deg is not None
+    assert mirrored.yaw_deg == pytest.approx(-direct.yaw_deg)
+    assert direct.direction is not None and mirrored.direction is not None
+    assert float(mirrored.direction[0]) == pytest.approx(-float(direct.direction[0]))

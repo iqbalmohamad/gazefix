@@ -207,6 +207,21 @@ class GeometricGazeEstimator:
     # ------------------------------------------------------------- internals
     def _estimate(self, result: TrackingResult, started: float) -> GazeResult:
         settings = self._settings
+        if result.geometry.mirrored:
+            # Mirroring is a DISPLAY transform, applied after estimation:
+            # ``TrackingResult.mirrored()`` re-expresses angles in the mirrored
+            # image's frame (yaw flips, exactly as ``HeadPose.mirrored`` does),
+            # while this estimator's eye axis is defined anatomically and would
+            # read the same mirrored geometry with the unflipped sign. The two
+            # are therefore NOT interchangeable, so estimating from mirrored
+            # coordinates is refused rather than answered differently. The
+            # pipeline never does it: the worker estimates on the captured
+            # frame and any mirroring happens downstream.
+            return self._give_up(
+                "no gaze: gaze is estimated from unmirrored capture coordinates; "
+                "mirror the result after estimation, not before",
+                started,
+            )
         if not result.face_valid:
             # Gate on the face, not on both eyes: one eye covered, squinting
             # or missing its iris must degrade the estimate rather than
