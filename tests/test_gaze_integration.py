@@ -748,3 +748,171 @@ def test_a_retired_estimator_gets_another_chance_on_a_new_camera() -> None:
         assert estimator.estimate_calls > retired, "a new camera must re-arm the stage"
     finally:
         processor.close()
+
+
+# --- residual ARCH-01: a failed reset must not leave stale state in play ---
+
+
+class ResetFailsElseReal:
+    """Conforming estimator whose ``reset`` raises but whose ``estimate`` works.
+
+    This is the shape that made the residual observable: containment alone
+    kept the thread alive, but the estimator carried on with temporal state
+    the failed reset was supposed to clear.
+    """
+
+    description = "reset-fails wrapper around the real estimator"
+
+    def __init__(self, *, broken: bool = True) -> None:
+        from gazefix.gaze.estimator import GazeSettings, GeometricGazeEstimator
+
+        self.inner = GeometricGazeEstimator(GazeSettings(smoothing=0.9))
+        self.broken = broken
+        self.reset_calls = 0
+        self.estimate_calls = 0
+
+    def estimate(self, result):  # type: ignore[no-untyped-def]
+        self.estimate_calls += 1
+        return self.inner.estimate(result)
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+        if self.broken:
+            raise RuntimeError("gaze reset exploded")
+        self.inner.reset()
+
+
+def test_a_failed_gaze_reset_stops_estimates_using_stale_state() -> None:
+    """The residual: pre-reset temporal state must not cross a generation.
+
+    Before the fix, a settled 3.0 degree eye-in-head state survived the failed
+    reset and the first frame of the new camera came back ``estimated`` at
+    1.6601 instead of the clean 1.5 — measurably blended with the stale value.
+    """
+
+    estimator = ResetFailsElseReal()
+    processor, factory = worker_with(estimator)
+    try:
+        driver = Driver(processor)
+        for _ in range(6):
+            driver.until_tracked(generation=1)
+        factory.trackers[0].faces = (scene_face(eye_yaw_deg=TARGET_DEG),)
+
+        for _ in range(6):
+            output, _ = driver.once(generation=2)
+            tracking = output.tracking
+            if tracking is None:
+                continue
+            assert tracking.gaze is not None
+            # No estimate at all, rather than one built on untrusted state.
+            assert tracking.gaze.status is GazeStatus.UNAVAILABLE, tracking.gaze.message
+            assert tracking.gaze.eye_yaw_deg is None
+            assert "reset failed" in tracking.gaze.message
+            time.sleep(0.004)
+
+        assert estimator.reset_calls >= 1, "the reset path must actually have run"
+        # ...while M1 tracking is untouched.
+        assert processor._worker.is_alive
+        assert processor.status().state == "ready"
+        assert factory.attempts == 1, "the tracker must not have been rebuilt"
+    finally:
+        processor.close()
+
+
+def test_tracking_stays_valid_while_gaze_is_retired_for_a_failed_reset() -> None:
+    estimator = ResetFailsElseReal()
+    processor, factory = worker_with(estimator)
+    try:
+        driver = Driver(processor)
+        tracked = 0
+        for generation in (1, 2):
+            for _ in range(6):
+                output, _ = driver.once(generation=generation)
+                if output.tracking is not None and output.tracking.status is TrackingStatus.TRACKED:
+                    tracked += 1
+                    # The frame keeps its landmarks; only gaze is missing.
+                    assert output.tracking.landmarks is not None
+                    assert output.tracking.eyes_valid
+                time.sleep(0.004)
+        assert tracked >= 8, "tracking must keep producing valid results"
+        assert factory.attempts == 1, "no tracker rebuild"
+        assert processor._worker.is_alive
+    finally:
+        processor.close()
+
+
+def test_a_successful_estimate_cannot_clear_an_unresolved_reset_failure() -> None:
+    """The counter reset is guarded, not merely unreachable."""
+
+    from gazefix.tracking.worker import TrackerWorker
+
+    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(),)})
+    settings = tracking_settings()
+    worker = TrackerWorker(factory, settings, PipelineMetrics())
+
+    tracking = gaze_scene(eye_yaw_deg=10.0).result()
+    # Stand an unresolved reset failure up directly, then let a working
+    # estimate through: it must not wipe the failure's error count.
+    worker._gaze_reset_failed = True
+    worker._gaze_errors = 1
+    estimate = worker._estimate_gaze(tracking)
+    assert estimate.status.has_direction, "the estimator itself is healthy here"
+    assert worker._gaze_errors == 1, "an unresolved reset failure was cleared by a success"
+
+    # With no unresolved failure, a success does clear the count as before.
+    worker._gaze_reset_failed = False
+    worker._gaze_errors = 3
+    worker._estimate_gaze(tracking)
+    assert worker._gaze_errors == 0
+
+
+def test_gaze_is_re_established_only_at_a_generation_change_once_reset_works() -> None:
+    """The safe lifecycle point, and only there.
+
+    The re-arm is safe because the generation change resets immediately
+    afterwards: a still-broken reset retires the stage again before a single
+    frame is estimated.
+    """
+
+    estimator = ResetFailsElseReal()
+    processor, factory = worker_with(estimator)
+    try:
+        driver = Driver(processor)
+        for _ in range(6):
+            driver.once(generation=1)
+            time.sleep(0.004)
+        factory.trackers[0].faces = (scene_face(eye_yaw_deg=TARGET_DEG),)
+
+        # Still broken on the next generation: retired again, no estimate.
+        for _ in range(6):
+            output, _ = driver.once(generation=2)
+            time.sleep(0.004)
+        assert output.tracking is not None and output.tracking.gaze is not None
+        assert output.tracking.gaze.status is GazeStatus.UNAVAILABLE
+
+        # The substitute recovers; the NEXT generation re-establishes gaze.
+        estimator.broken = False
+        recovered = None
+        for _ in range(6):
+            output, _ = driver.once(generation=3)
+            if (
+                output.tracking is not None
+                and output.tracking.gaze is not None
+                and output.tracking.gaze.status.has_direction
+            ):
+                recovered = output.tracking.gaze
+                break
+            time.sleep(0.004)
+        assert recovered is not None, "gaze must come back once its reset works"
+        # And it comes back CLEAN: the pre-failure 3.0 state is nowhere in it.
+        assert recovered.eye_yaw_deg == pytest.approx(TARGET_DEG, abs=0.05)
+        assert abs(recovered.eye_yaw_deg - UNRESET_DEG) > 0.1
+        assert factory.attempts == 1, "no tracker rebuild throughout"
+        # The failure is RESOLVED, not merely bypassed: a stage that came back
+        # still carrying the flag would never clear its error count again, so
+        # estimate failures would accumulate across generations.
+        assert processor._worker._gaze_reset_failed is False
+        assert processor._worker._gaze_errors == 0
+        assert processor._worker._gaze_disabled_reason == ""
+    finally:
+        processor.close()

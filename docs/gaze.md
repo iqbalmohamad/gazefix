@@ -480,9 +480,17 @@ must never cost tracking either. Two layers enforce that:
    path (it would otherwise spend the consecutive-error budget and rebuild a
    healthy tracker), and a failing `reset` cannot end the tracker thread. Both
    are caught, logged rate-limited, and reported as an unavailable gaze on a
-   frame that keeps its landmarks. After ten consecutive failures the
-   estimator is retired until the camera generation changes, so a broken
+   frame that keeps its landmarks. After ten consecutive `estimate` failures
+   the estimator is retired until the camera generation changes, so a broken
    implementation cannot be called on every frame forever.
+3. **A failing `reset` is retired at once, not counted.** Containment alone
+   would leave the estimator holding temporal state from before whatever
+   demanded the reset — a different camera, a different face — with no way to
+   tell how stale it is, and a later successful estimate would clear the
+   failure and let that state blend into new frames. So gaze stops on the
+   spot. Only a camera-generation change clears the condition, and it is safe
+   because the reset it performs runs before any frame is estimated: a still
+   broken reset simply retires the stage again.
 
 Verified by driving a deliberately raising substitute through the real
 pipeline: tracking stays `ready` with every frame `TRACKED` and no tracker
@@ -501,6 +509,7 @@ rebuild, in both cases.
 | head pose present but non-finite | treated as no head pose at all, not as a zero angle |
 | head pose unavailable | estimate from eye-in-head angles alone, `head_pose_applied = False`, `pose_term` 0.7 |
 | confidence below `gaze_min_confidence` | `LOW_CONFIDENCE`: angles carried, `available` is `False` |
+| the estimator's `reset` raised | `UNAVAILABLE` for the rest of the generation: its temporal state cannot be trusted, so no estimate is produced from it |
 | gaze disabled in settings | `UNAVAILABLE`, "gaze estimation is disabled"; no gaze code runs |
 
 Every result the pipeline publishes carries a `gaze` field — `untracked()`
