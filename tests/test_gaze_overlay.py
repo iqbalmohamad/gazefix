@@ -8,6 +8,7 @@ does not have.
 from __future__ import annotations
 
 from dataclasses import replace
+import inspect
 
 import numpy as np
 import pytest
@@ -251,3 +252,43 @@ def test_the_ui_line_names_the_status_so_low_confidence_is_never_hidden(
     status: GazeStatus,
 ) -> None:
     assert status.value in ui_text(replace(gaze(), status=status))
+
+
+# --- the wirings that carry gaze into what a human actually sees ---
+
+
+def test_the_rendered_panel_carries_the_gaze_block() -> None:
+    """Every other text test drives the private helper; this pins the wiring."""
+
+    style = OverlayStyle(
+        mesh_points=False, face_oval=False, pose_axes=False, gaze_ray=False, text=True
+    )
+    result = tracked_with(gaze())
+    with_gaze = render_overlay(frame(), result, style)
+    without = render_overlay(frame(), replace(result, gaze=None), style)
+    assert not np.array_equal(with_gaze, without)
+
+
+def test_the_consumer_tracking_label_reports_the_gaze_status() -> None:
+    """The one-line status a non-developer sees."""
+
+    from gazefix.ui import main_window as module
+
+    source = inspect.getsource(module.MainWindow._refresh_metrics)
+    assert "gaze" in source, "the consumer label must mention the gaze status"
+
+
+def test_the_developer_detail_line_includes_the_gaze_readout() -> None:
+    from gazefix.ui.main_window import _tracking_detail_text
+
+    class Metrics:
+        pipeline_latency_ms = 1.0
+        gaze_estimation_ms = 0.2
+        tracking_timeouts = 0
+        tracking_errors = 0
+        tracking_replaced = 0
+
+    result = tracked_with(gaze())
+    line = _tracking_detail_text(result, Metrics())
+    assert "gaze" in line
+    assert "approx" in line, "the detail line must carry the uncalibrated marker"

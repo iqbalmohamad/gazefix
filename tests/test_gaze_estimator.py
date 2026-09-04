@@ -675,12 +675,18 @@ def test_non_finite_eye_geometry_is_rejected_without_a_numpy_warning() -> None:
             iris[0, 0] = np.float32(value)
             iris.flags.writeable = False
             eyes[side] = replace(eye, iris=iris)
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", RuntimeWarning)
+        # Record rather than promote. Promoting the warning to an exception
+        # makes it indistinguishable from the intended rejection: the blanket
+        # except in estimate() catches it and returns the same UNAVAILABLE,
+        # so the assertion would hold with the guard removed.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             result = estimator().estimate(
                 replace(base, right_eye=eyes["right"], left_eye=eyes["left"])
             )
+        assert [str(w.message) for w in caught] == []
         assert result.status is GazeStatus.UNAVAILABLE
+        assert "usable iris geometry" in result.message
 
 
 def test_a_non_finite_eye_contour_is_rejected_too() -> None:
@@ -966,14 +972,37 @@ def test_head_roll_does_not_look_like_a_closing_eye() -> None:
     own up axis instead, which is roll-invariant.
     """
 
-    terms = []
+    # The aperture must sit where _ramp is NOT saturated, or the assertion
+    # holds for the broken measure too: at the fixture default of 0.30 even
+    # M1's roll-shrunk value (0.30 x cos 45 = 0.212) stays above
+    # openness_full = 0.20 and both measures ramp to exactly 1.0.
+    aperture = 0.16
+    assert GazeSettings().openness_floor < aperture < GazeSettings().openness_full
+
+    terms, reported = [], []
     for roll in (0.0, 15.0, 30.0, 45.0, -30.0):
-        result = estimate({"head_roll_deg": roll})
+        result = estimate({"head_roll_deg": roll, "eye_openness": aperture})
         assert result.status.has_direction, roll
         terms.append(result.confidence.openness_term)
+        reported.append(result.per_eye[0].openness)
         for eye in result.per_eye:
             assert eye.openness == pytest.approx(result.per_eye[0].openness, abs=0.03)
     assert all(term == pytest.approx(terms[0], abs=0.02) for term in terms), terms
+    # And the reported aperture is the true one, not M1's roll-shrunk version.
+    assert all(value == pytest.approx(aperture, abs=0.02) for value in reported), reported
+
+
+def test_the_gaze_aperture_does_not_track_m1s_roll_shrunk_one() -> None:
+    """Direct comparison, so the divergence is asserted rather than implied."""
+
+    aperture = 0.16
+    tracking = gaze_scene(head_roll_deg=45.0, eye_openness=aperture).result()
+    assert tracking.right_eye is not None
+    result = estimator().estimate(tracking)
+    # M1 measures along image y, so a 45-degree roll shrinks its value...
+    assert tracking.right_eye.openness < aperture - 0.02
+    # ...while the gaze aperture is the true one.
+    assert result.per_eye[0].openness == pytest.approx(aperture, abs=0.02)
 
 
 def test_the_eye_aperture_is_reported_on_the_same_scale_as_m1() -> None:
@@ -1043,3 +1072,124 @@ def test_a_negligible_confidence_is_unavailable_not_a_near_zero_estimate() -> No
     result = estimate({"eye_openness": settings.openness_floor})
     assert result.status is GazeStatus.UNAVAILABLE
     assert result.yaw_deg is None
+
+
+def test_disagreeing_eyes_past_the_deadband_lose_confidence() -> None:
+    """The penalising side of the agreement term, which nothing else covers.
+
+    Every other assertion pins the flat side — 1.0 inside the deadband, or the
+    single-eye constant — so ``agreement_term = 1.0`` would satisfy them all.
+    Here one eye's iris is displaced along its own axis to manufacture a
+    disagreement, and the term has to fall as the displacement grows.
+    """
+
+    from dataclasses import replace
+
+    settings = GazeSettings()
+    tracking = gaze_scene(0.0).result()
+    assert tracking.right_eye is not None and tracking.right_eye.iris is not None
+
+    def term_for(shift: float) -> tuple[float, float]:
+        iris = np.array(tracking.right_eye.iris, dtype=np.float32)
+        iris[:, 0] += np.float32(shift)
+        iris.flags.writeable = False
+        result = estimator().estimate(
+            replace(tracking, right_eye=replace(tracking.right_eye, iris=iris))
+        )
+        assert result.status.has_direction, result.message
+        assert result.confidence.eyes_used == 2, "both eyes must still contribute"
+        spread = abs(result.per_eye[0].yaw_deg - result.per_eye[1].yaw_deg)
+        return spread, result.confidence.agreement_term
+
+    aligned_spread, aligned_term = term_for(0.0)
+    assert aligned_spread < settings.agreement_deadband_deg
+    assert aligned_term == pytest.approx(1.0)
+
+    spreads_and_terms = [term_for(shift) for shift in (0.005, 0.010, 0.013, 0.015)]
+    # The manufactured disagreement really does cross the deadband...
+    assert spreads_and_terms[-1][0] > settings.agreement_deadband_deg, spreads_and_terms
+    # ...and the term falls once it does, monotonically.
+    terms = [term for _, term in spreads_and_terms]
+    assert terms[-1] < 0.8, spreads_and_terms
+    assert all(b <= a for a, b in zip(terms, terms[1:])), terms
+
+
+def test_eyes_that_disagree_completely_yield_no_gaze_at_all() -> None:
+    """Past the ramp the term reaches 0, and a zero term is not an estimate."""
+
+    from dataclasses import replace
+
+    tracking = gaze_scene(0.0).result()
+    assert tracking.right_eye is not None and tracking.right_eye.iris is not None
+    iris = np.array(tracking.right_eye.iris, dtype=np.float32)
+    iris[:, 0] += np.float32(0.03)
+    iris.flags.writeable = False
+    result = estimator().estimate(
+        replace(tracking, right_eye=replace(tracking.right_eye, iris=iris))
+    )
+    assert result.status is GazeStatus.UNAVAILABLE
+    assert "disagree" in result.message
+    assert result.yaw_deg is None
+
+
+# --- the two clamps docs/gaze.md states as bounded ---
+
+
+def test_the_foreshortening_correction_is_bounded_by_min_cos() -> None:
+    """docs/gaze.md: the correction is bounded to a factor between 0.5 and 2."""
+
+    from dataclasses import replace as dc_replace
+
+    from gaze_fakes import rotation_matrix
+    from gazefix.tracking.analysis import head_pose_from_matrix
+
+    settings = GazeSettings()
+    base = gaze_scene(0.0, 12.0)
+    uncorrected = estimator().estimate(base.result()).per_eye[0].offset_v
+
+    offsets = []
+    for head_pitch in (60.0, 70.0, 80.0, 85.0):
+        transform = np.eye(4, dtype=np.float32)
+        transform[:3, :3] = rotation_matrix(0.0, head_pitch, 0.0).astype(np.float32)
+        pose = head_pose_from_matrix(transform)
+        result = estimator().estimate(dc_replace(base.result(), pose=pose))
+        assert result.status.has_direction
+        offsets.append(result.per_eye[0].offset_v)
+
+    # cos(head_pitch) is floored at min_cos, so the divisor stops shrinking and
+    # the correction stops growing at exactly 1 / min_cos.
+    ceiling = uncorrected / settings.min_cos
+    for offset in offsets:
+        assert abs(offset) <= abs(ceiling) * 1.001, (offset, ceiling)
+    assert offsets[-1] == pytest.approx(offsets[-2], abs=1e-9), "already saturated"
+
+
+def test_an_over_range_offset_is_rescaled_onto_the_limit_not_merely_capped() -> None:
+    """docs/gaze.md: the direction is scaled back onto the limit."""
+
+    from dataclasses import replace
+
+    settings = GazeSettings()
+    tracking = gaze_scene().result()
+    eyes = {}
+    for side, eye in (("right", tracking.right_eye), ("left", tracking.left_eye)):
+        assert eye is not None and eye.iris is not None
+        iris = np.array(eye.iris, dtype=np.float32)
+        iris[:, 0] += np.float32(0.02)
+        iris[:, 1] -= np.float32(0.05)  # push BOTH components out of range
+        iris.flags.writeable = False
+        eyes[side] = replace(eye, iris=iris)
+    result = estimator().estimate(
+        replace(tracking, right_eye=eyes["right"], left_eye=eyes["left"])
+    )
+    assert result.status.has_direction, result.message
+    assert result.direction is not None
+    # Rescaling preserves the direction's bearing and its unit norm; merely
+    # clamping one component would not.
+    assert float(np.linalg.norm(result.direction)) == pytest.approx(1.0, abs=1e-5)
+    planar = math.hypot(
+        math.sin(math.radians(result.eye_yaw_deg)) * math.cos(math.radians(result.eye_pitch_deg)),
+        math.sin(math.radians(result.eye_pitch_deg)),
+    )
+    assert planar == pytest.approx(settings.offset_limit, abs=1e-3)
+    assert result.confidence.offset_term == pytest.approx(settings.offset_floor_factor)

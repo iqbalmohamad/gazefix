@@ -268,7 +268,7 @@ The UI defines metrics as follows:
   processed frame), and timeout/error/replaced counters.
 - **Gaze:** smoothed time inside the gaze estimator, measured on the tracker
   thread and already included in the tracking total. `--dev` also reports the
-  approximate gaze angles, the confidence and each of its five factors, and
+  approximate gaze angles, the confidence and each of its six factors, and
   the eye-in-head component that shows the estimate is not head pose.
 
 Structured JSON-line logs rotate locally at:

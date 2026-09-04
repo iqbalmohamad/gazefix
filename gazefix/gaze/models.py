@@ -97,7 +97,7 @@ class GazeStatus(str, Enum):
 class GazeConfidence:
     """A deterministic heuristic in ``[0, 1]``, with every factor exposed.
 
-    ``score`` is the product of the five terms below, each itself in
+    ``score`` is the product of the six terms below, each itself in
     ``[0, 1]``. Every term is computed from a quantity the pipeline actually
     measures; none of them is a model probability, and none is invented when
     its input is missing (a missing input lowers the relevant term instead).
