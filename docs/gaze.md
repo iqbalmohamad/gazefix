@@ -247,6 +247,13 @@ Other error sources, in rough order of size:
   against a weak-perspective projection at 50 cm the error is under 0.11
   degrees at 30 degrees of eye rotation — negligible at normal webcam
   distances, growing if the face is very close to the lens.
+- **Head-pose range.** `pose_term` reads `HeadPose.yaw_deg`, which M1 derives
+  through `asin` and which therefore cannot exceed +/-90 degrees. A head turned
+  further than that is not distinguished from one turned less. In practice the
+  question does not arise: well before 90 degrees the far eye leaves the frame
+  or falls below `tracking_min_eye_width_px`, M1 stops reporting `TRACKED`, and
+  gaze reports `UNAVAILABLE` (measured: a 89-degree synthetic head yaw is
+  already unavailable).
 - **Backend iris quality.** Everything rests on MediaPipe's iris landmarks;
   glasses, reflections, strong side lighting and low resolution degrade them.
   Not characterised here — the Product Owner's smoke test is where this shows

@@ -539,3 +539,78 @@ def test_reset_clears_the_estimator_state() -> None:
     engine.estimate(gaze_scene(25.0).result())
     engine.reset()
     assert engine.estimate(gaze_scene(-25.0).result()).eye_yaw_deg == pytest.approx(-25.0, abs=1.0)
+
+
+def test_non_finite_eye_geometry_is_rejected_without_a_numpy_warning() -> None:
+    """A non-finite landmark must not reach the arithmetic on the frame path."""
+
+    import warnings
+    from dataclasses import replace
+
+    base = gaze_scene(15.0, 5.0).result()
+    for value in (float("nan"), float("inf"), float("-inf")):
+        eyes = {}
+        for side, eye in (("right", base.right_eye), ("left", base.left_eye)):
+            assert eye is not None and eye.iris is not None
+            iris = np.array(eye.iris, dtype=np.float32)
+            iris[0, 0] = np.float32(value)
+            iris.flags.writeable = False
+            eyes[side] = replace(eye, iris=iris)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            result = estimator().estimate(
+                replace(base, right_eye=eyes["right"], left_eye=eyes["left"])
+            )
+        assert result.status is GazeStatus.UNAVAILABLE
+
+
+def test_a_non_finite_eye_contour_is_rejected_too() -> None:
+    from dataclasses import replace
+
+    base = gaze_scene(15.0, 5.0).result()
+    eyes = {}
+    for side, eye in (("right", base.right_eye), ("left", base.left_eye)):
+        assert eye is not None
+        contour = np.array(eye.contour, dtype=np.float32)
+        contour[0, 0] = np.float32("nan")
+        contour.flags.writeable = False
+        eyes[side] = replace(eye, contour=contour)
+    result = estimator().estimate(replace(base, right_eye=eyes["right"], left_eye=eyes["left"]))
+    assert result.status is GazeStatus.UNAVAILABLE
+
+
+def test_a_non_orthonormal_head_rotation_still_yields_a_unit_direction() -> None:
+    """analysis.py accepts a determinant within 0.05 of 1; asin must stay in domain."""
+
+    from dataclasses import replace
+
+    from gazefix.tracking.models import HeadPose, readonly
+
+    base = gaze_scene(15.0, 5.0).result()
+    scaled = np.eye(3, dtype=np.float32) * np.float32(1.016)  # det ~= 1.049
+    pose = HeadPose(0.0, 0.0, 0.0, readonly(scaled, (3, 3)), readonly(np.zeros(3), (3,)))
+    result = estimator().estimate(replace(base, pose=pose))
+    assert result.status.has_direction
+    assert result.direction is not None
+    assert float(np.linalg.norm(result.direction)) == pytest.approx(1.0, abs=1e-5)
+    assert result.pitch_deg is not None and math.isfinite(result.pitch_deg)
+
+
+def test_a_degenerate_frame_geometry_yields_unavailable() -> None:
+    from dataclasses import replace
+
+    from gazefix.tracking.models import FrameGeometry
+
+    base = gaze_scene(15.0, 5.0).result()
+    for geometry in (FrameGeometry(0, 0), FrameGeometry(1, 1)):
+        result = estimator().estimate(replace(base, geometry=geometry))
+        assert result.status is GazeStatus.UNAVAILABLE
+
+
+def test_a_result_without_a_quality_signal_cannot_claim_confidence() -> None:
+    from dataclasses import replace
+
+    base = gaze_scene(15.0, 5.0).result()
+    result = estimator().estimate(replace(base, quality=None))
+    assert result.status is GazeStatus.UNAVAILABLE
+    assert result.confidence.score == 0.0

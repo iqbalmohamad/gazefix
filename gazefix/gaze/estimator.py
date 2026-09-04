@@ -319,6 +319,14 @@ class GeometricGazeEstimator:
         """One eye's head-frame direction components, or ``None`` if degenerate."""
 
         assert eye.iris is not None  # guarded by the caller
+        # M1's validate_landmarks already rejects non-finite landmarks, so this
+        # only bites on a hand-built result; check anyway, because letting a
+        # non-finite value reach the arithmetic below produces a NumPy warning
+        # on the frame path before the finiteness test further down catches it.
+        if not (
+            np.all(np.isfinite(eye.contour[:, :2])) and np.all(np.isfinite(eye.iris[:1, :2]))
+        ):
+            return None
         scale = np.array([geometry.width, geometry.height], dtype=np.float64)
         outer = np.asarray(eye.contour[topology.CONTOUR_OUTER_CORNER_POSITION, :2], dtype=np.float64) * scale
         inner = np.asarray(eye.contour[topology.CONTOUR_INNER_CORNER_POSITION, :2], dtype=np.float64) * scale
