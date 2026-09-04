@@ -135,9 +135,11 @@ class CameraCaptureWorker:
                 try:
                     self._prepared_closer.submit(refused)
                 except Exception:
-                    # The disposal thread refused the token; release inline
-                    # rather than lose it (may block briefly on the driver,
-                    # like the no-closer fallback below).
+                    # ``submit`` raises only when the token was NOT accepted
+                    # (queue insertion is the acceptance point), so this
+                    # worker still owns it: release inline rather than lose
+                    # it (may block briefly on the driver, like the
+                    # no-closer fallback below).
                     logger.exception(
                         "Prepared-camera disposal hand-off failed; releasing inline",
                         extra={"event": "prepared_handoff_error"},

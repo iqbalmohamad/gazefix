@@ -136,34 +136,51 @@ class PreparedCameraCloser:
     def submit(self, prepared: PreparedCamera) -> None:
         """Take over closing ``prepared``; returns at once, never touching the driver.
 
+        Queue insertion is the single, unambiguous ownership-acceptance
+        point. When this method returns normally the closer owns the token
+        (or found nothing to own); when it raises, the insertion did not
+        happen and the caller still owns the token. Nothing after the
+        insertion can raise for a recoverable failure: a cleanup-thread
+        launch failure is logged and retried later (by the next ``submit``
+        or ``join``) while the accepted token stays queued and counted.
+        Re-submitting a token the closer already holds is a structural no-op
+        (the queue never gains a duplicate), so a caller that could not
+        observe its earlier call completing may safely try again; the
+        claim-once handover underneath remains a final safety net, not the
+        mechanism that prevents duplicates.
+
         A token that was already claimed is dropped on the spot: its source
         belongs to the claimant, there is nothing left to release, and
         queueing it would count a no-op as outstanding work. (A claim that
-        lands after this check merely makes the queued release a no-op; the
-        claim-once handover keeps that safe.)
+        lands after this check merely makes the queued release a no-op.)
         """
 
         if not prepared.is_pending:
             return
         with self._condition:
-            self._queue.append(prepared)
-            self._ensure_thread()
+            if self._in_flight is prepared or any(
+                queued is prepared for queued in self._queue
+            ):
+                return  # already accepted; never duplicate the entry
+            self._queue.append(prepared)  # ownership commits here
+            self._ensure_thread()  # logged best effort; never raises Exception
 
     def _ensure_thread(self) -> None:
         """Launch the thread if work is queued and none is running (condition held).
 
-        A launch can fail when the process is out of threads. The token then
-        stays queued and counted as outstanding, and both the next ``submit``
-        and the next ``join`` try the launch again, so a transient failure
-        never strands a token silently.
+        Construction or start can fail (out of threads). That is recoverable:
+        the failure is logged, never raised, the queued tokens stay owned and
+        counted, and both the next ``submit`` and the next ``join`` try the
+        launch again — so a launch failure can neither strand a token nor
+        masquerade as a rejected submission.
         """
 
         if self._thread is not None or not self._queue:
             return
-        thread = Thread(target=self._run, name=self._name, daemon=True)
         try:
+            thread = Thread(target=self._run, name=self._name, daemon=True)
             thread.start()
-        except RuntimeError:
+        except Exception:
             logger.exception(
                 "Prepared camera cleanup thread could not start",
                 extra={"event": "prepared_camera_closer_start_error"},
@@ -179,7 +196,14 @@ class PreparedCameraCloser:
             return len(self._queue) + (1 if self._in_flight is not None else 0)
 
     def join(self, timeout: float) -> bool:
-        """Wait at most ``timeout`` seconds for every submitted token to be released."""
+        """Bounded best-effort wait for every accepted token to be released.
+
+        Retries the cleanup-thread launch first (a recoverable launch failure
+        is logged, never raised, and never touches the queue), then waits at
+        most ``timeout`` seconds. Returns ``True`` only when the queue and
+        the in-flight slot are actually empty, so a launch failure yields a
+        truthful ``False`` with every token still owned and counted.
+        """
 
         with self._condition:
             self._ensure_thread()

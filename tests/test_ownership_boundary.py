@@ -576,3 +576,181 @@ def test_case_i_accounting_stays_truthful_while_tokens_are_retained() -> None:
     assert runtime.stop() is True and runtime.state is RuntimeState.STOPPED
     assert runtime.cleanup_outstanding == 0 or runtime.join_cleanup(2.0)
     assert [w.close_calls for w in warms] == [1, 1, 1]
+
+
+# --- Closer acceptance contract (Cases J-N of the final review) -------------------
+
+
+class BrokenThread:
+    """Thread stand-in whose construction fails, armable per test."""
+
+    armed = True
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        if BrokenThread.armed:
+            raise RuntimeError("thread construction failed")
+        self.real = Thread(*args, **kwargs)  # type: ignore[arg-type]
+
+    def start(self) -> None:
+        self.real.start()
+
+    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+        return getattr(self.real, name)
+
+
+@pytest.fixture
+def broken_thread(monkeypatch):  # type: ignore[no-untyped-def]
+    from gazefix.camera import source as source_module
+
+    BrokenThread.armed = True
+    monkeypatch.setattr(source_module, "Thread", BrokenThread)
+    return BrokenThread
+
+
+def accepted_runtime_tokens(count: int = 3) -> tuple[PipelineRuntime, list[FakeCameraSource]]:
+    runtime = PipelineRuntime(settings(worker_join_timeout_s=0.2), source_factory=factory_for([]))
+    warms: list[FakeCameraSource] = []
+    for index in range(count):
+        warm, token = prepared_token(index)
+        runtime.select_camera(CameraDevice(index), token)
+        warms.append(warm)
+    return runtime, warms
+
+
+def queue_snapshot(runtime: PipelineRuntime) -> list[PreparedCamera]:
+    with runtime._closer._condition:
+        return list(runtime._closer._queue)
+
+
+def test_case_j_launch_failure_after_acceptance_is_accepted_not_retried(broken_thread, caplog) -> None:  # type: ignore[no-untyped-def]
+    caplog.set_level(logging.ERROR, logger="gazefix.camera.source")
+    runtime, warms = accepted_runtime_tokens()
+
+    assert runtime.stop() is False  # accepted work is queued but cannot run
+    assert len(runtime._retained_prepared) == 0  # removed from retained exactly once
+    assert runtime._closer.outstanding == 3  # accepted tokens stay counted
+    snapshot = queue_snapshot(runtime)
+    assert len(snapshot) == 3 and len({id(t) for t in snapshot}) == 3  # one entry each
+    assert runtime.state is RuntimeState.STOPPING  # cannot falsely finalize
+    assert events(caplog, "prepared_camera_closer_start_error")  # failure observable
+
+    broken_thread.armed = False
+    assert runtime.stop() is True and runtime.state is RuntimeState.STOPPED
+    assert runtime.join_cleanup(2.0)
+    assert [w.close_calls for w in warms] == [1, 1, 1]
+
+
+def test_case_k_repeated_launch_failures_never_duplicate_queue_entries(broken_thread) -> None:  # type: ignore[no-untyped-def]
+    runtime, warms = accepted_runtime_tokens()
+
+    multiplicities: list[int] = []
+    for _ in range(3):  # stop() / join_cleanup() / stop() cycles under the fault
+        assert runtime.stop() is False
+        assert runtime.join_cleanup(0.1) is False  # truthful, bounded
+        snapshot = queue_snapshot(runtime)
+        multiplicities.append(len(snapshot))
+        assert len({id(t) for t in snapshot}) == len(snapshot)  # no duplicates
+        assert len(runtime._retained_prepared) == 0  # exactly one durable owner
+        assert runtime._closer.outstanding == 3
+    assert multiplicities == [3, 3, 3]  # no growth across attempts
+    assert all(w.close_calls == 0 for w in warms)
+
+    broken_thread.armed = False
+    assert runtime.stop() is True
+    assert runtime.join_cleanup(2.0)
+    assert [w.close_calls for w in warms] == [1, 1, 1]
+
+
+def test_case_l_recovery_after_launch_failure_releases_everything_once(broken_thread) -> None:  # type: ignore[no-untyped-def]
+    runtime, warms = accepted_runtime_tokens()
+    assert runtime.stop() is False
+    assert runtime.state is RuntimeState.STOPPING
+
+    broken_thread.armed = False  # fault removed
+    assert runtime.join_cleanup(2.0)  # join itself relaunches the worker
+    assert [w.closed for w in warms] == [True, True, True]
+    assert [w.close_calls for w in warms] == [1, 1, 1]
+    assert runtime.stop() is True and runtime.state is RuntimeState.STOPPED
+    assert runtime.cleanup_outstanding == 0
+
+
+def test_case_m_join_during_launch_failure_is_bounded_truthful_and_lossless(broken_thread) -> None:  # type: ignore[no-untyped-def]
+    import time
+
+    closer = PreparedCameraCloser("test-close")
+    warms: list[FakeCameraSource] = []
+    for index in range(2):
+        warm, token = prepared_token(index)
+        closer.submit(token)  # accepted despite the launch failure
+        warms.append(warm)
+    assert closer.outstanding == 2
+
+    started = time.perf_counter()
+    assert closer.join(0.2) is False  # bounded, and never a false success
+    assert time.perf_counter() - started < 0.2 + 0.3
+    with closer._condition:
+        snapshot = list(closer._queue)
+    assert len(snapshot) == 2 and len({id(t) for t in snapshot}) == 2  # nothing lost or doubled
+    assert closer.outstanding == 2
+
+    broken_thread.armed = False
+    assert closer.join(2.0)  # recovery on a later call
+    assert [w.close_calls for w in warms] == [1, 1]
+
+
+def test_case_n_ownership_is_unambiguous_at_every_acceptance_boundary(broken_thread) -> None:  # type: ignore[no-untyped-def]
+    from collections import deque
+
+    broken_thread.armed = False
+
+    # 1. Failure BEFORE queue insertion: the caller keeps ownership.
+    class PendingCheckFails(PreparedCamera):
+        armed = True
+
+        @property
+        def is_pending(self) -> bool:  # type: ignore[override]
+            if PendingCheckFails.armed:
+                raise RuntimeError("pending check failed")
+            return super().is_pending
+
+    closer = PreparedCameraCloser("test-close-n1")
+    warm1 = FakeCameraSource()
+    device1 = CameraDevice(1)
+    token1 = PendingCheckFails(device1, warm1, warm1.open(device1))
+    with pytest.raises(RuntimeError, match="pending check failed"):
+        closer.submit(token1)
+    assert closer.outstanding == 0  # not accepted: still the caller's token
+    PendingCheckFails.armed = False
+    closer.submit(token1)  # the caller, still owning it, retries successfully
+    assert closer.join(2.0) and warm1.close_calls == 1
+
+    # 2. Failure DURING queue insertion: not accepted, nothing partially queued.
+    class AppendFails(deque):
+        armed = True
+
+        def append(self, item: object) -> None:  # type: ignore[override]
+            if AppendFails.armed:
+                raise RuntimeError("queue insertion failed")
+            super().append(item)
+
+    closer2 = PreparedCameraCloser("test-close-n2")
+    closer2._queue = AppendFails()
+    warm2, token2 = prepared_token(2)
+    with pytest.raises(RuntimeError, match="queue insertion failed"):
+        closer2.submit(token2)
+    assert closer2.outstanding == 0 and token2.is_pending  # caller still owns it
+    AppendFails.armed = False
+    closer2.submit(token2)
+    assert closer2.join(2.0) and warm2.close_calls == 1
+
+    # 3. Failure AFTER insertion (thread startup): accepted, closer owns it.
+    broken_thread.armed = True
+    closer3 = PreparedCameraCloser("test-close-n3")
+    warm3, token3 = prepared_token(3)
+    closer3.submit(token3)  # returns normally: ownership committed
+    assert closer3.outstanding == 1
+    closer3.submit(token3)  # a confused retry must not duplicate the entry
+    with closer3._condition:
+        assert len(closer3._queue) == 1
+    broken_thread.armed = False
+    assert closer3.join(2.0) and warm3.close_calls == 1

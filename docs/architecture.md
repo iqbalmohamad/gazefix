@@ -298,9 +298,14 @@ and every closer has exactly one owner:
 
 Shared mechanics of every closer:
 
-- `submit` transfers the duty to close a token and returns at once; a token
-  that was already claimed is dropped on the spot, so a no-op is never
-  counted as outstanding work.
+- `submit` transfers the duty to close a token and returns at once. Queue
+  insertion is the single acceptance point: a normal return means the closer
+  owns the token, an exception means it does not and the caller still owns
+  it. A cleanup-thread launch failure after acceptance is logged, never
+  raised, and re-submitting an accepted token is a structural no-op, so
+  repeated launch failures can never duplicate a queue entry. A token that
+  was already claimed is dropped on the spot, so a no-op is never counted as
+  outstanding work.
 - The token's claim-once handover makes the closer safe against every other
   party that still holds a reference (the capture worker's own cleanup, the UI
   adopting a discovery result, another closer): whichever side claims first
