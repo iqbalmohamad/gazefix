@@ -331,6 +331,37 @@ Shared mechanics of every closer:
   exit, exactly like a capture worker abandoned inside a driver call, and the
   tokens queued behind it stay counted rather than forgotten.
 
+#### Known limitation: ambiguous `Thread.start()` failures in the cleanup worker
+
+The launch state machine above has one accepted gap. `PreparedCameraCloser`
+cannot definitively distinguish every ambiguous `Thread.start()` failure: in
+CPython the native thread is created before `start()` waits on the
+interpreter bootstrap, so when `start()` raises inside that window, native
+thread creation may already have occurred while the bootstrap state is not
+yet observable from outside. Under fault injection in exactly that window, a
+stale native cleanup worker may remain alive but untracked by lifecycle
+accounting, and a replacement worker may later be launched and run beside
+it. The single-drainer guard still holds — the rival retires on entry
+without touching the queue or the in-flight slot, so queue and in-flight
+state are never mutated concurrently — and camera cleanup still completes.
+The consequence is confined to bookkeeping: runtime lifecycle accounting may
+report `STOPPED` while the stale worker thread is still alive.
+
+This behaviour has been reproduced only through injected thread-bootstrap
+failures (test doubles that make `Thread.start()` raise after the native
+thread exists). It has not been observed during normal runtime or
+physical-camera use.
+
+Classification:
+
+- Known limitation, recorded here rather than worked around in code.
+- Non-blocking for M0 / the MVP foundation.
+- Production-hardening backlog item.
+
+Revisit if real shutdown hangs appear on Windows, if camera locks linger
+after application close, or if cleanup-thread leaks become observable — and
+in any case before M10 / production packaging and hardening.
+
 **Application shutdown aggregates the owners.** `closeEvent` performs no
 release at all: against one deadline (`worker_join_timeout_s`) it signals
 discovery, calls `runtime.stop()` (which bounds its own joins by the same
