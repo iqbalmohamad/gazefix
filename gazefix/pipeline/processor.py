@@ -73,8 +73,17 @@ class ProcessingWorker:
         self._input.wake_all()
 
     def join(self, timeout: float | None = None) -> bool:
-        self._thread.join(timeout)
+        """Wait up to ``timeout`` for the thread; a thread that never started needs no wait."""
+
+        if self.started:
+            self._thread.join(timeout)
         return not self._thread.is_alive()
+
+    @property
+    def started(self) -> bool:
+        """Whether ``start`` launched the thread (``Thread.ident`` is set once it runs)."""
+
+        return self._thread.ident is not None
 
     @property
     def is_alive(self) -> bool:
@@ -85,7 +94,9 @@ class ProcessingWorker:
         last_sequence = 0
         try:
             while not self._stop_event.is_set():
-                item = self._input.wait_for_latest(last_sequence, timeout=0.25)
+                item = self._input.wait_for_latest(
+                    last_sequence, timeout=0.25, cancelled=self._stop_event.is_set
+                )
                 if item is None:
                     continue
                 last_sequence = item.sequence

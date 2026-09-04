@@ -7,9 +7,9 @@ from threading import Event, Thread
 import time
 
 import cv2
-import numpy as np
 import pytest
 
+from camera_fakes import FakeVideoCapture
 from gazefix.camera import source as source_module
 from gazefix.camera.backends import default_camera_backends, ordered_backends_for_device
 from gazefix.camera.environment import MSMF_HW_TRANSFORMS_ENV, apply_capture_environment
@@ -26,62 +26,9 @@ BACKEND_A = CameraBackend(101, "A")
 BACKEND_B = CameraBackend(102, "B")
 
 
-class FakeVideoCapture:
-    """Mimics the subset of cv2.VideoCapture the source uses."""
-
-    behaviours: dict[int, str] = {}
-    instances: list["FakeVideoCapture"] = []
-    open_gate: Event | None = None
-
-    def __init__(self) -> None:
-        FakeVideoCapture.instances.append(self)
-        self.opened = False
-        self.released = 0
-        self.api: int | None = None
-        self.reads = 0
-        self.props: dict[int, float] = {}
-
-    def open(self, index: int, api: int) -> bool:
-        self.api = api
-        if FakeVideoCapture.open_gate is not None:
-            FakeVideoCapture.open_gate.wait(5.0)
-        behaviour = FakeVideoCapture.behaviours.get(api, "fails")
-        self.opened = behaviour != "fails"
-        return self.opened
-
-    def isOpened(self) -> bool:
-        return self.opened
-
-    def set(self, prop: int, value: float) -> bool:
-        self.props[prop] = value
-        return True
-
-    def get(self, prop: int) -> float:
-        return {
-            cv2.CAP_PROP_FRAME_WIDTH: 640.0,
-            cv2.CAP_PROP_FRAME_HEIGHT: 480.0,
-            cv2.CAP_PROP_FPS: 30.0,
-        }.get(prop, 0.0)
-
-    def getBackendName(self) -> str:
-        return f"FAKE{self.api}"
-
-    def read(self):  # type: ignore[no-untyped-def]
-        self.reads += 1
-        if not self.opened or FakeVideoCapture.behaviours.get(self.api) == "no_frames":
-            return False, None
-        return True, np.zeros((2, 2, 3), dtype=np.uint8)
-
-    def release(self) -> None:
-        self.released += 1
-        self.opened = False
-
-
 @pytest.fixture
 def fake_cv(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
-    FakeVideoCapture.behaviours = {}
-    FakeVideoCapture.instances = []
-    FakeVideoCapture.open_gate = None
+    FakeVideoCapture.reset()
     monkeypatch.setattr(source_module.cv2, "VideoCapture", FakeVideoCapture)
     monkeypatch.setattr(
         source_module,

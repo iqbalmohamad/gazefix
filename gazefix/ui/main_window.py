@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from gazefix.camera.capture import SourceFactory
 from gazefix.camera.discovery import CameraDiscoveryService, DiscoveryResult
 from gazefix.camera.models import CameraDevice, CaptureState, CaptureStatus
-from gazefix.camera.source import PreparedCamera
+from gazefix.camera.source import PreparedCamera, PreparedCameraCloser
 from gazefix.config import AppSettings
 from gazefix.pipeline.runtime import PipelineRuntime
 
@@ -50,6 +50,12 @@ class MainWindow(QMainWindow):
         self._signals.discovery_finished.connect(self._on_discovery_finished)
         self._signals.discovery_error.connect(self._on_discovery_error)
 
+        # Cleanup is owner-scoped: the runtime owns its own cleanup thread
+        # (created inside PipelineRuntime, never shared, so discovery work
+        # can never appear as runtime lifecycle state), and the window owns a
+        # separate one for discovery's unadopted prepared cameras. closeEvent
+        # joins both, bounded, within the one shutdown deadline.
+        self._discovery_closer = PreparedCameraCloser("gazefix-discovery-prepared-close")
         self._runtime = PipelineRuntime(
             settings,
             on_status=self._signals.capture_status.emit,
@@ -60,6 +66,7 @@ class MainWindow(QMainWindow):
             settings,
             on_finished=self._signals.discovery_finished.emit,
             on_error=self._signals.discovery_error.emit,
+            prepared_closer=self._discovery_closer,
             **discovery_kwargs,
         )
         self._devices: list[CameraDevice] = []
@@ -322,10 +329,19 @@ class MainWindow(QMainWindow):
         )
         # Signal discovery first so both workers wind down concurrently, then
         # bound the whole close by one join timeout instead of two in sequence.
+        # Every wait below is bounded by that deadline and none of them
+        # releases a camera on this thread: the capture worker releases its
+        # own camera, and unadopted prepared cameras go to the cleanup thread.
         deadline = time.perf_counter() + self._settings.worker_join_timeout_s
         self._discovery.request_stop()
         pipeline_stopped = self._runtime.stop()
         discovery_stopped = self._discovery.join(
+            max(0.0, deadline - time.perf_counter())
+        )
+        runtime_cleanup_done = self._runtime.join_cleanup(
+            max(0.0, deadline - time.perf_counter())
+        )
+        discovery_cleanup_done = self._discovery_closer.join(
             max(0.0, deadline - time.perf_counter())
         )
         if not discovery_stopped:
@@ -334,9 +350,26 @@ class MainWindow(QMainWindow):
                 extra={"event": "discovery_shutdown_timeout"},
             )
         if not pipeline_stopped:
+            # The runtime stays STOPPING while the abandoned worker is alive;
+            # it is a daemon thread and ends with the process. Nothing here
+            # waits on it further, so the window never blocks the UI thread
+            # beyond the single join deadline above.
             logger.error(
                 "Pipeline worker did not stop before timeout",
-                extra={"event": "pipeline_shutdown_timeout"},
+                extra={
+                    "event": "pipeline_shutdown_timeout",
+                    "runtime_state": self._runtime.state.value,
+                },
+            )
+        if not (runtime_cleanup_done and discovery_cleanup_done):
+            # Say which owner still has work; each count is that owner's own.
+            logger.error(
+                "Prepared camera release still outstanding at close",
+                extra={
+                    "event": "prepared_cleanup_timeout",
+                    "runtime_cleanup_outstanding": self._runtime.cleanup_outstanding,
+                    "discovery_cleanup_outstanding": self._discovery_closer.outstanding,
+                },
             )
         event.accept()
 

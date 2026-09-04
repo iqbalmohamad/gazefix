@@ -132,10 +132,10 @@ permanent: every open starts from the current preference and the platform order.
 ### Shutdown
 
 On window close, timers stop, discovery is told to stop, capture and processing are
-asked to stop, and all workers are joined against a single deadline
-(`worker_join_timeout_s`) rather than one timeout per worker in sequence. Capture
-gets a short grace period so an ordinary read can return and the owning thread can
-release its source safely.
+asked to stop, and all workers and the prepared-camera cleanup thread are joined
+against a single deadline (`worker_join_timeout_s`) rather than one timeout per
+worker in sequence. Capture gets a short grace period so an ordinary read can
+return and the owning thread can release its source safely.
 
 What can and cannot be cancelled:
 
@@ -158,6 +158,221 @@ What can and cannot be cancelled:
   abandoned inside a driver call; the daemon thread then ends with the process.
 
 Timeouts are logged explicitly rather than silently hiding a stuck camera driver.
+
+### Runtime state is derived from what the runtime owns
+
+`PipelineRuntime` records two facts of its own: that `stop()` (or a `start()`
+that failed part-way) has been requested, and, once shutdown completed, that it
+is final. Everything else is read from the things it owns when it is asked for
+(`PipelineRuntime.state`): whether a worker thread has been started
+(`Thread.ident`), whether one is alive, and whether a runtime-owned
+prepared-camera release is still outstanding.
+
+Cleanup is owner-scoped. The runtime creates its own cleanup thread in its
+constructor and nothing else can submit work to it through the runtime's API;
+discovery's cleanup lives on a separate closer owned by the window. Work owned
+by discovery therefore cannot appear in, or mutate, the runtime's lifecycle.
+
+```text
+NEW       no worker thread started, stop() not requested
+RUNNING   a worker thread started, stop() not requested
+STOPPING  stop() requested; a worker thread is alive or a runtime-owned
+          release is still outstanding
+STOPPED   stop() requested; nothing runtime-owned is alive or outstanding.
+          A latch: entered once, under the lifecycle lock, and never left.
+```
+
+`STOPPED` is monotonic by construction: it is reported only after the latch is
+set, the latch is set only under the lifecycle lock when no owned worker is
+alive and no runtime-owned release is outstanding, and it is never cleared.
+
+Runtime-owned cleanup is counted along the whole chain a prepared camera
+travels at shutdown, so the latch decision can never miss one in transfer:
+
+```text
+capture-worker slots        pending_prepared_count(): unclaimed tokens still
+                            held in the worker's request/orphan slots
+hand-off                    a counter raised, under the lifecycle lock, before
+                            any token leaves the slots and lowered when the
+                            transfer attempt ends, however it ends
+runtime-retained storage    tokens extracted from the worker but not yet
+                            accepted by the cleanup thread, held durably by
+                            the runtime across failed attempts
+cleanup thread              queued tokens plus the release in flight
+```
+
+Every step of the transfer is exception-safe. Extraction is transactional per
+token: the worker appends a token to the runtime's retained storage first and
+clears its slot only afterwards, so a failure mid-extraction leaves the
+remainder worker-owned and everything already moved runtime-retained.
+Registration is resumable: a token leaves retained storage only after the
+cleanup thread accepted it, so a failure leaves the failed token and the
+unsubmitted remainder retained, and the next `stop()` or `join_cleanup()`
+(which re-attempts registration before waiting) picks up exactly where the
+failed attempt stopped. A retry that re-submits a token the closer already
+holds is a no-op thanks to the claim-once handover. An exception in the
+transfer is logged (`prepared_handoff_error`) and never moves a token out of
+ownership; interruption exceptions propagate normally with ownership intact.
+
+At every instant a token accepted before finalization is in at least one of
+the counts (transitions overlap conservatively rather than gap), and the
+finalization check sums all of them under the lifecycle lock. The sum,
+exposed as `cleanup_outstanding`, is an activity indicator rather than an
+exact camera count: a token moving between categories is briefly counted in
+two of them, so nonzero means "cleanup work remains" and zero means "none". Worker
+threads only move from alive to exited, and the two ways runtime-owned
+cleanup is registered are serialized with the latch: the shutdown path raises
+the hand-off counter under the lifecycle lock before touching the worker's
+slots, and a refused `select_camera` submits under the lifecycle lock itself.
+A pre-existing token therefore always denies the latch until its release has
+returned; only a token registered after the latch (a genuinely new refused
+request) becomes a detached disposal: the cleanup thread still releases it
+(never on the caller's thread, never leaked, the claim-once handover still
+rules out a double close), it is visible to application-level accounting
+through `cleanup_outstanding`, but it is no longer lifecycle work and the
+latched `STOPPED` holds. `STOPPED` can never transition back to `STOPPING`,
+and `stop() == True` can never race with runtime-owned cleanup appearing
+afterwards. A `stop()` called after the latch returns `True` immediately.
+
+The cleanup thread itself is private to the runtime; the public surface is
+`cleanup_outstanding` (the summed count above) and `join_cleanup(timeout)`
+(a bounded drain wait for application shutdown), so no caller can submit
+work into the runtime's accounting.
+
+**Transactional start.** `start()` launches the processing worker and then the
+capture worker. If the second launch raises, the runtime marks itself spent,
+signals the worker that did start, joins it against one bounded deadline, hands
+any pending prepared camera to the cleanup thread, and re-raises the original
+error. A caller never inherits a live thread from a failed `start()`; if the
+started worker outlives that deadline, `state` reads `STOPPING` (never `NEW`)
+and `stop()` keeps tracking it. Joining a worker that never started is a no-op.
+
+**Truthful stop.** `stop()` signals both workers, hands the prepared cameras the
+worker can no longer adopt to the runtime's cleanup thread at once (so their
+release overlaps the joins rather than starting after them), joins the workers
+against one deadline (`worker_join_timeout_s`), sweeps once more for a token the
+worker orphaned while winding down, and waits, still within the same deadline,
+for those releases. Then it reconciles under the lifecycle lock: it reads
+whether either worker thread is alive and whether any runtime-owned release is
+outstanding, latches `STOPPED` when nothing is left, and that final check is
+both the return value and what `state` reports. Two things are deliberately kept apart: whether the deadline ran out
+during the call (`deadline_exhausted` in the log) and whether owned work is
+alive at the moment of return. A join that timed out but whose thread exited
+before the final check yields `True` and `STOPPED`; a thread still inside an
+uncancellable driver call yields `False` and `STOPPING`, logged as
+`pipeline_shutdown_timeout` with which worker or release survived. Calling
+`stop()` again joins whatever survived against a fresh, equally bounded deadline
+and returns `True` only once nothing owned is left; there is no flag a repeated
+call can clear to manufacture a success. The terminal `pipeline_stopped` line is
+written exactly once, on the call that first observes everything gone.
+
+After `stop()` has been requested the runtime accepts no further camera
+requests: `select_camera` publishes nothing, returns the current generation, and
+hands a prepared camera it was given to the runtime's cleanup thread, under the
+lifecycle lock as described above (the capture worker enforces the same
+never-leak rule for requests that reach it directly after its stop event is
+set; within the runtime that path is unreachable because `select_camera`
+refuses first). A runtime is single-use because Python threads cannot be
+restarted; `start()` after `stop()` raises instead of pretending, and a fresh
+`PipelineRuntime` is the restart path.
+
+### Prepared-camera cleanup is owner-scoped work, off the UI thread
+
+Releasing a camera is a driver call with no upper bound, so no thread that must
+stay responsive performs one. The capture worker releases the camera it reads on
+its own thread, and only there. Prepared cameras that nobody adopted are handed
+to a `PreparedCameraCloser`, a daemon thread with a condition-guarded queue,
+and every closer has exactly one owner:
+
+- The **runtime's closer** is created inside `PipelineRuntime`, is not
+  injectable, and is not exposed (the runtime offers only `cleanup_outstanding`
+  and `join_cleanup`), so only the runtime ever submits to it: the tokens
+  `stop()` takes from the capture worker, and the token of a `select_camera`
+  refused after shutdown began. Its `outstanding` count is therefore
+  runtime-owned work by construction (or, after the `STOPPED` latch, detached
+  disposals).
+- The **discovery closer** is created by the window and given to the
+  discovery service, which hands it the unadopted token its `join` would
+  otherwise release on the calling thread. Its work is discovery-owned and
+  never touches the runtime's lifecycle.
+
+Shared mechanics of every closer:
+
+- `submit` transfers the duty to close a token and returns at once. Queue
+  insertion is the single acceptance point: a normal return means the closer
+  owns the token, an exception means it does not and the caller still owns
+  it. A cleanup-thread launch failure after acceptance is logged, never
+  raised, and re-submitting an accepted token is a structural no-op, so
+  repeated launch failures can never duplicate a queue entry. A token that
+  was already claimed is dropped on the spot, so a no-op is never counted as
+  outstanding work.
+- The token's claim-once handover makes the closer safe against every other
+  party that still holds a reference (the capture worker's own cleanup, the UI
+  adopting a discovery result, another closer): whichever side claims first
+  releases, the other finds nothing to do, so a token is never released twice
+  or by two threads at once. Nobody reads an unclaimed source, so a release
+  never overlaps a read.
+- A release counts as outstanding until the driver call returns; `join` waits
+  at most the time it is given, and a failed worker launch is retried on the
+  next `submit` or `join` with the token still counted.
+- At most one worker ever drains a closer, enforced by a launch state machine:
+  the worker reference is assigned before `start()` is attempted, so a
+  `start()` that raises leaves the attempt UNCERTAIN (in CPython the native
+  thread is created before `start()` waits on its bootstrap, so the worker may
+  exist despite the exception) and no rival is launched until the attempt is
+  resolved — the worker announces itself on entry (running), or its bootstrap
+  provably ran and the thread terminated (restartable), or a dedicated wait
+  inside `join` passes with the bootstrap never begun (never launched). As
+  defense in depth, the drain loop admits exactly one active drainer: a
+  duplicate thread that materializes late retires on entry without touching
+  the queue or the in-flight slot, so overlapping drainers are structurally
+  impossible whatever a launch heuristic concludes.
+- A release that never returns keeps the daemon thread alive until process
+  exit, exactly like a capture worker abandoned inside a driver call, and the
+  tokens queued behind it stay counted rather than forgotten.
+
+#### Known limitation: ambiguous `Thread.start()` failures in the cleanup worker
+
+The launch state machine above has one accepted gap. `PreparedCameraCloser`
+cannot definitively distinguish every ambiguous `Thread.start()` failure: in
+CPython the native thread is created before `start()` waits on the
+interpreter bootstrap, so when `start()` raises inside that window, native
+thread creation may already have occurred while the bootstrap state is not
+yet observable from outside. Under fault injection in exactly that window, a
+stale native cleanup worker may remain alive but untracked by lifecycle
+accounting, and a replacement worker may later be launched and run beside
+it. The single-drainer guard still holds — the rival retires on entry
+without touching the queue or the in-flight slot, so queue and in-flight
+state are never mutated concurrently — and camera cleanup still completes.
+The consequence is confined to bookkeeping: runtime lifecycle accounting may
+report `STOPPED` while the stale worker thread is still alive.
+
+This behaviour has been reproduced only through injected thread-bootstrap
+failures (test doubles that make `Thread.start()` raise after the native
+thread exists). It has not been observed during normal runtime or
+physical-camera use.
+
+Classification:
+
+- Known limitation, recorded here rather than worked around in code.
+- Non-blocking for M0 / the MVP foundation.
+- Production-hardening backlog item.
+
+Revisit if real shutdown hangs appear on Windows, if camera locks linger
+after application close, or if cleanup-thread leaks become observable — and
+in any case before M10 / production packaging and hardening.
+
+**Application shutdown aggregates the owners.** `closeEvent` performs no
+release at all: against one deadline (`worker_join_timeout_s`) it signals
+discovery, calls `runtime.stop()` (which bounds its own joins by the same
+duration), joins the discovery thread, then joins the runtime's closer and the
+discovery closer with whatever remains of the deadline. Runtime success is the
+runtime's own verdict; overall shutdown success is the conjunction, and each
+shortfall is attributed to its owner: `pipeline_shutdown_timeout` for the
+runtime's workers or cleanup, `discovery_shutdown_timeout` for the discovery
+thread, and `prepared_cleanup_timeout` with separate
+`runtime_cleanup_outstanding` and `discovery_cleanup_outstanding` counts for
+the closers. The Qt thread never waits past the one deadline.
 
 ## Backend and discovery policy
 
@@ -202,9 +417,40 @@ this pipeline, and Milestone 0 is designed to perform it as rarely as possible:
 Every open, release, and probe logs its duration (`open_ms`, `configure_ms`,
 `first_frame_ms`, `release_ms`, `probe_ms`, `discovery_ms`) together with the
 backend requested and reported and the value of the hardware-transform switch, so a
-run on physical hardware shows where the time goes without extra tooling. The
-diagnostic tool reports the same timings per index and backend and accepts
-`--msmf-hw-transforms 0|1` for an A/B comparison on the same machine.
+run on physical hardware shows where the time goes without extra tooling.
+
+### One open path for production and the diagnostic
+
+`open_validated_backend` in `gazefix/camera/source.py` is the only code that
+opens, configures, and first-frame validates a `VideoCapture` on one backend. It
+returns a `BackendOpenOutcome` whose timing boundaries are fixed there:
+
+```text
+open_ms         VideoCapture.open alone (DirectShow gets width/height as open
+                parameters and builds its graph inside this call)
+configure_ms    the width/height/FPS property reads that decide what to set,
+                the set calls for the values that differ, and the buffer hint;
+                format_sets_applied counts the sets that actually ran
+first_frame_ms  the bounded validation reads including the retry delays between
+                them; validation_reads counts the attempts
+```
+
+`OpenCVCameraSource` runs it per backend and owns the fallback decision and the
+release; the capture worker never sees a capture that did not validate. The
+command-line diagnostic (`gazefix/camera/diagnostics.py`) runs the same function
+per index and backend with the same `AppSettings`, so its `open_ms`,
+`configure_ms`, and `first_frame_ms` mean exactly what the `camera_opened` log
+event means, and `--msmf-hw-transforms 0|1` exports the same environment switch
+before OpenCV loads for an A/B comparison on the same machine. The diagnostic
+imports the source module; nothing in production imports the diagnostic, and the
+diagnostic does not import Qt.
+
+The diagnostic still differs from the running application on purpose, and the
+differences are documented in its module docstring and the README: it probes each
+backend alone without fallback, it does not sample a backend that failed
+validation, its sampling loop is not the capture worker's read loop, and it
+releases on its own thread. Its numbers are therefore per-backend production open
+costs, not a prediction of application start-up time.
 
 ## Processing seam
 

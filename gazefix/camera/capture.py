@@ -19,6 +19,7 @@ from gazefix.camera.source import (
     CameraSource,
     OpenCVCameraSource,
     PreparedCamera,
+    PreparedCameraCloser,
 )
 from gazefix.config import AppSettings
 from gazefix.diagnostics.metrics import PipelineMetrics
@@ -51,12 +52,21 @@ class CameraCaptureWorker:
         metrics: PipelineMetrics,
         on_status: StatusCallback | None = None,
         source_factory: SourceFactory = OpenCVCameraSource,
+        prepared_closer: PreparedCameraCloser | None = None,
     ) -> None:
         self._settings = settings
         self._output = output_buffer
         self._metrics = metrics
         self._on_status = on_status or (lambda _status: None)
         self._source_factory = source_factory
+        # Releases prepared cameras refused after ``stop`` off the caller's
+        # thread; without one they are released on the caller's thread. The
+        # runtime passes its own cleanup thread here. Within the runtime this
+        # refusal path is unreachable (its ``select_camera`` refuses first,
+        # under the lifecycle lock), so a submission from here can never race
+        # the runtime's shutdown finalization; direct users of this worker
+        # get the same never-leak, never-block-the-caller disposal behaviour.
+        self._prepared_closer = prepared_closer
         self._stop_event = Event()
         self._command_event = Event()
         self._request_lock = Lock()
@@ -88,23 +98,61 @@ class CameraCaptureWorker:
         ownership passes to the worker here; a prepared camera belonging to a
         request that is superseded before it is applied is closed on the worker
         thread, never on the caller's.
+
+        The worker owns prepared cameras only while it is running. Once
+        ``stop()`` has been called the loop will never apply another request
+        and the thread may already have run its cleanup, so a request that
+        arrives afterwards is refused: nothing is published, the current
+        generation is returned unchanged, and the prepared camera is handed
+        to the prepared-camera closer when the worker has one, otherwise
+        released on the caller's thread (nobody is reading it, so that
+        release is safe; it may block on the driver).
         """
 
         # Publish, wake, and abort under one lock: the worker consumes requests
         # under the same lock, so a wake-up can never go stale and the abort can
-        # never hit the open the worker starts for this very request.
+        # never hit the open the worker starts for this very request. ``stop``
+        # sets the stop event before taking this lock, so a request that sees
+        # it clear here is guaranteed to be found by the final cleanup.
         with self._request_lock:
-            self._request_id += 1
-            request_id = self._request_id
-            self._requested_device = device
-            previous = self._requested_prepared
-            self._requested_prepared = prepared
-            if previous is not None:
-                self._orphaned_prepared.append(previous)
-            self._command_event.set()
-            self._abort_open_in_progress(
-                wanted=device, stopping=False, request_id=request_id
-            )
+            if self._stop_event.is_set():
+                refused, request_id = prepared, self._request_id
+            else:
+                refused = None
+                self._request_id += 1
+                request_id = self._request_id
+                self._requested_device = device
+                previous = self._requested_prepared
+                self._requested_prepared = prepared
+                if previous is not None:
+                    self._orphaned_prepared.append(previous)
+                self._command_event.set()
+                self._abort_open_in_progress(
+                    wanted=device, stopping=False, request_id=request_id
+                )
+        if refused is not None:
+            if self._prepared_closer is not None:
+                try:
+                    self._prepared_closer.submit(refused)
+                except Exception:
+                    # ``submit`` raises only when the token was NOT accepted
+                    # (queue insertion is the acceptance point), so this
+                    # worker still owns it: release inline rather than lose
+                    # it (may block briefly on the driver, like the
+                    # no-closer fallback below).
+                    logger.exception(
+                        "Prepared-camera disposal hand-off failed; releasing inline",
+                        extra={"event": "prepared_handoff_error"},
+                    )
+                    refused.close_if_unclaimed()
+            elif refused.close_if_unclaimed():
+                logger.info(
+                    "Closed prepared camera of a request that arrived after stop",
+                    extra={
+                        "event": "prepared_camera_discarded",
+                        "camera_index": refused.device.index,
+                    },
+                )
         return request_id
 
     def stop(self) -> None:
@@ -130,18 +178,106 @@ class CameraCaptureWorker:
             source.interrupt()
 
     def join(self, timeout: float | None = None) -> bool:
-        self._thread.join(timeout)
+        """Wait up to ``timeout`` for the thread; a thread that never started needs no wait."""
+
+        if self.started:
+            self._thread.join(timeout)
         return not self._thread.is_alive()
 
-    def close_pending_prepared(self) -> None:
-        """Close prepared cameras the worker will never adopt (after it stopped)."""
+    @property
+    def started(self) -> bool:
+        """Whether ``start`` launched the thread (``Thread.ident`` is set once it runs)."""
 
-        self._close_orphaned_prepared()
+        return self._thread.ident is not None
+
+    def pending_prepared_count(self) -> int:
+        """How many unclaimed prepared cameras are still held in the request slots.
+
+        Shutdown accounting: a token accepted before shutdown is runtime-owned
+        work while it sits here, so the runtime's finalization check counts it
+        until ``take_pending_prepared`` moves it towards the cleanup thread.
+        The snapshot is taken under the request lock; the claim state is read
+        afterwards so no token lock nests inside it.
+        """
+
         with self._request_lock:
-            pending = self._requested_prepared
-            self._requested_prepared = None
-        if pending is not None:
-            pending.close_if_unclaimed()
+            tokens = list(self._orphaned_prepared)
+            if self._requested_prepared is not None:
+                tokens.append(self._requested_prepared)
+        return sum(1 for token in tokens if token.is_pending)
+
+    def drain_pending_prepared_into(self, destination: list[PreparedCamera]) -> None:
+        """Move every prepared camera the worker has not applied into ``destination``.
+
+        Transactional per token: each token is appended to ``destination``
+        first and removed from its slot only afterwards, so if an append
+        raises, that token and everything behind it are still in the slots
+        and remain worker-owned; tokens already appended belong to the
+        destination's owner. At no instant is any token in neither place
+        (for an instant it may be in both, which over-counts, never loses).
+        Meant for shutdown, once the worker has been told to stop; the whole
+        move runs under the request lock and performs no blocking call.
+        """
+
+        with self._request_lock:
+            while self._orphaned_prepared:
+                destination.append(self._orphaned_prepared[0])
+                self._orphaned_prepared.pop(0)
+            if self._requested_prepared is not None:
+                destination.append(self._requested_prepared)
+                self._requested_prepared = None
+
+    def take_pending_prepared(self) -> list[PreparedCamera]:
+        """Hand over every prepared camera the worker has not applied.
+
+        Meant for shutdown, once the worker has been told to stop and will
+        therefore never adopt another token. The tokens are swapped out under
+        the request lock, so exactly one party ends up holding each of them;
+        together with the token's claim-once release that rules out a double
+        close between this worker's own cleanup and a runtime that takes the
+        tokens because the worker was abandoned inside a driver call.
+        """
+
+        with self._request_lock:
+            pending = list(self._orphaned_prepared)
+            self._orphaned_prepared = []
+            if self._requested_prepared is not None:
+                pending.append(self._requested_prepared)
+                self._requested_prepared = None
+        return pending
+
+    def close_pending_prepared(self) -> None:
+        """Release, on the calling thread, every prepared camera the worker will never adopt.
+
+        Each token stays in its slot until its release attempt has returned,
+        so an exception at any point leaves every unreleased token still
+        owned and counted; a re-run resumes where it stopped, and the token's
+        claim-once handover makes a repeated attempt a no-op, never a double
+        close.
+        """
+
+        while True:
+            with self._request_lock:
+                if self._orphaned_prepared:
+                    prepared = self._orphaned_prepared[0]
+                elif self._requested_prepared is not None:
+                    prepared = self._requested_prepared
+                else:
+                    return
+            released = prepared.close_if_unclaimed()  # absorbs source errors
+            with self._request_lock:
+                if self._orphaned_prepared and self._orphaned_prepared[0] is prepared:
+                    self._orphaned_prepared.pop(0)
+                elif self._requested_prepared is prepared:
+                    self._requested_prepared = None
+            if released:
+                logger.info(
+                    "Closed prepared camera the worker never adopted",
+                    extra={
+                        "event": "prepared_camera_discarded",
+                        "camera_index": prepared.device.index,
+                    },
+                )
 
     @property
     def is_alive(self) -> bool:
@@ -416,6 +552,11 @@ class CameraCaptureWorker:
         which backs off with ``open_failures``).
         """
 
+        if self._superseded(request_id):
+            # Stopping, or already replaced by a newer request: do not touch
+            # the token (the loop closes orphaned ones itself and the shutdown
+            # path takes whatever is still pending), emit nothing, open nothing.
+            return None, None
         if prepared is not None and prepared.device != device:
             prepared.close_if_unclaimed()
             prepared = None
