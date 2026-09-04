@@ -168,7 +168,7 @@ def test_mirrored_flips_x_and_keeps_anatomical_sides() -> None:
     assert mirrored.pose.pitch_deg == original.pose.pitch_deg
     assert mirrored.pose.translation == pytest.approx((-0.0, 0.0, -45.0))
 
-    for field in ("status", "sequence", "captured_at_ns", "camera_request_id", "timing", "message",
+    for field in ("status", "capture_sequence", "captured_at_ns", "camera_request_id", "timing", "message",
                   "faces_detected", "iris_available", "quality", "stabilized"):
         assert getattr(mirrored, field) == getattr(original, field), field
 
