@@ -1,146 +1,236 @@
 # GazeFix — Current Engineering Assignment
 
-**Active milestone: M1 — Face and Eye Tracking**
+**Active milestone: M2 — Gaze Estimation**
 
 **M0 status: PASS / CLOSED / FROZEN**
+
+**M1 status: PASS / CLOSED / FROZEN**
 
 **Assignment date: 2026-09-04**
 
 ## Authority and roles
 
-The repository `01-GazeFix-Product-Requirements-Document-v1.1.md` remains the unchanged higher-level source of truth for product scope, requirements, constraints, and milestone gates. This assignment defines the currently authorized engineering work. The PRD's original M0-first starting priority is historical; this assignment advances the active milestone after its gate has closed, without changing the product requirements. If a material conflict exists, escalate it rather than editing the PRD or silently changing scope.
+`01-GazeFix-Product-Requirements-Document-v1.1.md` remains the unchanged higher-level source of truth for product scope, requirements, constraints, and milestone gates. This document defines the currently authorized engineering work and nothing beyond it. Where the PRD orders milestones, this assignment advances the active milestone after the previous gate closed; it does not change product requirements. If a material conflict appears, escalate it instead of editing the PRD or silently changing scope.
 
 - ChatGPT: Product Manager / Technical Lead; scope, acceptance, and milestone decisions.
-- Product Owner: final product decisions and target-device verification.
-- Claude Code with Fable 5.1 Ultracode: primary implementation engineer and self-review.
-- Kimi via Claude Code CLI: primary independent QA/reviewer.
-- Codex: selective escalation or high-risk review only; not the default reviewer on every iteration.
+- Mohammad Iqbal: Product Owner; final product decisions and target-device (Windows/webcam) verification.
+- Claude Code: implementation engineer and self-review.
 
-Workflow: ChatGPT assignment → Claude implementation/self-review → Kimi QA → Claude fixes → Kimi re-review → Codex only if escalation/high-risk review is needed → Product Owner physical/runtime verification where applicable → authorized merge. No automatic progression to M2.
+Workflow for M2: assignment → implementation with self-review → automated verification → Product Owner Windows/webcam smoke test → Product Manager gate decision → authorized merge. There is no automatic progression to M3.
 
-## M0 closure and frozen baseline
+**Independent external AI QA (Kimi, Codex, or any other reviewer) is not part of this assignment.** The M1 multi-reviewer loop is retired for M2. Escalate to the Product Manager only for a specific unresolved or high-risk concern.
 
-PR #3, `claude/m0-followup-hardening` → `milestone-0`, is merged:
-https://github.com/iqbalmohamad/gazefix/pull/3
+## Frozen milestone state
 
-- Reviewed and tested source HEAD: `527ed2936bf5b288de1e2e46e934b155ba96c4e3`.
-- Merge commit / frozen M0 baseline: `3b0a2eee8b0fc207875702250955e78173857957`.
-- GitHub merge time: 2026-09-04 01:53:36 UTC.
-- Verification: GitHub reports merged with the exact expected source HEAD and target; fetched Git history confirms the source HEAD is an ancestor of the merge. The merge tree equals the reviewed source tree.
+| Item | Value |
+| --- | --- |
+| Frozen M0 baseline (`milestone-0`) | `3b0a2eee8b0fc207875702250955e78173857957` |
+| Frozen M1 baseline (`milestone-1`) | `097c4d69b9e7c7e8a2772445315ccb51a263dca7` |
+| `main` | `b40d74faef55811d67de258660b6040c7c8dc790` (M0 merge; contains no M1 work) |
+| M1 merge | PR #4, `claude/m1-face-eye-tracking` → `milestone-1` |
 
-Prior Product Owner verification on Windows 11 / Python 3.12.10: full automated suite **157 passed**; interactive GUI, physical webcam preview, Refresh, clean close, camera release after close, and physical-camera diagnostic all **PASS**. Reported startup approximately 1.x seconds; capture approximately 29.7 FPS; display approximately 28.5 FPS; 1280×720; MSMF validated. These are historical M0 results, not a new test run or evidence that M1 works. The merge commit records the completed Windows smoke test; the PR body's older "NOT VERIFIED / Draft" text predates that verification.
+`milestone-0` and `milestone-1` are frozen. Do not advance, rewrite, force-push, or merge into either of them, and do not modify `main`. Accepted M0 debt (the `PreparedCameraCloser` ambiguous `Thread.start()` bootstrap case documented in `docs/architecture.md`) remains accepted and out of scope; its stated reopening triggers are unchanged. New regressions introduced by M2 are not covered by that exception.
 
-The remaining `PreparedCameraCloser` ambiguous `Thread.start()` bootstrap case is an accepted, non-blocking M0/MVP-foundation known limitation and production-hardening debt, as documented in `docs/architecture.md`. Do not reopen M0 for the same synthetic edge case. Revisit on new real Windows shutdown hangs, lingering camera locks, observable cleanup-thread leaks, or before M10/productization. New regressions introduced by M1 are not covered by this exception.
+### What M1 already provides (M2 inputs, not M2 deliverables)
 
-M0 is officially PASS/CLOSED and frozen. Do not advance, rewrite, or merge M1 into `milestone-0`. Preserve its baseline without requiring a new tag or branch-protection change.
+`gazefix.tracking` delivers, per captured frame, an immutable `TrackingResult` tied to `capture_sequence`, `captured_at_ns` and `camera_request_id`:
 
-## Objective
+- 478 normalised face landmarks (`landmarks`) in unmirrored-frame coordinates,
+- per-eye `EyeLandmarks` with a 16-point eyelid contour, optional 5-point `iris`, `openness`, `width_px`, `valid`, anatomical `side`,
+- `iris_available`,
+- `HeadPose` (`yaw_deg`, `pitch_deg`, `roll_deg`, `rotation`, `translation`) — **head orientation only**,
+- `TrackingQuality` (a documented geometric availability heuristic, explicitly not a model probability, with `backend_thresholds`),
+- `TrackingStatus`, `TrackingTiming`, `FrameGeometry`, `mirrored()`, `belongs_to()`.
 
-Integrate stable facial and eye landmark tracking into the existing local Windows live-preview pipeline. Produce usable tracking metadata and a development overlay while preserving responsive video, frame freshness, camera lifecycle behavior, and bounded resource cleanup. M1 proves tracking only; it does not estimate where the eyes are looking.
+Conventions are documented in `docs/tracking.md` and `gazefix/tracking/models.py`. M2 consumes this contract; it does not redesign it. Changes to M1 modules are allowed only where M2 genuinely requires them, must be minimal, and must keep every existing M1 test passing.
 
-## Scope
+## M2 goal
 
-1. Detect a face and track facial landmarks, anatomical left/right eyes and eyelid contours during normal head movement.
-2. Expose iris landmarks when the selected tracker provides them. Represent unavailable iris data explicitly; document and justify any limitation.
-3. Provide face orientation required by PR-3; expose head-pose information where useful. Document coordinate conventions and validity. Any head yaw/pitch/roll describes head orientation only, never eye gaze.
-4. Expose truthful tracking confidence/quality and validity. Define the meaning, range, thresholds, and provenance of scores. If the backend does not expose a probability, use an explicitly described quality/availability signal; do not fabricate a model confidence.
-5. Define a small tracking-result contract tied to frame sequence/timestamp and camera generation. Include face/eye validity, coordinates, optional iris/pose, confidence/quality, and processing timing. Document mirroring, left/right naming, resize/crop mapping, and coordinate units.
-6. Integrate through the existing processor seam. Keep capture, tracking/model initialization, and blocking work off the Qt UI thread. Keep tracking logic independent of widgets; preserve immutable input ownership and generation filtering. Document tracker ownership, initialization, reset, and shutdown.
-7. Add a development-mode overlay showing landmarks, optional iris/pose, tracking status/confidence, and useful tracking timing. Keep debug controls out of the normal consumer UI. Overlay off must preserve the original frame pixels; rendering must not mutate shared capture buffers.
-8. Handle no face, low confidence, missing/partial landmarks, tracker/model initialization failure, runtime exceptions, face loss/re-entry, and camera changes. Preserve usable original-frame preview and clear invalid/stale tracking output. Recovery must be bounded and avoid per-frame error/retry storms.
-9. Default to one primary face. Document a deterministic selection policy for multiple faces, avoiding arbitrary identity jumps. Multi-person tracking is not required.
-10. Add only focused setup, architecture, diagnostic, and test documentation necessary to reproduce M1. Simple landmark stabilization is allowed where justified; it must reset on loss/source change and not add stale-frame latency.
+Estimate the user's **approximate eye gaze direction** from the tracking information M1 already produces, and expose it through a stable, replaceable interface.
 
-## Non-goals and hard boundaries
+Minimum output per frame (PRD PR-4, M2):
 
-- **No M2 or later milestone implementation**, scaffolding for future features, or automatic continuation after M1.
-- **No gaze estimation**: no eye-direction yaw/pitch, gaze vectors, gaze target, camera/screen gaze mapping, or eye-contact score.
-- **No gaze correction**: no eye warping, redirection, correction strength, correction masks/blending, or correction compositing. Drawing the debug overlay is allowed.
-- **No calibration**: no calibration workflow, profiles, user-specific camera/screen mapping, or calibration controls.
-- **No virtual camera**: no output backend, driver, pyvirtualcam, OBS integration, or conferencing-client integration.
-- No neural gaze-redirection inference, ONNX Runtime adoption, model training, dataset collection, cloud inference, or frame upload. Local inference used solely by the approved face/landmark tracker is within M1.
-- No M5 stabilization system, M7 optimization project, installer/productization work, unrelated refactoring, or reopening accepted M0 debt without its stated trigger.
-- Do not edit the PRD. Do not modify, commit on, push to, or merge into `main`.
+```text
+gaze yaw
+gaze pitch
+confidence
+```
 
-## Repository and branch strategy
+The estimator does not need laboratory-grade eye tracking. Its purpose is to estimate **how far the user's eyes are looking away from the camera**. Calibration is explicitly not required in M2.
 
-Before implementation, fetch remotes, inspect status/history and applicable repository instructions, and preserve unrelated work. Use an isolated checkout when needed; never reset or clean someone else's working tree.
+### The critical semantic distinction
 
-1. The assignment-only branch is `codex/m1-assignment`, based directly on frozen M0 merge `3b0a2eee8b0fc207875702250955e78173857957`. Its assignment commit changes only this file and does not implement M1.
-2. At M1 kickoff, record the exact assignment commit SHA. If `milestone-1` does not exist, create the M1 integration branch from that assignment commit and publish it. If it already exists, inspect its ancestry and assignment before using it; do not overwrite or silently adopt conflicting work.
-3. Create `claude/m1-face-eye-tracking` from the verified `milestone-1` baseline. If the implementation branch exists, inspect it and safely continue only if it belongs to this assignment.
-4. Commit and push focused implementation work to `claude/m1-face-eye-tracking`. Open a reviewable PR targeting **`milestone-1`**, never `milestone-0` or `main`.
-5. Existing `codex/m1-tracking-foundation` is historical work outside this new baseline. Do not merge or cherry-pick it wholesale, assume it passed review, or replace the hardened M0 foundation with it. Any reused idea must be independently checked against this assignment and tested in the new implementation.
-6. Do not force-push, rewrite existing history, or merge the implementation PR. Leave it for Kimi review and Product Manager/Product Owner gate decisions.
+M1 already exposes head pose. **M2 gaze yaw/pitch must represent eye/gaze direction. Renaming, re-exporting, or thinly wrapping head-pose yaw/pitch is not an acceptable M2 deliverable.**
 
-The present assignment-writing task authorizes only this document update and its commit; implementation and creation of the M1 implementation/integration branches occur at the later engineering kickoff.
+Head pose may be used as an input or reference where technically justified (for example to convert eye-in-head rotation into a camera-relative gaze direction, or to bound validity at extreme head angles), but estimated gaze must remain a distinct semantic output with its own derivation, its own conventions, and its own confidence.
 
-## Dependency and model policy
+Keep these three concepts clearly separated in code, documentation, overlay, and reporting:
 
-Preserve Python 3.11+ and Windows 10/11 compatibility, local-only processing, and a working CPU path on the target Intel i7 / Iris Xe class laptop. No NVIDIA, CUDA, NPU, Windows Studio Effects, or cloud-service requirement.
+```text
+head pose        head orientation relative to the camera            (M1, HeadPose)
+eye/iris geometry iris position and eyelid geometry within the eye  (M1, EyeLandmarks)
+estimated gaze   where the eyes are looking, relative to the camera (M2, this milestone)
+```
 
-MediaPipe is the PRD's preferred tracking option, not a mandatory choice. Before adopting a major package or pretrained model, verify and record authoritative sources, version/date, active project status, Windows/Python compatibility, CPU support, code license, model license separately, and redistribution restrictions. Explain significant stack/architecture changes before implementation; escalate material licensing, privacy, hardware, product, or paid/cloud changes with Problem / Options / Trade-offs / Recommendation. Ordinary implementation choices remain Claude's responsibility.
+A gaze result that is numerically indistinguishable from head pose across eye movement is a failed M2, regardless of test counts.
 
-Add dependencies only when needed for M1. Specify tested versions or compatible bounds and inspect transitive conflicts, especially NumPy, OpenCV variants, and Qt. Do not install future-milestone packages merely because they appear in the preferred stack. Never silently introduce commercially licensed or research-only assets as production-ready.
+## In scope
 
-If a model file is needed, document its official source, exact version and checksum, license/redistribution terms, local location, and reproducible setup. Any setup download must be explicit; normal runtime must work offline with the asset present. Missing/corrupt/incompatible assets must yield an actionable local error and usable original preview. Do not silently download on launch or store/upload webcam images. Test fixtures must be synthetic or appropriately licensed and documented.
+1. **Stable gaze-estimation interface and data structures.** A small, immutable, frame-identified gaze result contract, plus an estimator boundary (a Protocol or equivalent) so M3+ depends on the contract rather than on one specific algorithm. Keep the gaze result tied to the same frame identity M1 uses (`capture_sequence`, `captured_at_ns`, `camera_request_id`) so a gaze result can never be paired with a different frame or camera generation.
+2. **Approximate gaze yaw.** Derived from eye/iris geometry, optionally combined with head pose.
+3. **Approximate gaze pitch.** Same derivation discipline; eyelid aperture must not be silently mistaken for downward gaze without stating the limitation.
+4. **Truthful confidence.** A documented value in `[0, 1]` with stated provenance, computed from measurable inputs (for example iris availability, eye openness, eye validity, M1 tracking quality, landmark in-frame fraction, head-pose plausibility, left/right eye agreement). **Do not fabricate a model probability the implementation cannot justify.** If a factor is a heuristic, label it a heuristic exactly as `TrackingQuality` does.
+5. **Use of M1 data as appropriate.** Iris centre relative to eye-socket/corner geometry, eyelid contour, head pose, and tracking quality are all available. Choose the smallest derivation that produces a usable, defensible estimate, and record why.
+6. **Graceful unavailable / low-confidence behavior.** Explicit states for: no face, low tracking quality, missing iris landmarks, closed or blinking eyes, one eye unusable, head pose outside the range where the estimate is meaningful, and estimator error. These must be representable and distinguishable.
+7. **Temporal behavior only where necessary** to make estimator output usable (for example damping iris jitter into a stable yaw/pitch). Any smoothing must be justified, bounded, reset on face loss / re-acquisition / camera-generation change, and must not add stale-frame latency or hide loss of tracking.
+8. **Development/debug visibility.** Extend the existing developer-mode overlay and/or diagnostics to show gaze yaw, pitch, confidence and status, drawn so it is visually distinguishable from the existing head-pose axes and clearly labelled. Overlay off must preserve original frame pixels exactly; shared capture buffers must never be mutated.
+9. **Hardware-independent automated tests** (see *Required automated verification*).
+10. **A targeted Windows physical-webcam verification plan** the Product Owner can execute in a few minutes (see *Required Product Owner runtime verification*).
+11. **Diagnostics/latency measurements relevant to gaze estimation**: gaze-estimation cost, its boundary within the existing processing timing, and its effect on the pipeline.
+12. **Documentation** of gaze coordinate and sign conventions, the derivation, the confidence formula and its provenance, and the estimator's limitations. Extend `docs/` (a `docs/gaze.md` alongside `docs/tracking.md` is the expected shape) and add a short ADR if a non-obvious approach or dependency is chosen.
+
+## Explicit non-goals
+
+Do **not** implement, scaffold, or add dependencies for:
+
+- **Gaze correction** — no eye warping, redirection, correction strength, correction masks, blending, or any modification of eye pixels. Drawing the debug overlay is allowed.
+- **Eye-region warping** of any kind.
+- **Compositing** of corrected or synthesized eye regions.
+- **Calibration** — no calibration workflow, states A–D, profiles, per-user camera/screen mapping, or calibration UI. Explicitly not required in M2.
+- **Virtual camera** — no output backend, driver, pyvirtualcam, OBS, or conferencing-client integration.
+- **Neural gaze-redirection models**, model training, dataset collection, or gaze-regression network adoption.
+- **ONNX Runtime** and **DirectML** — do not adopt either in M2.
+- **Interview, teleprompter, or LLM features.**
+- **Cloud processing**, remote inference, telemetry, or any upload of webcam frames or derived biometric data.
+- **M3 or any later milestone work**, including preparatory scaffolding for correction, stabilization systems, performance projects, installers, or productization.
+- Unrelated refactoring, and reopening accepted M0 debt outside its stated triggers.
+- Editing the PRD. Modifying, committing on, pushing to, or merging into `main`, `milestone-0`, or `milestone-1`.
+
+## Technical and product constraints
+
+**Platform and hardware.** Preserve Python 3.11+ and Windows 10/11 support, local-only processing, and a working CPU path on the target Intel i7 / Iris Xe class laptop. No NVIDIA, CUDA, NPU, Windows Studio Effects, or cloud dependency. Normal runtime must work offline with the existing local model asset present.
+
+**Architecture.** Prefer the smallest architecture that preserves future replaceability.
+
+- Keep the gaze estimator free of MediaPipe, Qt, and OpenCV-GUI imports so it stays testable with plain fixtures, exactly as the M1 non-backend modules are.
+- Integrate through the existing processing seam. Capture, inference, and blocking work stay off the Qt UI thread; widgets are touched only by the UI thread.
+- Preserve immutable frame ownership, camera-generation filtering, latest-frame behavior, bounded buffers, bounded recovery, and the existing clean-shutdown and camera-release behavior.
+- The estimator boundary must be narrow enough that a different gaze algorithm (geometric, model-based, or neural in a later milestone) can replace it without changing consumers.
+
+**Fallback and stream continuity.** Per PRD §13, a failure in gaze processing must never freeze or interrupt video. If gaze cannot be estimated reliably, publish an unavailable or low-confidence gaze result and keep the frame flowing. Stale gaze results must be cleared on face loss and camera change; no gaze value may remain attached to a new face or a new camera generation. Recovery must be bounded — no per-frame error or retry storms.
+
+**Conventions must be explicit.** Document, in code and in `docs/`, the gaze coordinate frame and what positive and negative yaw and pitch mean, in the same style as the M1 head-pose table:
+
+```text
+gaze_yaw_deg  > 0 → <state precisely which physical direction, e.g. the subject looks toward their own left>
+gaze_pitch_deg > 0 → <state precisely, e.g. the subject looks upward>
+```
+
+State the reference direction (camera optical axis = zero), the units (degrees), the mirroring behavior (what `mirrored()` must do to gaze), and how each sign was verified. Where a sign is reasoned rather than physically observed, say so, as M1 did for head pitch.
+
+**Honesty.** No invented confidence, no invented benchmark numbers, no claiming a verification level that was not reached. Unmeasured values are `NOT MEASURED`.
+
+**Dependencies.** Add a dependency only if M2 genuinely needs it, and prefer none. If one is proposed, record source, version, active status, Windows/Python compatibility, CPU support, and code and model licences separately, and escalate material licensing, privacy, hardware, or paid/cloud implications with Problem / Options / Trade-offs / Recommendation. ONNX Runtime and DirectML are out of scope for M2 regardless of justification.
+
+**Performance.** PRD MVP/M7 targets (720p, ≥24 FPS, <100 ms processing latency) remain product targets and are not newly imposed M2 gates. Measure at 1280×720 where supported and flag any regression against the recorded M1 baseline. Do not silently redefine product targets or claim them from a mock benchmark.
 
 ## Acceptance criteria
 
-- **AC1 — Live tracking:** On the target Windows webcam, one visible face has aligned facial landmarks, distinct left/right eye and eyelid landmarks, and face orientation. Iris information is provided where supported or explicitly reported unavailable with justification. Landmarks remain visually attached during ordinary movement, blinking, and speaking.
-- **AC2 — Truthful results:** Validity/confidence semantics and coordinate transforms are documented and exercised. Partial/invalid output never masquerades as valid full tracking; pose cannot be confused with gaze. Metadata belongs to the displayed frame and camera generation.
-- **AC3 — Failure/recovery:** No face, face exit/re-entry, occlusion/low confidence, model failure, tracker exception, and camera switching clear stale results and preserve recoverable original-frame preview. No old landmarks remain attached to a new face or camera. Bounded recovery and shutdown behavior are demonstrated.
-- **AC4 — Overlay and ownership:** A development-only overlay can be toggled; original pixels remain unchanged with overlay off. Overlays align under the implemented mirror/resize policy. Shared input frames are never mutated, and widgets are accessed only by the UI thread.
-- **AC5 — Pipeline continuity:** Slow tracking cannot create an unbounded frame queue or continuously growing latency. Latest-frame behavior, responsiveness, camera Refresh/selection, clean close, and camera release remain intact. Document how overload or a stalled tracker is handled without claiming that a timeout can cancel an uninterruptible native call.
-- **AC6 — Reproducible CPU setup:** Supported Windows/Python setup and the selected local model run on CPU without mandatory special hardware or network access during normal use. Dependencies and model licensing are documented.
-- **AC7 — Evidence and scope:** Meaningful automated tests pass, Windows/physical evidence is reported honestly, and the full diff respects all M1 boundaries. Unverified required runtime items prevent unconditional PASS.
+- **AC1 — Gaze output exists and is distinct.** Every processed frame yields a gaze result carrying yaw, pitch, confidence and status, tied to that frame and camera generation. Gaze yaw/pitch are demonstrably derived from eye/iris geometry: with head pose held fixed, changing iris position changes gaze; the output is not a copy or trivial transform of head-pose yaw/pitch. This is demonstrated by test, not asserted.
+- **AC2 — Documented conventions.** Gaze coordinate frame, sign conventions, units, zero reference, mirroring behavior, derivation, and known limitations are documented and exercised by tests. Head pose, eye/iris geometry, and estimated gaze are clearly distinguished everywhere they appear.
+- **AC3 — Truthful confidence and availability.** Confidence is in `[0, 1]` with a stated formula and provenance, and moves in the documented direction as its inputs degrade (missing iris, closed eye, low tracking quality, one eye unusable, extreme head pose). No fabricated model probability. Unavailable and low-confidence states are explicit and cannot be mistaken for a valid estimate.
+- **AC4 — Graceful fallback and continuity.** No face, face exit and re-entry, blink and eye occlusion, missing iris, tracker error, low quality, and camera switching all produce an explicit unavailable/low-confidence result while preview keeps running. Stale gaze never survives a face loss or a camera-generation change. Recovery is bounded.
+- **AC5 — Stable, replaceable boundary.** The gaze contract and estimator boundary are small, immutable, frame-identified, and free of backend/UI coupling. A substitute estimator can be plugged in under test without changing consumers.
+- **AC6 — Pipeline health preserved.** Gaze estimation adds no unbounded queue, no growing latency, and no regression in latest-frame behavior, UI responsiveness, camera Refresh/selection, clean close, or camera release. Debug overlay off leaves original pixels unchanged; shared buffers are never mutated. Gaze-estimation timing is measured and reported with defined boundaries.
+- **AC7 — Evidence and scope.** The full automated suite passes on the tested HEAD, Windows/physical evidence is reported honestly at the correct verification level, and the complete diff respects every M2 non-goal. Unverified required runtime items prevent an unconditional PASS.
 
-PRD MVP/M7 targets remain 720p, >=24 FPS, and <100 ms processing latency; they are not newly imposed M1 performance gates. Measure M1 at 1280×720 where supported, report any internal inference resolution and trade-offs, and flag regressions against the historical M0 baseline. Do not silently redefine product performance targets or claim them from a mock benchmark.
+## Required automated verification
 
-## Test expectations
+Tests must be deterministic and hardware-independent: the default suite must not need a webcam, a network, or a model download. Keep explicitly-invoked real-backend/model tests separate from fake-based tests, and mark unavailable integration requirements accurately. Prefer events and fakes over sleep-sensitive timing.
 
-Use deterministic, hardware-independent tests in the default suite; normal tests must not need a webcam, internet, or an external model download. Separate explicitly invoked real-backend/model tests from fakes and mark unavailable integration requirements accurately.
+Cover at least:
 
-Cover behavior, including:
+1. **Derivation and independence** — synthetic landmark/eye fixtures where iris position varies with head pose fixed (gaze must change) and where head pose varies with eye-in-head geometry fixed (gaze must respond in the documented, justified way, and must not simply equal head pose).
+2. **Sign and convention tests** — a left-looking fixture yields the documented yaw sign, an up/down-looking fixture the documented pitch sign; mirroring a result flips gaze yaw consistently with the documented convention and leaves pitch unchanged.
+3. **Magnitude sanity** — looking at the camera yields yaw and pitch near zero within a stated tolerance; a clearly averted-gaze fixture yields a clearly larger deviation. Ordering and rough scale, not laboratory accuracy.
+4. **Confidence behavior** — missing iris, closed/blinking eye, one invalid eye, low `TrackingQuality`, and out-of-range head pose each lower confidence or force unavailable, in the documented direction. Confidence stays within `[0, 1]`.
+5. **Unavailable paths** — `NO_FACE`, low-quality, missing-iris, and estimator-exception inputs produce explicit unavailable/low-confidence results and never raise into the pipeline.
+6. **Frame identity and staleness** — gaze results carry the correct `capture_sequence` / `camera_request_id`; results from a previous generation are rejected; face loss and camera change clear any temporal state.
+7. **Temporal behavior**, if implemented — smoothing converges, resets on loss and generation change, and does not publish a value derived only from stale frames.
+8. **Boundary substitutability** — a fake estimator satisfies the contract and drives consumers correctly.
+9. **Overlay and ownership** — gaze overlay draws only in developer mode, leaves input pixels unmodified when off, and does not mutate shared buffers.
+10. **Regression** — the entire existing M0/M1 suite continues to pass unchanged.
 
-- Valid face/eye output, optional iris/pose absence, malformed/partial landmarks, confidence thresholds, and no-face results.
-- Anatomical left/right, mirroring/resize mapping, overlay on/off, immutable input buffers, and result/frame identity.
-- Loss/reacquisition and camera-generation changes clearing tracker state; stale in-flight results rejected.
-- Initialization failure, missing/corrupt asset, inference exception, bounded retry/fallback, and tracker resource release.
-- Slow processing/latest-frame replacement, UI responsiveness seams, and stop during initialization/in-flight processing.
-- Existing M0 camera lifecycle, ownership, shutdown-state, diagnostic timing, and buffer regressions.
+Run focused tests while iterating and the **full suite once on the final HEAD before handoff**. Report the exact commands, environment, versions, and pass/fail/skip counts with reasons for skips. Do not delete or weaken an existing test to hide a regression. The historical M1 suite size is a baseline, not a target number.
 
-Prefer events/barriers and fakes over sleep-sensitive concurrency tests. Keep the existing full suite passing; do not delete or weaken a test to hide a regression. Run focused tests while iterating, the full suite on final HEAD, and useful import/CLI checks. Provide commands, versions, pass/fail/skip counts, and reasons for skipped tests. Historical "157 passed" is a baseline, not the expected new count or a substitute for executing tests.
+## Required Product Owner runtime verification
 
-## Runtime and physical verification
+A short Windows/webcam smoke test on the Product Owner's laptop, targeted at gaze estimation. Provide exact commands and an expected-result checklist. Keep it to a few minutes.
 
-Run the real tracker/model on documented, licensed local inputs when available; mock tests cannot establish landmark quality. Then verify on the Product Owner's Windows laptop or an equivalent capable target:
+1. Launch in developer mode with the overlay on; confirm startup, responsive GUI, live preview, and a gaze readout appearing alongside the existing tracking overlay.
+2. **Look directly at the camera** — gaze yaw and pitch should sit near zero and be reasonably steady; confidence should be high.
+3. **Look left, then right, without turning the head** — yaw should move in the documented direction and return toward zero. This is the primary check that gaze is not head pose.
+4. **Look up, then down, without moving the head** — pitch should move in the documented direction.
+5. **Turn the head while keeping the eyes on the camera** — record what the estimator reports; confirm it matches the documented behavior and does not simply track the head.
+6. **Blink, close the eyes, cover one eye, leave the frame and return** — confirm confidence drops or gaze reports unavailable, that the preview never freezes or corrupts, and that stale gaze does not persist after re-entry.
+7. **Refresh / switch camera where available, then close** — confirm stale gaze clears, shutdown is clean, and the physical camera is released.
+8. Record capture FPS, display FPS, gaze-estimation latency, total processing latency with stated boundaries, resolution, camera/backend, and hardware. Use `NOT MEASURED` where a value was not taken.
 
-1. Startup, responsive GUI, physical webcam preview, CPU tracker initialization, and actionable behavior when the model is unavailable.
-2. At least 60 seconds of ordinary use: steady face, minor head motion, blinking, speaking; inspect landmark attachment and confidence. Exercise glasses and lighting variation when available and record limits.
-3. Face leaves/re-enters, brief eye/face occlusion, no-face scene, and multiple-face selection policy where feasible; confirm stale overlays disappear and recovery works.
-4. Overlay toggle, Refresh, switching cameras when available, disconnect/recovery where feasible, clean close, and physical camera release. Unavailable second-device scenarios must be marked NOT VERIFIED.
-5. Record capture/display FPS, tracking latency, total processing latency with defined boundaries, dropped/replaced frames, and useful CPU/memory observations. State warm-up/sample duration, resolution, camera/backend, model/runtime versions, and hardware. Use NOT MEASURED for missing data.
+Mark each item `VERIFIED` / `NOT VERIFIED` / `FAILED` and state its level: implementation verified, runtime verified, or physical hardware verified. A Windows import is not GUI verification; non-Windows execution is not Windows verification; mock tests are not physical webcam verification. Do not record or transmit webcam frames by default.
 
-Report each relevant item as VERIFIED / NOT VERIFIED / FAILED and identify its level: implementation verified, runtime verified, or physical hardware verified. Windows imports alone are not GUI verification; non-Windows execution is not Windows verification. Screenshots/short recordings may support review when useful and approved by the Product Owner; do not record or transmit webcam frames by default.
+## Lean QA policy
 
-A known acceptance failure or materially incomplete implementation is FAIL. Passing implementation with unavailable required runtime/hardware evidence is PASS WITH LIMITATIONS, not PASS. PASS requires all applicable acceptance criteria verified in a capable environment. Optional iris/pose details and unavailable ancillary scenarios require explicit rationale; they cannot silently waive required face/eye/orientation behavior.
+This project is a solo/DIY MVP. **QA must be proportional to risk.** Do not design a release-certification process.
 
-## Required engineering report
+Engineering verification is, in order:
 
-Return the following sections, then stop:
+1. targeted unit tests,
+2. relevant integration tests,
+3. the full automated suite once before handoff,
+4. a short Product Owner Windows/webcam smoke test.
 
-1. **Status:** Delivery status READY FOR REVIEW or BLOCKED; milestone recommendation PASS / PASS WITH LIMITATIONS / FAIL using the PRD definitions. The Product Manager makes the milestone decision. Explain any incomplete acceptance item.
-2. **Branch and provenance:** Frozen M0 SHA, assignment commit SHA, integration branch and starting SHA, implementation branch, tested final HEAD, PR number/link, and target milestone-1.
-3. **Implemented behavior:** Face/eye/iris/orientation capabilities, confidence contract, coordinates, primary-face policy, overlay behavior, fallback/recovery, and important changed files.
-4. **Architecture and lifecycle:** Processor integration, threads, frame ownership/generation filtering, bounded buffers, tracker reset/cleanup, overload policy, and any native-call cancellation limitations.
-5. **Dependencies and models:** Added/changed packages and tested versions; official compatibility/license sources; model provenance/checksum/setup; CPU and offline behavior; decisions escalated.
-6. **Acceptance and verification matrix:** AC1–AC7 mapped to evidence, verification level, and VERIFIED / NOT VERIFIED / FAILED; focused/full-suite commands and results; real-model, Windows GUI, physical camera, and release checks separately; exact tested HEAD and environment.
-7. **Performance:** Measured FPS/latencies/frame replacement and resource observations with boundaries, sample conditions, resolution, and comparison limits; NOT MEASURED where unavailable.
-8. **Self-review and QA:** Concurrency, lifecycle, stale-result, coordinate, failure, dependency, regression, and scope review; outstanding findings with severity and evidence; Kimi findings/fixes/re-review status if already available. Do not invent independent QA.
-9. **Known limitations and decisions:** Distinguish accepted M0 debt, M1 defects, environment gaps, and future work; list concrete remaining Product Owner checks.
-10. **Scope confirmation:** No M2, gaze estimation, correction, calibration, neural gaze redirection, virtual camera, future-milestone dependencies, PRD change, main change, or modification of frozen milestone-0.
-11. **Merge state:** PR NOT MERGED.
-12. **Recommendation and next step:** PROCEED / ITERATE / CHANGE APPROACH with rationale. Initial handoff: Ready for independent Kimi QA. After fixes: Ready for Kimi re-review. Escalate to Codex only for a specific unresolved/high-risk concern. List required Product Owner verification before an authorized merge.
+Explicitly **not** required for M2:
 
-A full-suite failure prevents READY FOR REVIEW as a passing delivery; report any environment blocker explicitly rather than hiding omitted tests. Commit/push completed work and open the PR when access permits; otherwise report the exact blocker and local commit. Do not merge, declare M1 closed on behalf of the Product Manager, or begin M2.
+- independent external AI QA,
+- bespoke QA harnesses or reusable test infrastructure, unless the implementation itself genuinely requires them (say why if you build one),
+- extended forensic, soak, endurance, network, or security testing, unless a concrete M2 risk requires escalation — in which case state the risk first,
+- formal sign-off documents, certification matrices, or process artifacts beyond the report below.
+
+Depth belongs in the derivation, the conventions, the confidence honesty, and the fallback behavior — not in process volume.
+
+## Branch and base information
+
+| Item | Value |
+| --- | --- |
+| Base (frozen M1 HEAD) | `097c4d69b9e7c7e8a2772445315ccb51a263dca7` |
+| Implementation branch | `claude/m2-gaze-estimation` |
+| Branched from | `milestone-1` at the frozen HEAD above — **not** from `main` |
+| M2 integration branch | `milestone-2`, to be created from the frozen M1 HEAD at implementation kickoff |
+| Implementation PR target | `milestone-2` — never `main`, `milestone-0`, or `milestone-1` |
+
+Rules:
+
+1. Before implementing, fetch remotes, inspect status, history, and applicable repository instructions, and preserve unrelated work. Never reset or clean another party's working tree.
+2. This preparation commit changes only `Current Assignment.md` and contains **no M2 implementation code**.
+3. At kickoff, record the assignment commit SHA, create `milestone-2` from `097c4d69b9e7c7e8a2772445315ccb51a263dca7`, and continue implementation on `claude/m2-gaze-estimation`. If a branch already exists, inspect its ancestry and purpose before adopting it; do not overwrite or silently adopt conflicting work.
+4. Commit focused work with clear messages. Do not force-push, rewrite existing history, or merge the implementation PR — the Product Manager and Product Owner decide the gate.
+5. `main`, `milestone-0`, and `milestone-1` must remain untouched.
+
+## Milestone gate reporting format
+
+At the end of M2, return the following sections, then stop:
+
+1. **Status** — delivery status `READY FOR REVIEW` or `BLOCKED`; milestone recommendation `PASS` / `PASS WITH LIMITATIONS` / `FAIL` using the PRD §25 definitions. The Product Manager makes the decision. Explain any incomplete acceptance item.
+2. **Branch and provenance** — frozen M1 SHA, assignment commit SHA, integration branch and starting SHA, implementation branch, tested final HEAD, PR number/link, and target branch.
+3. **Implemented gaze behavior** — the derivation in plain terms, the output contract, coordinate and sign conventions, the confidence formula and its provenance, unavailable/low-confidence states, temporal behavior, and the important changed files.
+4. **Head pose vs. gaze** — concrete evidence that gaze is a distinct semantic output and not renamed head pose, including which tests demonstrate it.
+5. **Architecture and lifecycle** — estimator boundary and why it is replaceable, seam integration, threads, frame ownership and generation filtering, state reset, and fallback/continuity behavior.
+6. **Acceptance and verification matrix** — AC1–AC7 mapped to evidence, verification level, and `VERIFIED` / `NOT VERIFIED` / `FAILED`; focused and full-suite commands and results; Windows GUI, physical camera, and release checks reported separately; exact tested HEAD and environment.
+7. **Performance and diagnostics** — gaze-estimation latency, total processing latency with boundaries, FPS, frame replacement, and resource observations, with sample conditions and resolution; `NOT MEASURED` where unavailable; comparison against the M1 baseline and any regression.
+8. **Self-review** — concurrency, lifecycle, stale-result, coordinate/sign, confidence-honesty, failure-path, dependency, regression, and scope review, with outstanding findings, severity, and evidence. Do not invent independent QA.
+9. **Known limitations** — what the estimator cannot do without calibration, accuracy bounds, conditions where it degrades (glasses, lighting, extreme angles, eyes closed, no iris), and what is deferred to later milestones.
+10. **Scope confirmation** — no gaze correction, eye warping, compositing, calibration, virtual camera, neural gaze redirection, ONNX Runtime, DirectML, interview/teleprompter/LLM features, cloud processing, or M3+ work; no PRD change; `main`, `milestone-0`, and `milestone-1` untouched.
+11. **Merge state** — PR NOT MERGED.
+12. **Recommendation and next step** — `PROCEED` / `ITERATE` / `CHANGE APPROACH` with rationale, plus the remaining Product Owner checks required before an authorized merge.
+
+A full-suite failure prevents `READY FOR REVIEW` as a passing delivery; report any environment blocker explicitly rather than hiding omitted tests. Do not merge, declare M2 closed on behalf of the Product Manager, or begin M3.
