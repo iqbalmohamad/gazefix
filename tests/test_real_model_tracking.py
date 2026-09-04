@@ -1,5 +1,8 @@
 """Opt-in tests that run the real MediaPipe face landmarker on the licensed fixture.
 
+They cover M1 tracking and the M2 gaze estimate built from the same real
+detections, so the gaze evidence is not limited to synthetic geometry.
+
 Skipped unless ``GAZEFIX_REAL_MODEL_TESTS=1`` is set, ``mediapipe`` imports,
 and the verified model bundle is present (in ``GAZEFIX_MODEL_DIR`` or the
 default model directory). The fixture is the public-domain NASA astronaut
@@ -32,7 +35,7 @@ from gazefix.tracking.analysis import (
     validate_landmarks,
 )
 from gazefix.tracking.assets import FACE_LANDMARKER, verify_model
-from gazefix.tracking.models import FrameGeometry, TrackingStatus
+from gazefix.tracking.models import FrameGeometry, TrackingResult, TrackingStatus
 from gazefix.tracking.processor import TrackingProcessor
 from tracker_fakes import tracking_settings, wait_until
 
@@ -291,3 +294,183 @@ def test_backend_adds_no_python_threads_so_a_wedged_call_cannot_hold_the_process
         )
     finally:
         tracker.close()
+
+
+# --- M2: gaze estimated from real MediaPipe iris landmarks ---
+
+
+def _real_result(detection, frame):  # type: ignore[no-untyped-def]
+    """Build a TRACKED result from a real detection, for the gaze estimator."""
+
+    landmarks, iris, right, left, quality, pose = analyse(detection, frame)
+    return TrackingResult(
+        status=TrackingStatus.TRACKED,
+        capture_sequence=1,
+        captured_at_ns=1,
+        camera_request_id=1,
+        geometry=FrameGeometry(frame.shape[1], frame.shape[0]),
+        landmarks=landmarks,
+        iris_available=iris,
+        right_eye=right,
+        left_eye=left,
+        pose=pose,
+        quality=quality,
+    )
+
+
+def test_real_iris_landmarks_produce_a_usable_gaze_estimate(cv2, still, tracker, clock) -> None:  # type: ignore[no-untyped-def]
+    """The estimator works on real backend output, not only synthetic geometry."""
+
+    from gazefix.gaze.estimator import GazeSettings, GeometricGazeEstimator
+    from gazefix.gaze.models import GazeStatus
+
+    frame = canvas(cv2, still)
+    result = _real_result(tracker.detect(frame, clock.next()), frame)
+    assert result.eyes_valid
+
+    gaze = GeometricGazeEstimator(GazeSettings(smoothing=0.0)).estimate(result)
+    assert gaze.status is GazeStatus.ESTIMATED, gaze.message
+    assert gaze.yaw_deg is not None and gaze.pitch_deg is not None
+    # The fixture is a portrait looking near the camera, so the estimate must
+    # be modest rather than extreme. This is a plausibility bound, not an
+    # accuracy claim: the ground truth of this photograph is unknown.
+    assert abs(gaze.yaw_deg) < 25.0
+    assert abs(gaze.pitch_deg) < 25.0
+    assert gaze.confidence.eyes_used == 2
+    assert gaze.confidence.head_pose_applied is True
+
+
+def test_real_gaze_is_not_a_restatement_of_real_head_pose(cv2, still, tracker, clock) -> None:  # type: ignore[no-untyped-def]
+    """On the fixture the head is pitched down while the eyes look up.
+
+    Head-pose pitch is positive-down and gaze pitch is positive-up, so a
+    person whose head is tilted down but who is looking at the camera has a
+    positive head pitch, a positive eye-in-head pitch, and a near-zero gaze
+    pitch. Those three numbers cannot all come from one signal.
+    """
+
+    from gazefix.gaze.estimator import GazeSettings, GeometricGazeEstimator
+
+    frame = canvas(cv2, still)
+    result = _real_result(tracker.detect(frame, clock.next()), frame)
+    gaze = GeometricGazeEstimator(GazeSettings(smoothing=0.0)).estimate(result)
+    assert result.pose is not None
+    assert gaze.eye_pitch_deg is not None and gaze.pitch_deg is not None
+    # The head is tilted down by a visible amount...
+    assert result.pose.pitch_deg > 5.0
+    # ...the eyes are raised inside their sockets by a comparable amount...
+    assert gaze.eye_pitch_deg > 5.0
+    # ...and the two largely cancel, which head pose alone could never produce.
+    assert abs(gaze.pitch_deg) < result.pose.pitch_deg - 3.0
+
+
+def test_real_gaze_is_stable_when_the_same_face_moves_around_the_frame(cv2, still, tracker, clock) -> None:  # type: ignore[no-untyped-def]
+    """Placement must not change the estimate much; the face is unchanged."""
+
+    from gazefix.gaze.estimator import GazeSettings, GeometricGazeEstimator
+    from gazefix.gaze.models import GazeStatus
+
+    estimator = GeometricGazeEstimator(GazeSettings(smoothing=0.0))
+    yaws = []
+    for dx, dy, scale in ((0, 0, 0.8), (-160, 0, 0.8), (160, 0, 0.8), (0, -60, 0.8), (0, 0, 0.9)):
+        frame = canvas(cv2, still, dx=dx, dy=dy, scale=scale)
+        detection = tracker.detect(frame, clock.next())
+        if not detection.faces:
+            continue
+        estimator.reset()
+        gaze = estimator.estimate(_real_result(detection, frame))
+        assert gaze.status is GazeStatus.ESTIMATED, (dx, dy, scale, gaze.message)
+        assert gaze.yaw_deg is not None
+        yaws.append(gaze.yaw_deg)
+    assert len(yaws) >= 4
+    assert max(yaws) - min(yaws) < 20.0
+
+
+def test_real_eyes_disagree_structurally_and_averaging_absorbs_it(cv2, still, tracker, clock) -> None:  # type: ignore[no-untyped-def]
+    """The measurement that sets ``agreement_deadband_deg``; see docs/gaze.md.
+
+    Both irises read as displaced temporally from the corner midpoint, because
+    the nasal canthus extends further medially than the globe. The bias is
+    mirror-symmetric, so the two eyes disagree while their mean is sound. If
+    this ever falls inside the deadband by accident the deadband is no longer
+    justified, and if it grows past it, ordinary faces would lose confidence.
+    """
+
+    from gazefix.gaze.estimator import GazeSettings, GeometricGazeEstimator
+
+    settings = GazeSettings()
+    frame = canvas(cv2, still)
+    gaze = GeometricGazeEstimator(replace(settings, smoothing=0.0)).estimate(
+        _real_result(tracker.detect(frame, clock.next()), frame)
+    )
+    by_side = {eye.side: eye for eye in gaze.per_eye}
+    assert set(by_side) == {"left", "right"}
+    # Both irises sit temporally of the corner midpoint: for the subject's
+    # right eye that is negative u (toward the subject's right), for the left
+    # eye positive u (toward the subject's left).
+    assert by_side["right"].offset_u < 0.0
+    assert by_side["left"].offset_u > 0.0
+    spread = abs(by_side["left"].yaw_deg - by_side["right"].yaw_deg)
+    assert 5.0 < spread < settings.agreement_deadband_deg
+    # The averaged estimate is far smaller than either eye's disagreement.
+    assert gaze.eye_yaw_deg is not None
+    assert abs(gaze.eye_yaw_deg) < spread / 2.0
+
+
+def test_real_gaze_estimation_is_fast_enough_to_be_free_on_the_frame_path(cv2, still, tracker, clock) -> None:  # type: ignore[no-untyped-def]
+    """Gaze must not be a meaningful share of the tracking budget."""
+
+    import time as _time
+
+    from gazefix.gaze.estimator import GazeSettings, GeometricGazeEstimator
+
+    frame = canvas(cv2, still)
+    result = _real_result(tracker.detect(frame, clock.next()), frame)
+    estimator = GeometricGazeEstimator(GazeSettings())
+    for _ in range(20):  # warm the code paths
+        estimator.estimate(result)
+    started = _time.perf_counter()
+    runs = 200
+    for _ in range(runs):
+        estimator.estimate(result)
+    per_frame_ms = (_time.perf_counter() - started) / runs * 1000.0
+    # The MediaPipe inference this sits beside costs tens of milliseconds.
+    assert per_frame_ms < 5.0, per_frame_ms
+
+
+def test_real_canthal_depth_matches_the_documented_ratio(cv2, still, tracker, clock) -> None:  # type: ignore[no-untyped-def]
+    """The measurement behind ``MEASURED_CANTHUS_DEPTH_MM`` and docs/gaze.md section 5.
+
+    The estimator's horizontal foreshortening cancellation is exact only when
+    the iris centre and the corner midpoint are at the same depth. They are
+    not, and MediaPipe's own model-relative landmark ``z`` says by how much:
+    the canthal midpoint sits behind the iris centre by roughly 0.2 of the
+    lever arm, i.e. a depth ratio near 0.78. That number sets the size of the
+    head-yaw leak the documentation reports, so it is pinned here rather than
+    assumed.
+    """
+
+    from gazefix.gaze.estimator import GazeSettings
+
+    frame = canvas(cv2, still)
+    detection = tracker.detect(frame, clock.next())
+    landmarks, _ = validate_landmarks(detection.faces[0].landmarks)
+    width, height = frame.shape[1], frame.shape[0]
+    ratios = []
+    for side in ("right", "left"):
+        contour = topology.eye_contour(side)
+        outer = landmarks[contour[topology.CONTOUR_OUTER_CORNER_POSITION]]
+        inner = landmarks[contour[topology.CONTOUR_INNER_CORNER_POSITION]]
+        iris_centre = landmarks[topology.iris_indices(side)[0]]
+        # z shares the x scale, so convert it with the frame width.
+        depth_px = ((float(outer[2]) + float(inner[2])) / 2.0 - float(iris_centre[2])) * width
+        half_width_px = (
+            math.hypot((float(outer[0]) - float(inner[0])) * width,
+                       (float(outer[1]) - float(inner[1])) * height) / 2.0
+        )
+        lever_arm_px = half_width_px / GazeSettings().eye_model_ratio
+        ratios.append(1.0 - depth_px / lever_arm_px)
+    # Behind the iris, not in front of it, and by a modest fraction.
+    for ratio in ratios:
+        assert 0.6 < ratio < 0.95, ratios
+    assert sum(ratios) / 2.0 == pytest.approx(0.78, abs=0.1)

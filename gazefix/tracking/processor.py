@@ -1,4 +1,4 @@
-"""``TrackingProcessor``: the M1 implementation of the processing seam.
+"""``TrackingProcessor``: the M1 tracking and M2 gaze implementation of the seam.
 
 Runs on the M0 processor thread. For every captured frame it hands the frame
 to the tracker thread, waits a bounded time for that frame's own result,
@@ -6,6 +6,10 @@ and publishes the frame with either that result or an explicit untracked
 status (initialising, unavailable, timed out). It never blocks the preview
 on tracking for longer than ``tracking_wait_ms`` and never mutates the
 input array: the overlay, when enabled, is drawn on a copy.
+
+The M2 gaze estimate rides on the tracking result, computed on the tracker
+thread right after analysis, so it shares that result's frame identity and
+adds no wait of its own to this stage.
 """
 
 from __future__ import annotations
@@ -126,9 +130,18 @@ class TrackingProcessor:
             self._metrics.record_tracking(
                 result.status.value, result.timing.inference_ms, result.timing.total_ms
             )
+            if result.gaze is not None:
+                self._metrics.record_gaze(result.gaze.status.value, result.gaze.estimation_ms)
         output = frame
         if self.overlay_enabled:
-            output = render_overlay(frame, result, OverlayStyle(description=self._worker.status().description))
+            output = render_overlay(
+                frame,
+                result,
+                OverlayStyle(
+                    description=self._worker.status().description,
+                    gaze_description=self._worker.gaze_description,
+                ),
+            )
         return ProcessorOutput(output, result)
 
     def _note_timeout(self) -> None:

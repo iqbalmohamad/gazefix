@@ -9,6 +9,14 @@ Colours and labels are anatomical: the subject's right eye (image left in
 the unmirrored preview) is cyan and labelled ``R``; the left eye is yellow
 and labelled ``L``. The head-pose axes are drawn at the nose tip and labelled
 "head pose (not gaze)".
+
+The M2 gaze estimate is drawn separately and deliberately differently: a
+single magenta arrow from each iris centre, plus its own text block. It
+cannot be confused with the three-coloured head-pose axes at the nose tip,
+and the text carries the sign hint, because gaze pitch and head-pose pitch
+use opposite senses. Angles are printed as whole degrees with an explicit
+"approx, uncalibrated" marker: decimals would imply a precision this
+estimate does not have.
 """
 
 from __future__ import annotations
@@ -20,6 +28,7 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from gazefix.gaze.models import GazeResult, GazeStatus
 from gazefix.tracking import landmarks as topology
 from gazefix.tracking.models import EyeLandmarks, TrackingResult, TrackingStatus
 
@@ -37,6 +46,8 @@ _ERROR = (0, 0, 220)
 _AXIS_X = (0, 0, 255)
 _AXIS_Y = (0, 255, 0)
 _AXIS_Z = (255, 0, 0)
+_GAZE = (255, 0, 255)  # magenta in BGR: nothing else on the overlay uses it
+_GAZE_DIM = (150, 0, 150)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,8 +56,11 @@ class OverlayStyle:
     face_oval: bool = True
     pose_axes: bool = True
     text: bool = True
+    gaze_ray: bool = True
     axis_length_px: int = 60
+    gaze_length_px: int = 70
     description: str = ""
+    gaze_description: str = ""
 
 
 def render_overlay(frame: Frame, result: TrackingResult, style: OverlayStyle | None = None) -> Frame:
@@ -75,6 +89,8 @@ def render_overlay(frame: Frame, result: TrackingResult, style: OverlayStyle | N
                               result.geometry.width, result.geometry.height)
             if style.pose_axes and result.pose is not None:
                 _draw_pose_axes(canvas, pixels[topology.NOSE_TIP], result, style.axis_length_px)
+            if style.gaze_ray and result.gaze is not None:
+                _draw_gaze(canvas, result, style.gaze_length_px)
     if style.text:
         _draw_text_panel(canvas, result, style)
     return canvas
@@ -105,6 +121,7 @@ def warm_up() -> None:
     cv2.circle(canvas, (8, 8), 2, _MESH, -1, lineType=cv2.LINE_AA)
     cv2.line(canvas, (0, 0), (15, 15), _MESH, 1, lineType=cv2.LINE_AA)
     cv2.line(canvas, (0, 15), (15, 0), _MESH, 2, lineType=cv2.LINE_AA)
+    cv2.arrowedLine(canvas, (2, 2), (13, 13), _GAZE, 2, line_type=cv2.LINE_AA, tipLength=0.25)
     cv2.rectangle(canvas, (0, 0), (4, 4), _MESH, -1)
     cv2.getTextSize("warm up", cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
     cv2.putText(canvas, "warm up", (0, 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, _TEXT, 1, cv2.LINE_AA)
@@ -248,6 +265,77 @@ def _draw_pose_axes(canvas: Frame, origin: np.ndarray, result: TrackingResult, l
     )
 
 
+def _draw_gaze(canvas: Frame, result: TrackingResult, length: int) -> None:
+    """One magenta ray per eye, from the iris centre along the gaze direction.
+
+    The ray is the orthographic sketch of the camera-frame direction, exactly
+    as the pose axes are drawn: camera ``y`` points up while image rows grow
+    downwards, so the vertical component is negated. Nothing is drawn when
+    there is no direction to draw.
+    """
+
+    gaze = result.gaze
+    if gaze is None or not gaze.status.has_direction or gaze.direction is None:
+        return
+    colour = _GAZE if gaze.status is GazeStatus.ESTIMATED else _GAZE_DIM
+    height, width = canvas.shape[:2]
+    dx = float(gaze.direction[0]) * length
+    dy = -float(gaze.direction[1]) * length
+    for eye in (result.right_eye, result.left_eye):
+        if eye is None or eye.iris is None:
+            continue
+        centre = eye.iris[0, :2] * np.array(
+            [result.geometry.width, result.geometry.height], dtype=np.float32
+        )
+        if not _inside(centre, canvas):
+            continue
+        ox, oy = _clip(centre[None, :], canvas)[0]
+        visible = _clip_segment(float(ox), float(oy), ox + dx, oy + dy, width, height)
+        if visible is None:
+            continue
+        cv2.arrowedLine(
+            canvas,
+            (int(round(visible[0])), int(round(visible[1]))),
+            (int(round(visible[2])), int(round(visible[3]))),
+            colour,
+            2,
+            line_type=cv2.LINE_AA,
+            tipLength=0.25,
+        )
+
+
+def _gaze_lines(gaze: GazeResult | None, description: str) -> list[str]:
+    """The gaze text block: approximate angles, never decimals of a degree."""
+
+    if gaze is None:
+        return []
+    if not gaze.status.has_direction or gaze.yaw_deg is None or gaze.pitch_deg is None:
+        return [f"gaze: {gaze.status.value}" + (f"  {gaze.message[:80]}" if gaze.message else "")]
+    confidence = gaze.confidence
+    # The contract allows an estimator to publish a camera-relative direction
+    # without an eye-in-head decomposition; formatting None would raise on the
+    # processor thread, on every frame.
+    eye_angles = (
+        "n/a"
+        if gaze.eye_yaw_deg is None or gaze.eye_pitch_deg is None
+        else f"yaw {gaze.eye_yaw_deg:+.0f} pitch {gaze.eye_pitch_deg:+.0f} deg"
+    )
+    lines = [
+        f"gaze (approx, uncalibrated) yaw {gaze.yaw_deg:+.0f} pitch {gaze.pitch_deg:+.0f} deg"
+        f"  conf {confidence.score:.2f}  [{gaze.status.value}]",
+        f"  + yaw = subject's left, + pitch = up (head-pose pitch is the other way)",
+        f"  eye-in-head {eye_angles}"
+        f"  eyes {confidence.eyes_used}"
+        f"  head pose {'applied' if confidence.head_pose_applied else 'unavailable'}",
+        f"  conf = quality {confidence.tracking_quality:.2f} x open {confidence.openness_term:.2f}"
+        f" x agree {confidence.agreement_term:.2f} x pose {confidence.pose_term:.2f}"
+        f" x offset {confidence.offset_term:.2f} x res {confidence.resolution_term:.2f}",
+    ]
+    if description:
+        lines.append(f"  {description[:110]}")
+    return lines
+
+
 def _draw_text_panel(canvas: Frame, result: TrackingResult, style: OverlayStyle) -> None:
     status = result.status
     if status is TrackingStatus.TRACKED:
@@ -272,6 +360,7 @@ def _draw_text_panel(canvas: Frame, result: TrackingResult, style: OverlayStyle)
         lines.append(result.message[:110])
     if style.description:
         lines.append(style.description[:110])
+    lines.extend(_gaze_lines(result.gaze, style.gaze_description))
     x, y = 8, 18
     for line in lines:
         (tw, th), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)

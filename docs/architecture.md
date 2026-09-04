@@ -1,4 +1,4 @@
-# Architecture (Milestone 0 foundation, Milestone 1 tracking)
+# Architecture (Milestone 0 foundation, Milestone 1 tracking, Milestone 2 gaze)
 
 ## Data flow
 
@@ -486,6 +486,34 @@ within a bounded join. Camera capture, latest-frame behaviour, UI polling
 and the M0 lifecycle ownership are unchanged. The
 window chooses the processor (`--no-tracking` selects the passthrough) and
 hands it to `PipelineRuntime`.
+
+### M2 gaze rides on the tracking result
+
+Gaze estimation (`gazefix/gaze/`) adds no stage, thread or queue. It runs on
+the tracker thread inside `TrackerWorker._analyse`, immediately after the
+`TrackingResult` is built, and its output is attached to that same result as
+`TrackingResult.gaze`. Three consequences follow. The estimate inherits the
+result's frame identity, so it can never be paired with the wrong frame or a
+stale camera generation. Its cost sits inside `tracking_total_ms` rather than
+being added to the processor thread's bounded wait. And its temporal state
+(the gaze smoother) has exactly one owner and is reset by
+`_reset_temporal_state` alongside the primary-face selector and the landmark
+stabiliser.
+
+The estimator itself is reached only through the `GazeEstimator` protocol
+(`gazefix/gaze/estimator.py`), which the worker accepts by injection, so no
+consumer depends on one gaze algorithm. `gazefix.gaze.models` imports nothing
+from `gazefix.tracking`, and `gazefix.tracking.models` imports it — one
+direction only, no cycle.
+
+A gaze failure never reaches the frame path, and never costs tracking. The
+estimator turns its own exceptions into an `UNAVAILABLE` result, and the
+worker does not depend on it doing so: because the boundary exists to be
+substituted, `TrackerWorker` catches a raising `estimate` before it can enter
+the inference-error path and spend the tracker's rebuild budget, and catches a
+raising `reset` before it can end the tracker thread. A persistently failing
+estimator is retired until the camera generation changes. See
+[`gaze.md`](gaze.md).
 
 ### M1 shutdown additions
 

@@ -14,8 +14,8 @@ Ownership and threads (see docs/tracking.md):
   is simply never picked up.
 - A frame from a new camera generation makes the thread reset every piece
   of temporal state (the backend's own face-tracking state through
-  ``FaceTracker.reset``, primary-face memory, stabiliser), so nothing learned
-  on one camera can attach to another; the backend instance is kept (a
+  ``FaceTracker.reset``, primary-face memory, stabiliser, gaze smoother), so
+  nothing learned on one camera can attach to another; the backend instance is kept (a
   rebuild costs a model load and, with the current backend, a network
   attempt inside ``close``). The attempt budget for initialisation is
   re-armed at the same time. A gap of more than ``tracking_reset_gap_s``
@@ -30,6 +30,22 @@ Ownership and threads (see docs/tracking.md):
 - ``stop`` asks the thread to exit and joins it for a bounded time. If the
   thread is inside an uncancellable native call it is abandoned as a daemon
   (logged); it still closes the tracker itself when the call returns.
+- The gaze stage is SUPPLEMENTARY and its failures are contained here, not
+  in the estimator. ``GazeEstimator`` is a protocol built for substitution,
+  so the worker cannot assume an implementation keeps its promise never to
+  raise: a raising ``estimate`` must not consume the tracker's error budget
+  or rebuild it, and a raising ``reset`` must not kill this thread (it used
+  to, through a double fault: the exception escaped, the recovery path
+  called ``reset`` again, and the second raise ended the thread). Both are
+  caught, rate-limited in the log, and turned into an unavailable gaze.
+  After ``_GAZE_MAX_CONSECUTIVE_ERRORS`` failures in a row the estimator is
+  not called again until the camera generation changes, so a broken
+  implementation cannot burn a frame's budget forever. A failed ``reset`` is
+  retired at once rather than counted: its temporal state is of unknown age,
+  and resuming would blend pre-reset state into a new camera or a new face —
+  the leak the reset exists to prevent. A later successful estimate never
+  clears that condition; only a generation change does, and the reset it
+  performs runs before any frame is estimated.
 """
 
 from __future__ import annotations
@@ -44,6 +60,9 @@ import numpy as np
 
 from gazefix.config import AppSettings
 from gazefix.diagnostics.metrics import PipelineMetrics
+from gazefix.gaze.estimator import GazeEstimator, GazeSettings, GeometricGazeEstimator
+from gazefix.gaze.models import GazeResult
+from gazefix.gaze.models import unavailable as gaze_unavailable
 from gazefix.pipeline.processor import Frame, FrameContext
 from gazefix.tracking.analysis import (
     AnalysisSettings,
@@ -78,6 +97,10 @@ STATE_READY = "ready"
 STATE_UNAVAILABLE = "unavailable"
 
 _ERROR_LOG_INTERVAL_S = 5.0
+#: Consecutive gaze-stage failures after which the estimator is left alone
+#: until the camera generation changes. Tracking is unaffected either way;
+#: this only stops a broken estimator being called on every frame.
+_GAZE_MAX_CONSECUTIVE_ERRORS = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +136,7 @@ class TrackerWorker:
         settings: AppSettings,
         metrics: PipelineMetrics | None = None,
         clock: Callable[[], float] = time.perf_counter,
+        gaze_estimator: GazeEstimator | None = None,
     ) -> None:
         self._factory = factory
         self._settings = settings
@@ -125,6 +149,22 @@ class TrackerWorker:
         )
         self._selector = PrimaryFaceSelector(SelectionSettings())
         self._stabilizer = LandmarkStabilizer(settings.tracking_smoothing)
+        # The gaze stage runs on this thread, right after analysis, so its
+        # temporal state has exactly one owner and is reset with everything
+        # else the tracker learned from earlier frames.
+        self._gaze: GazeEstimator | None = None
+        #: Held aside when the estimator is retired after repeated failures,
+        #: so a camera change can give it another chance.
+        self._gaze_retired: GazeEstimator | None = None
+        if settings.gaze_enabled:
+            self._gaze = gaze_estimator or GeometricGazeEstimator(
+                GazeSettings(
+                    eye_model_ratio=settings.gaze_eye_model_ratio,
+                    min_confidence=settings.gaze_min_confidence,
+                    smoothing=settings.gaze_smoothing,
+                ),
+                clock=clock,
+            )
         self._condition = Condition()
         self._pending: _Submission | None = None
         self._latest: TrackingResult | None = None
@@ -141,12 +181,26 @@ class TrackerWorker:
         self._consecutive_errors = 0
         self._rebuilds = 0
         self._last_error_log_at: float | None = None
+        self._gaze_errors = 0
+        #: Set when the estimator's ``reset`` raised. Its temporal state is
+        #: then of unknown age, so the stage stays retired until a lifecycle
+        #: point can re-establish it safely. Distinct from the error counter
+        #: because a later success must not clear it.
+        self._gaze_reset_failed = False
+        self._gaze_disabled_reason = ""
+        self._last_gaze_error_log_at: float | None = None
         self._last_captured_at_ns: int | None = None
         self._thread = Thread(target=self._run, name="gazefix-tracker", daemon=True)
 
     # ------------------------------------------------------------ lifecycle
     def start(self) -> None:
         self._thread.start()
+
+    @property
+    def gaze_description(self) -> str:
+        """One line naming the gaze algorithm, or why there is none."""
+
+        return "gaze estimation disabled" if self._gaze is None else self._gaze.description
 
     @property
     def started(self) -> bool:
@@ -358,6 +412,7 @@ class TrackerWorker:
         self._consecutive_errors = 0
         self._selector.reset()
         self._stabilizer.reset()
+        self._reset_gaze()
         with self._condition:
             self._description = tracker.description
         self._set_state(STATE_READY, "")
@@ -458,6 +513,17 @@ class TrackerWorker:
         self._init_attempts = 0
         self._rebuilds = 0
         self._next_init_at = 0.0
+        if self._gaze is None and self._gaze_retired is not None:
+            # A retired estimator gets a fresh chance on a new camera, exactly
+            # as the tracker's own attempt and rebuild budgets do. This is also
+            # the only place an unresolved reset failure is cleared, and it is
+            # safe precisely because the reset below runs immediately after: if
+            # it raises again the stage retires again, before a single frame is
+            # estimated, so untrusted temporal state never reaches an estimate.
+            self._gaze, self._gaze_retired = self._gaze_retired, None
+            self._gaze_disabled_reason = ""
+            self._gaze_errors = 0
+            self._gaze_reset_failed = False
         self._reset_temporal_state("camera generation change")
         if self._tracker is None and self._state == STATE_UNAVAILABLE:
             self._set_state(STATE_INITIALIZING, "tracker initializing")
@@ -475,6 +541,7 @@ class TrackerWorker:
 
         self._selector.reset()
         self._stabilizer.reset()
+        self._reset_gaze()
         self._last_captured_at_ns = None
         tracker = self._tracker
         if tracker is None:
@@ -504,6 +571,7 @@ class TrackerWorker:
 
         self._selector.reset()
         self._stabilizer.reset()
+        self._reset_gaze()
         if submission is not None:
             self._publish(self._untracked(submission, TrackingStatus.ERROR, f"tracking error: {exc}"))
         self._rebuild_or_give_up(f"tracker failure: {exc}")
@@ -553,6 +621,7 @@ class TrackerWorker:
             message += "; restarting tracker"
         self._selector.reset()
         self._stabilizer.reset()
+        self._reset_gaze()
         # Publish the frame's own ERROR result before any state change: the
         # processor wakes on either, and must attach this result (with its
         # message) to the frame rather than a later, state-derived label.
@@ -563,10 +632,17 @@ class TrackerWorker:
     def _analyse(self, detection: RawDetection, submission: _Submission) -> TrackingResult:
         context = submission.context
         geometry = FrameGeometry(submission.frame.shape[1], submission.frame.shape[0])
-        timing = TrackingTiming(
-            inference_ms=detection.inference_ms,
-            total_ms=(self._clock() - submission.submitted_at) * 1000.0,
-        )
+
+        def timing_now() -> TrackingTiming:
+            # Sampled at each construction site, never once at the top: the
+            # frame's result is not available until analysis AND the gaze
+            # stage have run, and ``total_ms`` is documented as covering
+            # exactly that span.
+            return TrackingTiming(
+                inference_ms=detection.inference_ms,
+                total_ms=(self._clock() - submission.submitted_at) * 1000.0,
+            )
+
         analysis = self._analysis
         # Selection works on plausible arrays only; a backend that returns a
         # degenerate face must not take the selector down with it.
@@ -578,9 +654,10 @@ class TrackerWorker:
         selection = self._selector.select(candidates)
         if selection is None:
             self._stabilizer.reset()
+            self._reset_gaze()
             return untracked(
                 TrackingStatus.NO_FACE, context.capture_sequence, context.captured_at_ns,
-                context.camera_request_id, geometry, "no face detected", timing, 0,
+                context.camera_request_id, geometry, "no face detected", timing_now(), 0,
             )
         face = candidates[selection.index]
         try:
@@ -589,6 +666,7 @@ class TrackerWorker:
             raise MalformedLandmarks(f"malformed landmarks: {exc}") from exc
         if selection.identity_changed:
             self._stabilizer.reset()
+            self._reset_gaze()
         stabilized = self._stabilizer.enabled
         landmarks = self._stabilizer.apply(landmarks)
         tracker = self._tracker
@@ -609,13 +687,13 @@ class TrackerWorker:
         if not left_eye.valid:
             reasons.append("left eye outside the frame or too small")
         status = TrackingStatus.TRACKED if not reasons else TrackingStatus.LOW_QUALITY
-        return TrackingResult(
+        result = TrackingResult(
             status=status,
             capture_sequence=context.capture_sequence,
             captured_at_ns=context.captured_at_ns,
             camera_request_id=context.camera_request_id,
             geometry=geometry,
-            timing=timing,
+            timing=TrackingTiming(inference_ms=detection.inference_ms),
             message="; ".join(reasons),
             faces_detected=len(detection.faces),
             landmarks=landmarks,
@@ -626,6 +704,107 @@ class TrackerWorker:
             quality=quality,
             stabilized=stabilized,
         )
+        # Gaze first, then the timing that must include it.
+        gaze = self._estimate_gaze(result)
+        return replace(result, gaze=gaze, timing=timing_now())
+
+    def _estimate_gaze(self, result: TrackingResult) -> GazeResult:
+        """Gaze for this frame. Never raises, and never costs tracking.
+
+        A gaze failure is not a tracker failure: it must not reach
+        ``_handle``'s inference-error path, which would spend the consecutive
+        error budget and rebuild a perfectly healthy tracker. The frame keeps
+        its landmarks and simply carries an unavailable gaze.
+        """
+
+        if self._gaze is None:
+            return gaze_unavailable(
+                self._gaze_disabled_reason or "no gaze: gaze estimation is disabled"
+            )
+        try:
+            estimate = self._gaze.estimate(result)
+        except Exception as exc:  # noqa: BLE001  (a substitute estimator may raise)
+            return self._gaze_failed("estimate", exc)
+        if not self._gaze_reset_failed:
+            # A working estimate says nothing about whether the temporal state
+            # behind it is stale, so it must not clear an unresolved reset
+            # failure. Unreachable while one stands, because the stage is
+            # retired the moment a reset raises; asserted here so the
+            # invariant survives a refactor of that path.
+            self._gaze_errors = 0
+        return estimate
+
+    def _reset_gaze(self) -> None:
+        """Drop the estimator's temporal state, or retire it if that failed.
+
+        A raising ``reset`` cannot kill this thread, and it also cannot be
+        shrugged off: the estimator still holds temporal state from before the
+        event that demanded the reset — a different camera, a different face —
+        and there is no way from here to tell how stale it is. Resuming would
+        blend it into the next frame, which is exactly the leak the reset
+        exists to prevent. So the stage is retired at once rather than after a
+        counter fills, and it stays retired until a generation change can
+        re-establish it from scratch. Tracking is untouched either way.
+        """
+
+        if self._gaze is None:
+            return
+        try:
+            self._gaze.reset()
+        except Exception as exc:  # noqa: BLE001  (a substitute estimator may raise)
+            self._gaze_reset_failed = True
+            self._gaze_errors += 1
+            self._log_gaze_failure("reset", exc)
+            self._retire_gaze(
+                f"no gaze: the estimator's reset failed, so its temporal state "
+                f"cannot be trusted; gaze is stopped until the camera changes ({exc})"
+            )
+
+    def _gaze_failed(self, stage: str, exc: BaseException) -> GazeResult:
+        """An ``estimate`` failure: log rate-limited, retire if it persists."""
+
+        self._gaze_errors += 1
+        self._log_gaze_failure(stage, exc)
+        if self._gaze_errors >= _GAZE_MAX_CONSECUTIVE_ERRORS:
+            return gaze_unavailable(
+                self._retire_gaze(
+                    f"no gaze: gaze estimation failed {self._gaze_errors} times in a row "
+                    f"and was stopped until the camera changes (last: {exc})"
+                )
+            )
+        return gaze_unavailable(f"no gaze: gaze estimation failed in {stage} ({exc})")
+
+    def _log_gaze_failure(self, stage: str, exc: BaseException) -> None:
+        now = self._clock()
+        if (
+            self._last_gaze_error_log_at is None
+            or now - self._last_gaze_error_log_at >= _ERROR_LOG_INTERVAL_S
+        ):
+            self._last_gaze_error_log_at = now
+            logger.exception(
+                "Gaze estimation failed; tracking is unaffected",
+                extra={
+                    "event": "gaze_stage_error",
+                    "stage": stage,
+                    "consecutive_errors": self._gaze_errors,
+                },
+            )
+
+    def _retire_gaze(self, reason: str) -> str:
+        """Stop calling the estimator until a camera change; return the reason."""
+
+        if self._gaze is not None:
+            self._gaze, self._gaze_retired = None, self._gaze
+        self._gaze_disabled_reason = reason
+        logger.error(
+            "Gaze estimation stopped; tracking continues",
+            extra={
+                "event": "gaze_stage_exhausted",
+                "consecutive_errors": self._gaze_errors,
+                "reset_failed": self._gaze_reset_failed,
+            },
+        )
+        return reason
 
     def _untracked(self, submission: _Submission, status: TrackingStatus, message: str) -> TrackingResult:
         context = submission.context
