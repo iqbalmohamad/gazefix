@@ -49,7 +49,9 @@ intrinsics and no per-user anatomy. The known error terms are listed in
 ``docs/gaze.md``; the largest is a systematic underestimate that grows with
 head rotation (about 2 degrees at 30 degrees of head turn with the eyes 20
 degrees off-axis, about 8 degrees at 45 and 30). ``GazeConfidence.pose_term``
-exists precisely to report that degradation rather than hide it.
+exists precisely to report that degradation rather than hide it, and
+``resolution_term`` reports the separate noise floor set by how many pixels
+wide the eye is.
 """
 
 from __future__ import annotations
@@ -123,6 +125,14 @@ class GazeSettings:
     offset_floor_factor: float = 0.2
     # An eye narrower than this in pixels cannot produce a meaningful ratio.
     min_half_width_px: float = 2.0
+    # Every angle here is a ratio over the eye's half-width, so the angular
+    # noise floor is inversely proportional to it: at a 6 px half-width, one
+    # pixel of iris-centre noise is already about 12 degrees. The resolution
+    # term reports that, so a distant face cannot produce a confident-looking
+    # number. CHOSEN defaults, not measured.
+    resolution_floor_px: float = 5.0
+    resolution_full_px: float = 20.0
+    resolution_floor_factor: float = 0.2
 
     def validated(self) -> "GazeSettings":
         if not self.eye_model_ratio > 0 or not math.isfinite(self.eye_model_ratio):
@@ -139,7 +149,15 @@ class GazeSettings:
             raise ValueError("agreement_deadband_deg cannot be negative")
         if self.pose_limit_deg <= self.pose_full_deg:
             raise ValueError("pose_limit_deg must exceed pose_full_deg")
-        for name in ("single_eye_factor", "pose_floor_factor", "no_pose_factor", "offset_floor_factor"):
+        if self.resolution_full_px <= self.resolution_floor_px:
+            raise ValueError("resolution_full_px must exceed resolution_floor_px")
+        for name in (
+            "single_eye_factor",
+            "pose_floor_factor",
+            "no_pose_factor",
+            "offset_floor_factor",
+            "resolution_floor_factor",
+        ):
             if not 0.0 <= getattr(self, name) <= 1.0:
                 raise ValueError(f"{name} must be between 0 and 1")
         if not 0.0 < self.min_cos <= 1.0:
@@ -235,7 +253,7 @@ class GeometricGazeEstimator:
                 "no gaze: the tracker delivered no iris landmarks", started
             )
 
-        pose = result.pose
+        pose = _usable_pose(result.pose)
         cos_yaw, cos_pitch = self._foreshortening(pose)
         measurements: list[tuple[EyeGaze, float, float]] = []
         for eye in (result.right_eye, result.left_eye):
@@ -276,16 +294,22 @@ class GeometricGazeEstimator:
             return self._give_up(
                 f"no gaze: {_zero_confidence_reason(confidence)}", started
             )
-        status = (
-            GazeStatus.ESTIMATED
-            if confidence.score >= settings.min_confidence
-            else GazeStatus.LOW_CONFIDENCE
-        )
-        message = (
-            ""
-            if status is GazeStatus.ESTIMATED
-            else f"gaze confidence {confidence.score:.2f} below {settings.min_confidence:.2f}"
-        )
+        if not confidence.head_pose_applied:
+            # Without a head rotation the reported angles are eye-in-head
+            # angles wearing camera-relative names, and the error is the whole
+            # unknown head rotation — tens of degrees, not the 0.7 factor
+            # pose_term charges. Never call that an ESTIMATED gaze.
+            status = GazeStatus.LOW_CONFIDENCE
+            message = (
+                "head pose unavailable: the angles are eye-in-head only, as if "
+                "the head faced the camera"
+            )
+        elif confidence.score >= settings.min_confidence:
+            status, message = GazeStatus.ESTIMATED, ""
+        else:
+            status = GazeStatus.LOW_CONFIDENCE
+            message = f"gaze confidence {confidence.score:.2f} below {settings.min_confidence:.2f}"
+
         return GazeResult(
             status=status,
             confidence=confidence,
@@ -312,8 +336,9 @@ class GeometricGazeEstimator:
     def _foreshortening(self, pose: HeadPose | None) -> tuple[float, float]:
         """``(cos(head_yaw), cos(head_pitch))``, each bounded by ``min_cos``.
 
-        Both are 1.0 when head pose is unavailable, which leaves ``v``
-        uncorrected; ``GazeConfidence.pose_term`` reports that instead.
+        Both are 1.0 when there is no usable head pose, which leaves ``v``
+        uncorrected; the result then reports ``head_pose_applied = False`` and
+        is capped at ``LOW_CONFIDENCE``.
         """
 
         if pose is None:
@@ -368,7 +393,18 @@ class GeometricGazeEstimator:
         ratio = self._settings.eye_model_ratio
         x, y = ratio * u, ratio * v
         yaw_deg, pitch_deg = angles_from_direction(self._head_direction(x, y))
-        return EyeGaze(side=eye.side, yaw_deg=yaw_deg, pitch_deg=pitch_deg, offset_u=u, offset_v=v), x, y
+        return (
+            EyeGaze(
+                side=eye.side,
+                yaw_deg=yaw_deg,
+                pitch_deg=pitch_deg,
+                offset_u=u,
+                offset_v=v,
+                half_width_px=half_width,
+            ),
+            x,
+            y,
+        )
 
     def _head_direction(self, x: float, y: float) -> np.ndarray:
         """Unit eye-in-head direction from its two planar components.
@@ -439,7 +475,15 @@ class GeometricGazeEstimator:
                 fraction = (turn - settings.pose_full_deg) / span
                 pose_term = 1.0 - fraction * (1.0 - settings.pose_floor_factor)
 
-        terms = (quality, openness_term, agreement_term, pose_term, offset_term)
+        widths = [eye.half_width_px for eye in per_eye if eye.half_width_px > 0]
+        resolution_term = _ramp_to_floor(
+            min(widths) if widths else 0.0,
+            settings.resolution_floor_px,
+            settings.resolution_full_px,
+            settings.resolution_floor_factor,
+        )
+
+        terms = (quality, openness_term, agreement_term, pose_term, offset_term, resolution_term)
         score = 1.0
         for term in terms:
             score *= min(1.0, max(0.0, term if math.isfinite(term) else 0.0))
@@ -452,7 +496,27 @@ class GeometricGazeEstimator:
             offset_term=offset_term,
             eyes_used=len(measurements),
             head_pose_applied=pose is not None,
+            resolution_term=resolution_term,
         )
+
+
+def _usable_pose(pose: HeadPose | None) -> HeadPose | None:
+    """The pose, or ``None`` if any part of it is missing or non-finite.
+
+    One definition, used for the foreshortening correction, the composition
+    and the confidence alike, so a partly-broken pose can never be applied in
+    one place and reported as absent in another. It matters because
+    ``max(floor, nan)`` returns the floor: a NaN head pitch would otherwise
+    become a permanent 2x amplification of the vertical signal.
+    """
+
+    if pose is None:
+        return None
+    if not (math.isfinite(pose.yaw_deg) and math.isfinite(pose.pitch_deg)):
+        return None
+    if not bool(np.all(np.isfinite(pose.rotation))):
+        return None
+    return pose
 
 
 def _zero_confidence_reason(confidence: GazeConfidence) -> str:
@@ -464,9 +528,21 @@ def _zero_confidence_reason(confidence: GazeConfidence) -> str:
         ("the two eyes disagree completely", confidence.agreement_term),
         ("head turned too far for the gaze model", confidence.pose_term),
         ("iris offset is outside the eyeball model", confidence.offset_term),
+        ("the eye is too few pixels wide to measure", confidence.resolution_term),
     )
     zeroed = [reason for reason, term in named if term <= 0.0]
     return "; ".join(zeroed) if zeroed else "gaze confidence is zero"
+
+
+def _ramp_to_floor(value: float, floor: float, full: float, floor_factor: float) -> float:
+    """``floor_factor`` at or below ``floor``, 1 at or above ``full``, linear between."""
+
+    if not math.isfinite(value):
+        return floor_factor
+    if full <= floor:
+        return 1.0 if value >= full else floor_factor
+    fraction = min(1.0, max(0.0, (value - floor) / (full - floor)))
+    return floor_factor + fraction * (1.0 - floor_factor)
 
 
 def _ramp(value: float, floor: float, full: float) -> float:
@@ -480,7 +556,11 @@ def _ramp(value: float, floor: float, full: float) -> float:
 
 
 def _readonly_direction(vector: np.ndarray) -> Array:
+    """A read-only unit copy; the norm is checked here, not assumed."""
+
     norm = float(np.linalg.norm(vector))
+    if not math.isfinite(norm) or norm <= 0.0:
+        raise ValueError("gaze direction must be a finite, non-zero vector")
     unit = np.asarray(vector, dtype=np.float32) / np.float32(norm)
     unit.setflags(write=False)
     return unit

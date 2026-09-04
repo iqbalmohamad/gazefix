@@ -127,6 +127,8 @@ def gaze_scene(
     perspective_scale: bool = False,
     eyeball_radius_mm: float = EYEBALL_RADIUS_MM,
     fissure_width_mm: float = FISSURE_WIDTH_MM,
+    canthus_depth_mm: float | None = None,
+    pixels_per_mm: float = PIXELS_PER_MM,
 ) -> GazeScene:
     """A frame whose eyes look ``eye_yaw/eye_pitch`` degrees inside their sockets.
 
@@ -135,6 +137,20 @@ def gaze_scene(
     Head angles follow ``HeadPose``: positive yaw turns toward the subject's
     left, positive pitch tilts the head DOWN, positive roll rotates
     counter-clockwise in the unmirrored image.
+
+    ``canthus_depth_mm`` is how far in FRONT of the eyeball centre the two
+    palpebral corners sit, and it is the fixture's one idealisation worth
+    naming. It defaults to ``eyeball_radius_mm``, which puts the corners at
+    exactly the depth a centred iris reaches, so a centred iris and the corner
+    midpoint are coplanar and head rotation produces no apparent iris offset
+    at all. Real canthi are not at that depth, and the estimator's
+    foreshortening cancellation is only exact when they are. Pass a different
+    value to measure how much head rotation leaks into the "eye-in-head"
+    signal once the assumption is relaxed; see docs/gaze.md section 5.
+
+    ``pixels_per_mm`` scales the whole projection, so lowering it models a
+    face further from the camera: every angle is unchanged but the eye covers
+    fewer pixels, which is what ``GazeConfidence.resolution_term`` reports.
     """
 
     geometry = geometry or FrameGeometry(1280, 720)
@@ -159,19 +175,20 @@ def gaze_scene(
             [sign * EYE_SEPARATION_MM / 2.0, EYE_HEIGHT_MM, 0.0], dtype=np.float64
         )
         half = fissure_width_mm / 2.0
-        # The palpebral corners sit on the plane across the front of the globe.
+        depth = eyeball_radius_mm if canthus_depth_mm is None else canthus_depth_mm
+        # The palpebral corners sit on a plane across the front of the globe.
         # ``+x`` is the subject's left, so for the subject's RIGHT eye the outer
         # (temporal) corner is the one at more negative x, and for the LEFT eye
         # it is the one at more positive x.
-        outward = np.array([sign * half, 0.0, eyeball_radius_mm], dtype=np.float64)
-        inward = np.array([-sign * half, 0.0, eyeball_radius_mm], dtype=np.float64)
+        outward = np.array([sign * half, 0.0, depth], dtype=np.float64)
+        inward = np.array([-sign * half, 0.0, depth], dtype=np.float64)
         outer_head = eyeball_centre + outward
         inner_head = eyeball_centre + inward
         iris_head = eyeball_centre + eyeball_radius_mm * gaze
 
-        outer_px = _project(outer_head, rotation, centre_px, perspective_scale)
-        inner_px = _project(inner_head, rotation, centre_px, perspective_scale)
-        iris_px = _project(iris_head, rotation, centre_px, perspective_scale)
+        outer_px = _project(outer_head, rotation, centre_px, perspective_scale, pixels_per_mm)
+        inner_px = _project(inner_head, rotation, centre_px, perspective_scale, pixels_per_mm)
+        iris_px = _project(iris_head, rotation, centre_px, perspective_scale, pixels_per_mm)
         _write_eye(landmarks, side, outer_px, inner_px, iris_px, geometry, eye_openness, with_iris)
 
     normalised = landmarks.astype(np.float32)
@@ -205,11 +222,12 @@ def _project(
     rotation: np.ndarray,
     centre_px: np.ndarray,
     perspective_scale: bool,
+    pixels_per_mm: float = PIXELS_PER_MM,
 ) -> np.ndarray:
     """Head-frame millimetres to image pixels (camera y up, image rows down)."""
 
     camera = rotation @ point_head_mm
-    scale = PIXELS_PER_MM
+    scale = pixels_per_mm
     if perspective_scale:
         # Weak perspective: points nearer the camera (larger camera z) project
         # slightly larger. The face sits NOMINAL_DEPTH_MM in front.
@@ -271,7 +289,20 @@ __all__ = [
     "EYEBALL_RADIUS_MM",
     "FAKE_BACKEND_THRESHOLDS",
     "FISSURE_WIDTH_MM",
+    "MEASURED_CANTHUS_DEPTH_MM",
     "GazeScene",
     "gaze_scene",
     "rotation_matrix",
 ]
+
+
+#: Depth of the palpebral corners in front of the eyeball centre, in the same
+#: millimetres as ``EYEBALL_RADIUS_MM``. Measured, not assumed: MediaPipe's own
+#: model-relative landmark ``z`` puts the canthal midpoint about 0.2 of the
+#: lever arm behind the iris centre on the licensed fixture face (depth ratio
+#: 0.755 for the right eye, 0.808 for the left), which is 9.4 mm here. Passing
+#: this to ``gaze_scene(canthus_depth_mm=...)`` reproduces the realistic
+#: geometry rather than the coplanar idealisation the default uses; see
+#: docs/gaze.md section 5 and
+#: tests/test_real_model_tracking.py::test_real_canthal_depth_matches_the_documented_ratio.
+MEASURED_CANTHUS_DEPTH_MM = 9.4

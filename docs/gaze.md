@@ -27,9 +27,12 @@ kept separate in the code, the overlay and this document.
 `GazeResult` splits its own answer in two, and the distinction matters:
 
 - `eye_yaw_deg` / `eye_pitch_deg` — the **eye-in-head** rotation: the eye's
-  rotation inside its socket. Derived from iris geometry alone. It is
-  **exactly zero when the head moves and the eyes stay centred**, at any head
-  angle (verified in `tests/test_gaze_estimator.py`).
+  rotation inside its socket. The iris drives it; head pose only perturbs it,
+  in two bounded ways set out in §3 and measured in §5. On the idealised
+  geometry the tests use it is *exactly* zero when the head moves and the
+  eyes stay centred, at any head angle; on a real face a residual of a few
+  degrees leaks in at large head rotations. It is nowhere near a restatement
+  of head pose: an eye sweep moves it by 40°, a 30° head turn by about 5°.
 - `yaw_deg` / `pitch_deg` — the **camera-relative gaze**: the eye-in-head
   rotation composed with the head's orientation. This is the M2 headline
   output.
@@ -121,7 +124,20 @@ g_camera = head_rotation @ g_head                  (or g_head, if head pose is u
 ```
 
 `k = 1.25` comes from an adult palpebral fissure of about 30 mm (half-width
-15 mm) and an eyeball radius of about 12 mm.
+15 mm) over a lever arm of about 12 mm.
+
+Be careful about what that lever arm is. It is the distance from the eye's
+**centre of rotation to the iris centre as imaged**, not the eyeball radius:
+the centre of rotation sits roughly 13.5 mm behind the corneal apex and the
+entrance pupil roughly 3 mm behind it, so the true arm is nearer 10.5 mm than
+12 mm, which would put `k` nearer 1.4. The default is left at the conservative
+end, which under-reports the magnitude of large deflections rather than
+over-reporting them. Combined with the 26–33 mm spread of fissure width across
+adults, the defensible range for `k` is roughly **1.1 to 1.45**, and §5
+measures what that costs. In practice `k` is best understood as an empirical
+gain: MediaPipe's iris centre is a learned landmark, not a modelled optical
+feature, so no anatomical figure pins it exactly. It is the one constant a
+calibration milestone would replace.
 
 ### Why the axes are measured on the eye itself
 
@@ -132,9 +148,21 @@ consequences fall out:
   face, so `u` and `v` are already in the eye's frame. Measured residual error
   from roll: 0.000 degrees at +/-30 degrees of roll.
 - **Head yaw needs no correction for `u`.** The projected eye width and the
-  projected horizontal displacement both shrink by `cos(head_yaw)`, and the
-  factor cancels in the ratio. The horizontal signal — the primary and most
-  reliable one — therefore uses **no head-pose information whatsoever**.
+  projected horizontal displacement both shrink by `cos(head_yaw)`, so the
+  factor cancels in the ratio and the horizontal signal — the primary and most
+  reliable one — uses no head-pose information in its arithmetic.
+
+  **That cancellation is exact only if the iris centre and the corner midpoint
+  are at the same depth**, which they are not on a real face: the canthi sit
+  behind the plane a centred iris reaches. The residual leaks head yaw into
+  `u` in proportion to `tan(head_yaw)`, and it is measured in §5. It is a
+  bounded perturbation, not the signal — but the earlier drafts of this
+  document claimed `u` was head-pose-free full stop, and that was too strong.
+
+There is one more approximation in the axes: `ey` is the image-perpendicular
+of `ex`, whereas the head's projected up-axis is only perpendicular to its
+projected right-axis when head yaw and pitch are not both non-zero. The
+resulting cross-talk is under a degree over the range §5 tabulates.
 
 ### Why `v` is the only place head pose enters
 
@@ -166,13 +194,29 @@ exposed on the result so a reader can see which one is responsible:
 score = tracking_quality x openness_term x agreement_term x pose_term x offset_term
 ```
 
-| Term | Computed from | Falls when |
-| --- | --- | --- |
-| `tracking_quality` | M1 `TrackingQuality.score` | the face is small, or partly outside the frame |
-| `openness_term` | the less open of the eyes used; ramp 0 at 0.10 to 1 at 0.20 | the eyelids cover the iris (a blink drives it to 0) |
-| `agreement_term` | how far the two eyes' independent estimates differ, beyond a deadband | one eye is mistracked; fixed 0.6 when only one eye is usable |
-| `pose_term` | head rotation; 1 up to 25 deg, falling to 0.25 at 60 deg | the head turns away and the projected model degrades; fixed 0.7 when head pose is unavailable |
-| `offset_term` | the measured iris offset against the eyeball model | the offset approaches or exceeds what an eye can produce |
+| Term | Computed from | Falls when | Thresholds |
+| --- | --- | --- | --- |
+| `tracking_quality` | M1 `TrackingQuality.score` | the face is small, or partly outside the frame | inherited from M1 |
+| `openness_term` | the less open of the eyes used; ramp 0 at 0.10 to 1 at 0.20 | the eyelids cover the iris (a blink drives it to 0) | CHOSEN, against M1's observed 0.25–0.4 for an open eye |
+| `agreement_term` | how far the two eyes' estimates differ, beyond a deadband | one eye is mistracked; fixed 0.6 when only one eye is usable | deadband MEASURED (below); span and single-eye factor CHOSEN |
+| `pose_term` | head rotation; 1 up to 25 deg, falling to 0.25 at 60 deg | the head turns away and the projected model degrades | CHOSEN, informed by the §5 error tables |
+| `offset_term` | the measured iris offset against the eyeball model | the offset approaches or exceeds what an eye can produce | CHOSEN |
+| `resolution_term` | the smaller eye's half-width in pixels; ramp 0.2 at 5 px to 1 at 20 px | the face is far away, so one pixel of iris noise is worth several degrees | CHOSEN |
+
+Only the agreement deadband is set from measurement; `tracking_quality` is
+inherited from M1. **Every other threshold in the table is a chosen
+engineering default**, not a measured one, and this document says so rather
+than dressing them up.
+
+Two things the confidence does *not* cover, stated plainly:
+
+- `agreement_term` compares the two eyes, so it is **blind to any error common
+  to both** — which includes the largest ones: the per-user `k`, angle kappa,
+  and the head-yaw depth leak of §5. It detects a per-eye tracking failure,
+  not an inaccurate estimate.
+- There is no term for the accuracy of the zero reference. An uncalibrated
+  estimator cannot know where "looking at the camera" is for this person to
+  better than a few degrees, and no confidence number will tell you.
 
 **This is a heuristic, not a probability.** It is labelled as such in
 `CONFIDENCE_PROVENANCE`, exactly as M1's `TrackingQuality` is. No gaze model
@@ -224,6 +268,58 @@ angle.
 | 20 deg | -0.00 | -0.98 | -2.11 | -3.64 |
 | 30 deg | -0.00 | -2.35 | -5.00 | -8.53 |
 
+**The depth leak, and how big it actually is.** The horizontal cancellation
+above is exact only when the iris centre and the corner midpoint sit at the
+same depth. They do not. MediaPipe's own model-relative landmark `z` measures
+the gap on the licensed fixture face: the canthal midpoint sits behind the
+iris centre by about 0.2 of the lever arm — a depth ratio of **0.755 (right
+eye) and 0.808 (left)**, which is 9.4 mm in the fixture's millimetres. That
+measurement is pinned by
+`tests/test_real_model_tracking.py::test_real_canthal_depth_matches_the_documented_ratio`,
+so the figures below stay honest.
+
+The case that matters for the milestone is a **fixating subject**: someone
+keeping their eyes on the lens while turning their head. Their true
+camera-relative gaze is 0 at every head angle, so anything the estimator
+reports is error — and if gaze were a rescaled head pose, it would track the
+head exactly. Reported gaze yaw, in degrees:
+
+| canthus depth | head 10 | head 20 | head 30 | head 40 |
+| --- | --- | --- | --- | --- |
+| 12 mm (coplanar) | -0.16 | -1.34 | -5.26 | -17.05 |
+| 10 mm | +1.55 | +2.34 | +1.24 | -4.37 |
+| **9.4 mm (measured)** | ~+2 | ~+3 | ~+3 | ~-1 |
+| 8 mm | +3.25 | +5.96 | +7.36 | +5.99 |
+
+At the measured depth the residual stays within a few degrees while the head
+moves through 40 — comparable to the per-user terms below and far smaller than
+the head rotation it would have to reproduce to be "head pose rescaled".
+
+**Head-only motion with the eyes centred.** Apparent eye-in-head yaw, in
+degrees, as the corners move behind the depth a centred iris reaches. 12 mm is
+coplanar — the idealisation most tests use — and each row below is shallower:
+
+| canthus depth | head yaw 15 | head yaw 30 | head yaw 45 |
+| --- | --- | --- | --- |
+| 12 mm (coplanar) | 0.00 | 0.00 | 0.00 |
+| 10 mm | +2.56 | +5.52 | +9.59 |
+| 8 mm | +5.12 | +11.10 | +19.47 |
+| 6 mm | +7.70 | +16.78 | +30.00 |
+
+Head pitch produces the same magnitudes with the opposite sign on
+`eye_pitch_deg`. This is why `pose_term` falls with head rotation, and why the
+claim in §1 is "the iris moves it far more than the head does" rather than
+"the head does not move it".
+
+A parallax correction for this term is possible — subtract the depth residual
+using a measured protrusion constant — and it is deliberately **not** in M2.
+At the measured depth the leak is a few degrees, which is the same size as the
+per-user `k` uncertainty and smaller than angle kappa, so correcting it would
+not make the estimate meaningfully better while adding a second uncalibrated
+constant that can overshoot (the 12 mm row above shows how easily an assumed
+depth errs the other way). It is recorded here as the natural first
+improvement for a calibration milestone.
+
 **Vertical (eye pitch error vs. head pitch):**
 
 | true eye pitch | head 0 | head 15 | head 30 | head 45 |
@@ -266,6 +362,13 @@ Other error sources, in rough order of size:
   or falls below `tracking_min_eye_width_px`, M1 stops reporting `TRACKED`, and
   gaze reports `UNAVAILABLE` (measured: a 89-degree synthetic head yaw is
   already unavailable).
+- **The M1 landmark stabiliser is per-point.** `LandmarkStabilizer` gives each
+  landmark its own velocity-adaptive gain, so a fast-moving iris and slower
+  eye corners can be smoothed by different amounts for a frame or two. Because
+  `u` and `v` are a ratio between them, that differential lag shows up as a
+  brief phantom offset during rapid eye movement. Set `tracking_smoothing=0`
+  to remove it; the gaze smoother then still damps iris jitter downstream, in
+  the right units.
 - **Backend iris quality.** Everything rests on MediaPipe's iris landmarks;
   glasses, reflections, strong side lighting and low resolution degrade them.
   Not characterised here — the Product Owner's smoke test is where this shows

@@ -4,11 +4,19 @@ What this is and is not
 -----------------------
 ``GazeResult`` says roughly where the eyes are looking, relative to the
 camera. It is derived from eye and iris geometry (see
-``gazefix.gaze.estimator``), not from head orientation: ``eye_yaw_deg`` and
-``eye_pitch_deg`` are the eye's rotation INSIDE its socket and contain no
-head-pose contribution at all. Head pose, when available, is used only to
-turn that eye-in-head rotation into a camera-relative direction, which is
-what ``yaw_deg`` and ``pitch_deg`` report.
+``gazefix.gaze.estimator``): ``eye_yaw_deg`` and ``eye_pitch_deg`` are the
+eye's rotation INSIDE its socket, driven by where the iris sits between the
+eye corners, and ``yaw_deg``/``pitch_deg`` compose that with the head's
+orientation to give a camera-relative direction.
+
+Head pose is not the source of the eye-in-head signal, but it is not absent
+from it either, and the docs should not pretend otherwise. It enters twice,
+both bounded: as a foreshortening scale on the VERTICAL component only (see
+``estimator``), and as a residual leak once the eye corners and the iris are
+not at the same depth — about 5 degrees of apparent eye yaw at 30 degrees of
+head yaw for a 2 mm depth difference. ``docs/gaze.md`` section 5 measures
+both. What makes gaze a distinct signal is that the iris moves it while the
+head is still, by far more than either term.
 
 It is not eye tracking. There is no calibration in M2, no per-user anatomy,
 no camera intrinsics, and no correction for the angle between a person's
@@ -58,7 +66,8 @@ Side = Literal["left", "right"]
 #: in this milestone reports a probability of its own.
 CONFIDENCE_PROVENANCE = (
     "heuristic: product of tracking quality, eyelid openness, inter-eye "
-    "agreement, head-pose plausibility and iris-offset headroom"
+    "agreement, head-pose plausibility, iris-offset headroom and eye "
+    "resolution"
 )
 
 
@@ -106,8 +115,15 @@ class GazeConfidence:
       rotation. A fixed, lower constant when head pose is unavailable.
     - ``offset_term``: falls as the measured iris offset approaches the limit
       of the eyeball model, where the estimate saturates.
+    - ``resolution_term``: falls as the eye becomes small in pixels. Every
+      angle here is a ratio over the eye's half-width, so a distant face
+      turns one pixel of iris noise into several degrees; without this term a
+      tiny eye could report a confident-looking number.
 
-    ``eyes_used`` is how many eyes contributed. ``head_pose_applied`` says
+    Only ``tracking_quality`` and the agreement deadband are derived from
+    measurement; the other thresholds are CHOSEN engineering defaults, and
+    ``docs/gaze.md`` section 4 says which is which. ``eyes_used`` is how many
+    eyes contributed. ``head_pose_applied`` says
     whether a head rotation was composed in; when ``False`` the angles are
     eye-in-head angles reported as if the head faced the camera.
     """
@@ -120,6 +136,7 @@ class GazeConfidence:
     offset_term: float
     eyes_used: int
     head_pose_applied: bool
+    resolution_term: float = 1.0
     provenance: str = CONFIDENCE_PROVENANCE
 
 
@@ -129,8 +146,8 @@ class EyeGaze:
 
     ``yaw_deg`` and ``pitch_deg`` are this eye's rotation inside its socket,
     in the head's frame: positive yaw toward the subject's left, positive
-    pitch up, both zero when the iris is centred in the palpebral fissure.
-    They carry NO head-pose contribution.
+    pitch up, both zero when the iris is centred in the palpebral fissure and
+    the head is square to the camera.
 
     ``offset_u`` and ``offset_v`` are the measured iris-centre displacement
     from the corner midpoint, as a fraction of the eye's half-width, along
@@ -145,6 +162,10 @@ class EyeGaze:
     pitch_deg: float
     offset_u: float
     offset_v: float
+    #: Corner-to-corner half-width in pixels. It is the denominator of both
+    #: ratios above, so it sets the angular resolution of this eye's estimate;
+    #: ``GazeConfidence.resolution_term`` is derived from it.
+    half_width_px: float = 0.0
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -227,6 +248,7 @@ def unavailable(message: str, estimation_ms: float | None = None) -> GazeResult:
             offset_term=0.0,
             eyes_used=0,
             head_pose_applied=False,
+            resolution_term=0.0,
         ),
         message=message,
         estimation_ms=estimation_ms,

@@ -436,3 +436,41 @@ def test_real_gaze_estimation_is_fast_enough_to_be_free_on_the_frame_path(cv2, s
     per_frame_ms = (_time.perf_counter() - started) / runs * 1000.0
     # The MediaPipe inference this sits beside costs tens of milliseconds.
     assert per_frame_ms < 5.0, per_frame_ms
+
+
+def test_real_canthal_depth_matches_the_documented_ratio(cv2, still, tracker, clock) -> None:  # type: ignore[no-untyped-def]
+    """The measurement behind ``MEASURED_CANTHUS_DEPTH_MM`` and docs/gaze.md section 5.
+
+    The estimator's horizontal foreshortening cancellation is exact only when
+    the iris centre and the corner midpoint are at the same depth. They are
+    not, and MediaPipe's own model-relative landmark ``z`` says by how much:
+    the canthal midpoint sits behind the iris centre by roughly 0.2 of the
+    lever arm, i.e. a depth ratio near 0.78. That number sets the size of the
+    head-yaw leak the documentation reports, so it is pinned here rather than
+    assumed.
+    """
+
+    from gazefix.gaze.estimator import GazeSettings
+
+    frame = canvas(cv2, still)
+    detection = tracker.detect(frame, clock.next())
+    landmarks, _ = validate_landmarks(detection.faces[0].landmarks)
+    width, height = frame.shape[1], frame.shape[0]
+    ratios = []
+    for side in ("right", "left"):
+        contour = topology.eye_contour(side)
+        outer = landmarks[contour[topology.CONTOUR_OUTER_CORNER_POSITION]]
+        inner = landmarks[contour[topology.CONTOUR_INNER_CORNER_POSITION]]
+        iris_centre = landmarks[topology.iris_indices(side)[0]]
+        # z shares the x scale, so convert it with the frame width.
+        depth_px = ((float(outer[2]) + float(inner[2])) / 2.0 - float(iris_centre[2])) * width
+        half_width_px = (
+            math.hypot((float(outer[0]) - float(inner[0])) * width,
+                       (float(outer[1]) - float(inner[1])) * height) / 2.0
+        )
+        lever_arm_px = half_width_px / GazeSettings().eye_model_ratio
+        ratios.append(1.0 - depth_px / lever_arm_px)
+    # Behind the iris, not in front of it, and by a modest fraction.
+    for ratio in ratios:
+        assert 0.6 < ratio < 0.95, ratios
+    assert sum(ratios) / 2.0 == pytest.approx(0.78, abs=0.1)

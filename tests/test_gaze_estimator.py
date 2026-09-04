@@ -640,3 +640,196 @@ def test_mirroring_the_estimate_is_the_supported_path() -> None:
     assert mirrored.yaw_deg == pytest.approx(-direct.yaw_deg)
     assert direct.direction is not None and mirrored.direction is not None
     assert float(mirrored.direction[0]) == pytest.approx(-float(direct.direction[0]))
+
+
+# --- the depth assumption behind "head motion alone changes nothing" ---
+
+
+@pytest.mark.parametrize("head_yaw", [15.0, 30.0, 45.0])
+def test_head_yaw_leaks_into_the_eye_signal_once_the_corners_are_not_coplanar(
+    head_yaw: float,
+) -> None:
+    """The estimator's foreshortening cancellation assumes a depth coincidence.
+
+    ``u`` is only exactly head-pose-free when the iris and the corner midpoint
+    lie at the same depth. Real canthi do not, so head rotation leaks a
+    residual into the "eye-in-head" angle. This pins the size of that leak so
+    the documentation cannot overstate the independence; docs/gaze.md
+    section 5 carries the table.
+    """
+
+    coplanar = estimator().estimate(gaze_scene(0.0, 0.0, head_yaw, 0.0, 0.0).result())
+    assert coplanar.eye_yaw_deg == pytest.approx(0.0, abs=0.05)
+
+    # Corners 2 mm behind the depth a centred iris reaches.
+    offset = estimator().estimate(
+        gaze_scene(0.0, 0.0, head_yaw, 0.0, 0.0, canthus_depth_mm=10.0).result()
+    )
+    assert offset.eye_yaw_deg is not None
+    leak = abs(offset.eye_yaw_deg)
+    assert 1.0 < leak < 12.0, leak
+    # The leak grows with head yaw, so it is the tan(head_yaw) residual and
+    # not a constant bias.
+    smaller = estimator().estimate(
+        gaze_scene(0.0, 0.0, head_yaw / 3.0, 0.0, 0.0, canthus_depth_mm=10.0).result()
+    )
+    assert smaller.eye_yaw_deg is not None
+    assert leak > abs(smaller.eye_yaw_deg)
+
+
+def test_iris_movement_still_dominates_the_depth_leak() -> None:
+    """The hard acceptance property survives the leak, which is the point."""
+
+    engine = estimator()
+    readings = []
+    for eye_yaw in (-20.0, 0.0, 20.0):
+        engine.reset()
+        result = engine.estimate(
+            gaze_scene(eye_yaw, 0.0, 30.0, 0.0, 0.0, canthus_depth_mm=10.0).result()
+        )
+        assert result.eye_yaw_deg is not None
+        readings.append(result.eye_yaw_deg)
+    # A 40-degree eye sweep moves the estimate far more than the ~5-degree
+    # leak a 30-degree head turn contributes.
+    assert readings[2] - readings[0] > 30.0
+    assert all(b > a for a, b in zip(readings, readings[1:]))
+
+
+# --- head pose unavailable is never a trusted estimate ---
+
+
+def test_without_head_pose_the_status_is_capped_at_low_confidence() -> None:
+    """The unknown head rotation is tens of degrees, not a 0.7 multiplier."""
+
+    result = estimator().estimate(gaze_scene(20.0, 0.0, 30.0, 0.0, 0.0).result(with_pose=False))
+    assert result.status is GazeStatus.LOW_CONFIDENCE
+    assert result.available is False
+    assert "head pose unavailable" in result.message
+    assert result.head_pose_applied is False
+    # The angles are still carried, so a developer can see them.
+    assert result.yaw_deg is not None
+
+
+def test_a_non_finite_head_pose_is_treated_as_no_head_pose() -> None:
+    """max(floor, nan) returns the floor, which would silently amplify v."""
+
+    from dataclasses import replace
+
+    from gazefix.tracking.models import HeadPose, readonly
+
+    base = gaze_scene(0.0, 20.0).result()
+    broken = HeadPose(
+        yaw_deg=float("nan"),
+        pitch_deg=float("nan"),
+        roll_deg=0.0,
+        rotation=readonly(np.eye(3), (3, 3)),
+        translation=readonly(np.zeros(3), (3,)),
+    )
+    result = estimator().estimate(replace(base, pose=broken))
+    assert result.head_pose_applied is False
+    assert result.status is GazeStatus.LOW_CONFIDENCE
+    assert result.eye_pitch_deg == pytest.approx(20.0, abs=0.5)
+
+
+def test_a_non_finite_rotation_matrix_is_treated_as_no_head_pose() -> None:
+    from dataclasses import replace
+
+    from gazefix.tracking.models import HeadPose, readonly
+
+    rotation = np.eye(3)
+    rotation[0, 0] = float("nan")
+    broken = HeadPose(0.0, 0.0, 0.0, readonly(rotation, (3, 3)), readonly(np.zeros(3), (3,)))
+    result = estimator().estimate(replace(gaze_scene(15.0).result(), pose=broken))
+    assert result.head_pose_applied is False
+    assert result.status.has_direction
+    assert result.yaw_deg is not None and math.isfinite(result.yaw_deg)
+
+
+# --- resolution ---
+
+
+def test_a_small_eye_lowers_confidence_through_the_resolution_term() -> None:
+    """Angular noise is a ratio over the eye half-width, so pixels matter."""
+
+    big = estimate({})
+    assert big.confidence.resolution_term == pytest.approx(1.0)
+    # The same face, further from the camera: same angles, fewer pixels.
+    small = estimate({"pixels_per_mm": 0.7})
+    assert small.confidence.resolution_term < big.confidence.resolution_term
+    assert small.confidence.score < big.confidence.score
+    # The angle itself is unchanged; only the trust in it falls.
+    assert small.eye_yaw_deg == pytest.approx(big.eye_yaw_deg, abs=1.0)
+
+
+def test_the_resolution_term_never_falls_below_its_floor() -> None:
+    result = estimate({"pixels_per_mm": 0.2})
+    if result.status.has_direction:
+        assert result.confidence.resolution_term >= GazeSettings().resolution_floor_factor
+
+
+def test_each_eye_reports_the_half_width_the_resolution_term_uses() -> None:
+    result = estimate({})
+    assert len(result.per_eye) == 2
+    for eye in result.per_eye:
+        assert eye.half_width_px > 0.0
+
+
+def test_confidence_is_the_product_of_all_six_published_terms() -> None:
+    result = estimate({"head_yaw_deg": 45.0, "eye_openness": 0.15})
+    c = result.confidence
+    expected = (
+        c.tracking_quality
+        * c.openness_term
+        * c.agreement_term
+        * c.pose_term
+        * c.offset_term
+        * c.resolution_term
+    )
+    assert c.score == pytest.approx(expected)
+
+
+def test_a_fixating_subject_is_not_reported_as_looking_away() -> None:
+    """The strongest AC1 case: eyes on the camera while the head turns.
+
+    A person keeping their eyes on the lens has a true camera-relative gaze of
+    0 at every head angle. If gaze were a rescaled head pose the reported yaw
+    would track the head. It does not: at the canthal depth measured from
+    MediaPipe's own landmark z (``MEASURED_CANTHUS_DEPTH_MM``), the residual
+    stays within a few degrees out to a 40-degree head turn, against a head
+    pose that has moved 40 degrees.
+    """
+
+    from gaze_fakes import MEASURED_CANTHUS_DEPTH_MM
+
+    for head_yaw in (10.0, 20.0, 30.0, 40.0):
+        scene = gaze_scene(
+            -head_yaw, 0.0, head_yaw, 0.0, 0.0, canthus_depth_mm=MEASURED_CANTHUS_DEPTH_MM
+        )
+        tracking = scene.result()
+        result = estimator().estimate(tracking)
+        assert result.status.has_direction, result.message
+        assert result.yaw_deg is not None and tracking.pose is not None
+        assert tracking.pose.yaw_deg == pytest.approx(head_yaw, abs=0.1)
+        # The head moved by head_yaw; the reported gaze did not follow it.
+        assert abs(result.yaw_deg) < 6.0, (head_yaw, result.yaw_deg)
+        assert abs(result.yaw_deg) < 0.25 * head_yaw + 3.0
+
+
+def test_the_fixating_residual_is_the_depth_leak_and_grows_with_it() -> None:
+    """Pin the leak's source so a regression cannot be mistaken for noise."""
+
+    from gaze_fakes import MEASURED_CANTHUS_DEPTH_MM
+
+    def residual(depth: float) -> float:
+        engine = estimator()
+        result = engine.estimate(
+            gaze_scene(-30.0, 0.0, 30.0, 0.0, 0.0, canthus_depth_mm=depth).result()
+        )
+        assert result.yaw_deg is not None
+        return abs(result.yaw_deg)
+
+    # Coplanar corners: the cancellation is exact and the residual is small.
+    assert residual(12.0) < 6.0
+    # Shallower corners: a bigger depth difference, a bigger leak.
+    assert residual(8.0) > residual(MEASURED_CANTHUS_DEPTH_MM)
+    assert residual(6.0) > residual(8.0)
