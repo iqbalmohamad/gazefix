@@ -1,359 +1,146 @@
 # GazeFix — Current Engineering Assignment
 
-You are the primary Software Engineer for **GazeFix**.
+**Active milestone: M1 — Face and Eye Tracking**
 
-ChatGPT is the Product Manager. The user is the Product Owner.
+**M0 status: PASS / CLOSED / FROZEN**
 
-The attached **GazeFix Product Requirements Document v1.1** remains the unchanged source of truth for product requirements, product scope, constraints, milestone definitions, and acceptance criteria. This file is the source of truth for the engineering work that is currently active.
+**Assignment date: 2026-09-04**
 
-Do not edit the PRD as part of this assignment. If this assignment materially conflicts with the PRD, stop and escalate the conflict instead of silently changing product behavior.
+## Authority and roles
 
-# Active Assignment
+The repository `01-GazeFix-Product-Requirements-Document-v1.1.md` remains the unchanged higher-level source of truth for product scope, requirements, constraints, and milestone gates. This assignment defines the currently authorized engineering work. The PRD's original M0-first starting priority is historical; this assignment advances the active milestone after its gate has closed, without changing the product requirements. If a material conflict exists, escalate it rather than editing the PRD or silently changing scope.
 
-Complete **M0 Follow-up Hardening** only.
+- ChatGPT: Product Manager / Technical Lead; scope, acceptance, and milestone decisions.
+- Product Owner: final product decisions and target-device verification.
+- Claude Code with Fable 5.1 Ultracode: primary implementation engineer and self-review.
+- Kimi via Claude Code CLI: primary independent QA/reviewer.
+- Codex: selective escalation or high-risk review only; not the default reviewer on every iteration.
 
-Milestone 0 has already passed, and PR #2 was merged into `milestone-0` at merge commit:
+Workflow: ChatGPT assignment → Claude implementation/self-review → Kimi QA → Claude fixes → Kimi re-review → Codex only if escalation/high-risk review is needed → Product Owner physical/runtime verification where applicable → authorized merge. No automatic progression to M2.
 
-```text
-a636d890284dd9c36231c45727990c06af77f6f1
-```
+## M0 closure and frozen baseline
 
-Before Milestone 1 begins, resolve both remaining M0 carry-forward issues:
+PR #3, `claude/m0-followup-hardening` → `milestone-0`, is merged:
+https://github.com/iqbalmohamad/gazefix/pull/3
 
-1. Truthful shutdown-state bookkeeping.
-2. Diagnostic-versus-production camera timing fidelity.
+- Reviewed and tested source HEAD: `527ed2936bf5b288de1e2e46e934b155ba96c4e3`.
+- Merge commit / frozen M0 baseline: `3b0a2eee8b0fc207875702250955e78173857957`.
+- GitHub merge time: 2026-09-04 01:53:36 UTC.
+- Verification: GitHub reports merged with the exact expected source HEAD and target; fetched Git history confirms the source HEAD is an ancestor of the merge. The merge tree equals the reviewed source tree.
 
-This is a focused M0 hardening assignment. It does not reopen the completed Milestone 0 feature scope and does not authorize Milestone 1 work.
+Prior Product Owner verification on Windows 11 / Python 3.12.10: full automated suite **157 passed**; interactive GUI, physical webcam preview, Refresh, clean close, camera release after close, and physical-camera diagnostic all **PASS**. Reported startup approximately 1.x seconds; capture approximately 29.7 FPS; display approximately 28.5 FPS; 1280×720; MSMF validated. These are historical M0 results, not a new test run or evidence that M1 works. The merge commit records the completed Windows smoke test; the PR body's older "NOT VERIFIED / Draft" text predates that verification.
 
----
+The remaining `PreparedCameraCloser` ambiguous `Thread.start()` bootstrap case is an accepted, non-blocking M0/MVP-foundation known limitation and production-hardening debt, as documented in `docs/architecture.md`. Do not reopen M0 for the same synthetic edge case. Revisit on new real Windows shutdown hangs, lingering camera locks, observable cleanup-thread leaks, or before M10/productization. New regressions introduced by M1 are not covered by this exception.
 
-# Repository and Git Rules
+M0 is officially PASS/CLOSED and frozen. Do not advance, rewrite, or merge M1 into `milestone-0`. Preserve its baseline without requiring a new tag or branch-protection change.
 
-Start from the latest remote `milestone-0`.
+## Objective
 
-Before modifying code:
+Integrate stable facial and eye landmark tracking into the existing local Windows live-preview pipeline. Produce usable tracking metadata and a development overlay while preserving responsive video, frame freshness, camera lifecycle behavior, and bounded resource cleanup. M1 proves tracking only; it does not estimate where the eyes are looking.
 
-1. Fetch the latest remote state.
-2. Confirm that `origin/milestone-0` contains merge commit `a636d890284dd9c36231c45727990c06af77f6f1` or a later expected commit.
-3. Inspect the repository structure, current status, relevant history, affected implementation, and existing tests.
-4. Preserve unrelated work and do not rewrite history.
+## Scope
 
-Create and work only on:
+1. Detect a face and track facial landmarks, anatomical left/right eyes and eyelid contours during normal head movement.
+2. Expose iris landmarks when the selected tracker provides them. Represent unavailable iris data explicitly; document and justify any limitation.
+3. Provide face orientation required by PR-3; expose head-pose information where useful. Document coordinate conventions and validity. Any head yaw/pitch/roll describes head orientation only, never eye gaze.
+4. Expose truthful tracking confidence/quality and validity. Define the meaning, range, thresholds, and provenance of scores. If the backend does not expose a probability, use an explicitly described quality/availability signal; do not fabricate a model confidence.
+5. Define a small tracking-result contract tied to frame sequence/timestamp and camera generation. Include face/eye validity, coordinates, optional iris/pose, confidence/quality, and processing timing. Document mirroring, left/right naming, resize/crop mapping, and coordinate units.
+6. Integrate through the existing processor seam. Keep capture, tracking/model initialization, and blocking work off the Qt UI thread. Keep tracking logic independent of widgets; preserve immutable input ownership and generation filtering. Document tracker ownership, initialization, reset, and shutdown.
+7. Add a development-mode overlay showing landmarks, optional iris/pose, tracking status/confidence, and useful tracking timing. Keep debug controls out of the normal consumer UI. Overlay off must preserve the original frame pixels; rendering must not mutate shared capture buffers.
+8. Handle no face, low confidence, missing/partial landmarks, tracker/model initialization failure, runtime exceptions, face loss/re-entry, and camera changes. Preserve usable original-frame preview and clear invalid/stale tracking output. Recovery must be bounded and avoid per-frame error/retry storms.
+9. Default to one primary face. Document a deterministic selection policy for multiple faces, avoiding arbitrary identity jumps. Multi-person tracking is not required.
+10. Add only focused setup, architecture, diagnostic, and test documentation necessary to reproduce M1. Simple landmark stabilization is allowed where justified; it must reset on loss/source change and not add stale-frame latency.
 
-```text
-claude/m0-followup-hardening
-```
+## Non-goals and hard boundaries
 
-Create the branch from the latest:
+- **No M2 or later milestone implementation**, scaffolding for future features, or automatic continuation after M1.
+- **No gaze estimation**: no eye-direction yaw/pitch, gaze vectors, gaze target, camera/screen gaze mapping, or eye-contact score.
+- **No gaze correction**: no eye warping, redirection, correction strength, correction masks/blending, or correction compositing. Drawing the debug overlay is allowed.
+- **No calibration**: no calibration workflow, profiles, user-specific camera/screen mapping, or calibration controls.
+- **No virtual camera**: no output backend, driver, pyvirtualcam, OBS integration, or conferencing-client integration.
+- No neural gaze-redirection inference, ONNX Runtime adoption, model training, dataset collection, cloud inference, or frame upload. Local inference used solely by the approved face/landmark tracker is within M1.
+- No M5 stabilization system, M7 optimization project, installer/productization work, unrelated refactoring, or reopening accepted M0 debt without its stated trigger.
+- Do not edit the PRD. Do not modify, commit on, push to, or merge into `main`.
 
-```text
-origin/milestone-0
-```
+## Repository and branch strategy
 
-The pull request target must be:
+Before implementation, fetch remotes, inspect status/history and applicable repository instructions, and preserve unrelated work. Use an isolated checkout when needed; never reset or clean someone else's working tree.
 
-```text
-milestone-0
-```
+1. The assignment-only branch is `codex/m1-assignment`, based directly on frozen M0 merge `3b0a2eee8b0fc207875702250955e78173857957`. Its assignment commit changes only this file and does not implement M1.
+2. At M1 kickoff, record the exact assignment commit SHA. If `milestone-1` does not exist, create the M1 integration branch from that assignment commit and publish it. If it already exists, inspect its ancestry and assignment before using it; do not overwrite or silently adopt conflicting work.
+3. Create `claude/m1-face-eye-tracking` from the verified `milestone-1` baseline. If the implementation branch exists, inspect it and safely continue only if it belongs to this assignment.
+4. Commit and push focused implementation work to `claude/m1-face-eye-tracking`. Open a reviewable PR targeting **`milestone-1`**, never `milestone-0` or `main`.
+5. Existing `codex/m1-tracking-foundation` is historical work outside this new baseline. Do not merge or cherry-pick it wholesale, assume it passed review, or replace the hardened M0 foundation with it. Any reused idea must be independently checked against this assignment and tested in the new implementation.
+6. Do not force-push, rewrite existing history, or merge the implementation PR. Leave it for Kimi review and Product Manager/Product Owner gate decisions.
 
-Do not modify, merge into, or push to `main`.
+The present assignment-writing task authorizes only this document update and its commit; implementation and creation of the M1 implementation/integration branches occur at the later engineering kickoff.
 
-Commit and push the completed work to `claude/m0-followup-hardening`, then open a pull request into `milestone-0`.
+## Dependency and model policy
 
-Do **not** merge the pull request. It must remain available for independent review.
+Preserve Python 3.11+ and Windows 10/11 compatibility, local-only processing, and a working CPU path on the target Intel i7 / Iris Xe class laptop. No NVIDIA, CUDA, NPU, Windows Studio Effects, or cloud-service requirement.
 
----
+MediaPipe is the PRD's preferred tracking option, not a mandatory choice. Before adopting a major package or pretrained model, verify and record authoritative sources, version/date, active project status, Windows/Python compatibility, CPU support, code license, model license separately, and redistribution restrictions. Explain significant stack/architecture changes before implementation; escalate material licensing, privacy, hardware, product, or paid/cloud changes with Problem / Options / Trade-offs / Recommendation. Ordinary implementation choices remain Claude's responsibility.
 
-# Scope Boundaries
+Add dependencies only when needed for M1. Specify tested versions or compatible bounds and inspect transitive conflicts, especially NumPy, OpenCV variants, and Qt. Do not install future-milestone packages merely because they appear in the preferred stack. Never silently introduce commercially licensed or research-only assets as production-ready.
 
-Do not begin Milestone 1.
+If a model file is needed, document its official source, exact version and checksum, license/redistribution terms, local location, and reproducible setup. Any setup download must be explicit; normal runtime must work offline with the asset present. Missing/corrupt/incompatible assets must yield an actionable local error and usable original preview. Do not silently download on launch or store/upload webcam images. Test fixtures must be synthetic or appropriately licensed and documented.
 
-Do not implement or introduce:
+## Acceptance criteria
 
-- face detection or tracking,
-- eye or iris tracking,
-- head-pose estimation,
-- gaze estimation or correction,
-- calibration,
-- ML, ONNX, or MediaPipe inference,
-- compositing changes for future gaze correction,
-- virtual-camera output or OBS integration,
-- future product controls,
-- unrelated architecture or repository restructuring.
+- **AC1 — Live tracking:** On the target Windows webcam, one visible face has aligned facial landmarks, distinct left/right eye and eyelid landmarks, and face orientation. Iris information is provided where supported or explicitly reported unavailable with justification. Landmarks remain visually attached during ordinary movement, blinking, and speaking.
+- **AC2 — Truthful results:** Validity/confidence semantics and coordinate transforms are documented and exercised. Partial/invalid output never masquerades as valid full tracking; pose cannot be confused with gaze. Metadata belongs to the displayed frame and camera generation.
+- **AC3 — Failure/recovery:** No face, face exit/re-entry, occlusion/low confidence, model failure, tracker exception, and camera switching clear stale results and preserve recoverable original-frame preview. No old landmarks remain attached to a new face or camera. Bounded recovery and shutdown behavior are demonstrated.
+- **AC4 — Overlay and ownership:** A development-only overlay can be toggled; original pixels remain unchanged with overlay off. Overlays align under the implemented mirror/resize policy. Shared input frames are never mutated, and widgets are accessed only by the UI thread.
+- **AC5 — Pipeline continuity:** Slow tracking cannot create an unbounded frame queue or continuously growing latency. Latest-frame behavior, responsiveness, camera Refresh/selection, clean close, and camera release remain intact. Document how overload or a stalled tracker is handled without claiming that a timeout can cancel an uninterruptible native call.
+- **AC6 — Reproducible CPU setup:** Supported Windows/Python setup and the selected local model run on CPU without mandatory special hardware or network access during normal use. Dependencies and model licensing are documented.
+- **AC7 — Evidence and scope:** Meaningful automated tests pass, Windows/physical evidence is reported honestly, and the full diff respects all M1 boundaries. Unverified required runtime items prevent unconditional PASS.
 
-Also:
+PRD MVP/M7 targets remain 720p, >=24 FPS, and <100 ms processing latency; they are not newly imposed M1 performance gates. Measure M1 at 1280×720 where supported, report any internal inference resolution and trade-offs, and flag regressions against the historical M0 baseline. Do not silently redefine product performance targets or claim them from a mock benchmark.
 
-- add no new major dependency,
-- add no cloud functionality,
-- preserve Python 3.11+ and Windows 10/11 compatibility,
-- preserve the no-CUDA/no-NVIDIA/no-NPU requirement,
-- keep all waits bounded,
-- keep camera and worker ownership explicit,
-- preserve latest-frame semantics,
-- keep changes focused on the affected lifecycle and camera-opening/diagnostic areas.
+## Test expectations
 
----
+Use deterministic, hardware-independent tests in the default suite; normal tests must not need a webcam, internet, or an external model download. Separate explicitly invoked real-backend/model tests from fakes and mark unavailable integration requirements accurately.
 
-# Issue 1 — Truthful Shutdown-State Bookkeeping
+Cover behavior, including:
 
-## Problem
+- Valid face/eye output, optional iris/pose absence, malformed/partial landmarks, confidence thresholds, and no-face results.
+- Anatomical left/right, mirroring/resize mapping, overlay on/off, immutable input buffers, and result/frame identity.
+- Loss/reacquisition and camera-generation changes clearing tracker state; stale in-flight results rejected.
+- Initialization failure, missing/corrupt asset, inference exception, bounded retry/fallback, and tracker resource release.
+- Slow processing/latest-frame replacement, UI responsiveness seams, and stop during initialization/in-flight processing.
+- Existing M0 camera lifecycle, ownership, shutdown-state, diagnostic timing, and buffer regressions.
 
-`gazefix/pipeline/runtime.py` currently clears `_started` after `stop()` even when the shutdown deadline expires and one or more workers may still be alive.
+Prefer events/barriers and fakes over sleep-sensitive concurrency tests. Keep the existing full suite passing; do not delete or weaken a test to hide a regression. Run focused tests while iterating, the full suite on final HEAD, and useful import/CLI checks. Provide commands, versions, pass/fail/skip counts, and reasons for skipped tests. Historical "157 passed" is a baseline, not the expected new count or a substitute for executing tests.
 
-That can make the runtime claim it is stopped when it is not. A later `stop()` can then take the early-success path even though the earlier shutdown did not fully terminate the runtime.
+## Runtime and physical verification
 
-Logging the timeout is not sufficient; the internal lifecycle state and subsequent behavior must remain truthful.
+Run the real tracker/model on documented, licensed local inputs when available; mock tests cannot establish landmark quality. Then verify on the Product Owner's Windows laptop or an equivalent capable target:
 
-## Required Behavior
+1. Startup, responsive GUI, physical webcam preview, CPU tracker initialization, and actionable behavior when the model is unavailable.
+2. At least 60 seconds of ordinary use: steady face, minor head motion, blinking, speaking; inspect landmark attachment and confidence. Exercise glasses and lighting variation when available and record limits.
+3. Face leaves/re-enters, brief eye/face occlusion, no-face scene, and multiple-face selection policy where feasible; confirm stale overlays disappear and recovery works.
+4. Overlay toggle, Refresh, switching cameras when available, disconnect/recovery where feasible, clean close, and physical camera release. Unavailable second-device scenarios must be marked NOT VERIFIED.
+5. Record capture/display FPS, tracking latency, total processing latency with defined boundaries, dropped/replaced frames, and useful CPU/memory observations. State warm-up/sample duration, resolution, camera/backend, model/runtime versions, and hardware. Use NOT MEASURED for missing data.
 
-Review the actual runtime, capture-worker, processing-worker, and UI shutdown lifecycle. Implement a robust state model such that:
+Report each relevant item as VERIFIED / NOT VERIFIED / FAILED and identify its level: implementation verified, runtime verified, or physical hardware verified. Windows imports alone are not GUI verification; non-Windows execution is not Windows verification. Screenshots/short recordings may support review when useful and approved by the Product Owner; do not record or transmit webcam frames by default.
 
-1. A shutdown timeout never causes the runtime to represent live workers as fully stopped.
-2. The boolean result of `stop()` accurately reflects whether every owned worker has terminated.
-3. Repeated `stop()` calls after a timeout continue to report and act on the real worker state; they must not return success solely because an earlier call cleared a bookkeeping flag.
-4. If a worker remains alive after a timeout, subsequent lifecycle operations are deterministic and safe.
-5. If the worker later terminates, a later `stop()` can observe and finalize the stopped state without leaking resources.
-6. A successful shutdown leaves the runtime fully stopped and preserves any currently supported restart/reuse behavior. Do not invent restart support if the architecture does not support it.
-7. Joins and waits remain bounded by explicit deadlines. Do not add an unbounded join or block the Qt UI thread indefinitely.
-8. Existing ownership rules remain intact: a blocked OpenCV call is not made unsafe by releasing its capture concurrently from another thread.
-9. Pending prepared-camera resources are closed safely and exactly as lifecycle ownership requires.
-10. Existing clean-shutdown, camera-switch, interrupt, and latest-frame behavior is preserved.
-11. Timeout and recovery paths emit useful, truthful local logging without hiding failure state.
+A known acceptance failure or materially incomplete implementation is FAIL. Passing implementation with unavailable required runtime/hardware evidence is PASS WITH LIMITATIONS, not PASS. PASS requires all applicable acceptance criteria verified in a capable environment. Optional iris/pose details and unavailable ancillary scenarios require explicit rationale; they cannot silently waive required face/eye/orientation behavior.
 
-## Required Regression Tests
+## Required engineering report
 
-Add meaningful hardware-independent tests covering at least:
+Return the following sections, then stop:
 
-- successful shutdown,
-- shutdown timeout while a worker remains alive,
-- repeated `stop()` after that timeout,
-- eventual worker termination and truthful finalization, where applicable to the implemented state model,
-- preservation of bounded waits,
-- no false stopped/success state while any owned worker is still alive.
-
-Prefer deterministic fakes/events over wall-clock-sensitive tests. Use the architecture already present rather than adding an unnecessary lifecycle framework.
+1. **Status:** Delivery status READY FOR REVIEW or BLOCKED; milestone recommendation PASS / PASS WITH LIMITATIONS / FAIL using the PRD definitions. The Product Manager makes the milestone decision. Explain any incomplete acceptance item.
+2. **Branch and provenance:** Frozen M0 SHA, assignment commit SHA, integration branch and starting SHA, implementation branch, tested final HEAD, PR number/link, and target milestone-1.
+3. **Implemented behavior:** Face/eye/iris/orientation capabilities, confidence contract, coordinates, primary-face policy, overlay behavior, fallback/recovery, and important changed files.
+4. **Architecture and lifecycle:** Processor integration, threads, frame ownership/generation filtering, bounded buffers, tracker reset/cleanup, overload policy, and any native-call cancellation limitations.
+5. **Dependencies and models:** Added/changed packages and tested versions; official compatibility/license sources; model provenance/checksum/setup; CPU and offline behavior; decisions escalated.
+6. **Acceptance and verification matrix:** AC1–AC7 mapped to evidence, verification level, and VERIFIED / NOT VERIFIED / FAILED; focused/full-suite commands and results; real-model, Windows GUI, physical camera, and release checks separately; exact tested HEAD and environment.
+7. **Performance:** Measured FPS/latencies/frame replacement and resource observations with boundaries, sample conditions, resolution, and comparison limits; NOT MEASURED where unavailable.
+8. **Self-review and QA:** Concurrency, lifecycle, stale-result, coordinate, failure, dependency, regression, and scope review; outstanding findings with severity and evidence; Kimi findings/fixes/re-review status if already available. Do not invent independent QA.
+9. **Known limitations and decisions:** Distinguish accepted M0 debt, M1 defects, environment gaps, and future work; list concrete remaining Product Owner checks.
+10. **Scope confirmation:** No M2, gaze estimation, correction, calibration, neural gaze redirection, virtual camera, future-milestone dependencies, PRD change, main change, or modification of frozen milestone-0.
+11. **Merge state:** PR NOT MERGED.
+12. **Recommendation and next step:** PROCEED / ITERATE / CHANGE APPROACH with rationale. Initial handoff: Ready for independent Kimi QA. After fixes: Ready for Kimi re-review. Escalate to Codex only for a specific unresolved/high-risk concern. List required Product Owner verification before an authorized merge.
 
-## Acceptance Criteria
-
-This issue is accepted only when all of the following are true:
-
-- Runtime lifecycle state agrees with actual worker liveness after every `stop()` outcome.
-- A timed-out shutdown cannot be converted into a false success by calling `stop()` again.
-- A later call can safely recognize eventual termination if a timed-out worker subsequently exits.
-- No unbounded wait, unsafe cross-thread camera release, race-prone cleanup, or UI-thread deadlock is introduced.
-- Existing normal shutdown behavior remains passing.
-- Focused regression tests demonstrate the timeout and repeated-stop cases.
-
----
-
-# Issue 2 — Diagnostic-versus-Production Timing Fidelity
-
-## Problem
-
-`gazefix/camera/diagnostics.py` currently opens and configures cameras differently from the production path in `gazefix/camera/source.py`.
-
-The diagnostic currently constructs `cv2.VideoCapture(index, backend)`, then unconditionally sets width, height, FPS, and buffer size. Production uses different DirectShow open parameters, conditional format application, fallback/validation behavior, and shared application settings. As a result, the diagnostic timings are useful for A/B comparison but are not necessarily representative of production startup behavior.
-
-## Required Behavior
-
-Review the production open/configure flow and diagnostic probe flow. Refactor at the appropriate lower-level seam so the diagnostic shares or faithfully exercises the production camera-opening and configuration behavior needed for meaningful timing data.
-
-The result must satisfy all of the following:
-
-1. Requested backend behavior is explicit and consistent between diagnostic and production use where equivalence is intended.
-2. MSMF and DirectShow opening/configuration semantics match production behavior, including DirectShow open parameters and conditional width/height/FPS application.
-3. Hardware-transform behavior remains configurable and testable for MSMF A/B runs.
-4. Timing fields remain correctly defined and useful. At minimum, preserve meaningful measurements for open, configure, first-frame validation/read, sampling, and release where technically possible.
-5. Reported backend, negotiated width, negotiated height, negotiated FPS, observed FPS, successful reads, failed reads, and errors remain accurate.
-6. Every opened or partially opened camera resource is released on success, failure, interruption, and exception paths.
-7. The diagnostic remains CLI-friendly, local-only, and safe to run against physical hardware.
-8. The diagnostic is not coupled to PySide6 or the Qt UI.
-9. Production code does not depend on the diagnostic module.
-10. Duplicated camera-open/configuration logic is removed or reduced where it can be shared safely.
-11. The existing diagnostic CLI remains compatible unless a small backward-compatible extension is needed.
-12. Any remaining intentional difference from production is documented precisely, including its effect on interpreting timing results.
-
-Do not claim exact production equivalence unless the code path and measurement boundaries justify that claim.
-
-## Required Regression Tests
-
-Add or update hardware-independent tests covering at least:
-
-- reuse of the intended production opening/configuration primitives,
-- backend-specific behavior for MSMF and DirectShow,
-- width/height/FPS configuration semantics,
-- timing-field meaning at the chosen measurement boundaries,
-- first-frame validation/read behavior,
-- release on success and all relevant failure paths,
-- hardware-transform configuration propagation,
-- any documented intentional distinction from production.
-
-Physical-camera verification may supplement these tests but must not replace them.
-
-## Acceptance Criteria
-
-This issue is accepted only when all of the following are true:
-
-- Diagnostic results are generated through the production-equivalent open/configuration behavior claimed by the implementation.
-- Backend selection, requested format behavior, first-frame behavior, and hardware-transform settings are consistent where intended.
-- Timing labels accurately describe what is measured and are not presented as production timings if a material distinction remains.
-- Camera ownership and release are correct on every path.
-- The CLI remains usable without a Qt dependency.
-- Production runtime does not depend on diagnostic code.
-- Focused hardware-independent regression tests demonstrate the shared behavior.
-
----
-
-# Required Engineering Workflow
-
-1. Fetch and branch from the latest `origin/milestone-0`.
-2. Inspect the current lifecycle, camera source, diagnostic code, configuration, and relevant tests before editing.
-3. Implement both carry-forward fixes without expanding scope.
-4. Add focused regression tests for both issues.
-5. Run the focused tests while iterating.
-6. Run the complete automated test suite.
-7. Run static, import, or CLI-help validation where useful.
-8. If the environment permits, run the diagnostic safely; distinguish code verification from Windows/physical-camera verification.
-9. Self-review the complete diff, including surrounding code, for:
-   - concurrency and race conditions,
-   - worker lifecycle truthfulness,
-   - bounded shutdown behavior,
-   - camera ownership and release,
-   - production/diagnostic equivalence,
-   - timing-definition accuracy,
-   - backward compatibility,
-   - test quality,
-   - scope compliance.
-10. Fix issues found during self-review.
-11. Confirm no unrelated files or future-milestone functionality were introduced.
-12. Commit and push the branch.
-13. Open a pull request from `claude/m0-followup-hardening` into `milestone-0`.
-14. Do not merge the pull request.
-
-Do not stop after proposing code when repository access is available. Complete the implementation, verification, self-review, commit, push, and PR creation unless a genuine blocker prevents them.
-
----
-
-# Verification Policy
-
-Report evidence precisely and distinguish:
-
-```text
-CODE VERIFIED
-RUNTIME VERIFIED
-PHYSICAL HARDWARE VERIFIED
-```
-
-Automated tests with fakes do not verify a physical webcam. Import or CLI-help success does not verify real camera timing. If Windows GUI or physical-camera verification is unavailable, state `NOT VERIFIED`; do not infer or fabricate a result.
-
-The complete test suite must pass before reporting `READY FOR REVIEW`. If an unrelated environmental limitation prevents a test from running, report it explicitly with the evidence gathered; do not silently omit it.
-
----
-
-# Pull Request Requirements
-
-The pull request must:
-
-- use source branch `claude/m0-followup-hardening`,
-- target `milestone-0`,
-- contain both fixes and their tests,
-- describe the previous failure modes and the implemented behavior,
-- state focused and full-suite test results,
-- identify any Windows or physical-hardware items not verified,
-- confirm that no M1 functionality was introduced,
-- remain unmerged for independent Codex review.
-
-Do not modify or merge into `main`.
-
----
-
-# Required Final Engineering Report
-
-When the work is complete, return exactly this report structure, then stop.
-
-## Status
-
-Choose exactly one:
-
-```text
-READY FOR REVIEW
-BLOCKED
-```
-
-## Branch
-
-Report:
-
-- base branch and starting SHA,
-- working branch,
-- final HEAD SHA,
-- pull request number and link.
-
-## Shutdown-State Fix
-
-Explain:
-
-- the previous failure mode,
-- the new lifecycle/state behavior,
-- how timeout, repeated `stop()`, and eventual termination behave,
-- regression tests added.
-
-## Diagnostic Fidelity Fix
-
-Explain:
-
-- the previous difference from production,
-- which production primitives or behavior are now shared,
-- the exact timing boundaries,
-- any remaining intentional distinction,
-- regression tests added.
-
-## Repository Changes
-
-List the important files modified and why.
-
-## Verification
-
-Report:
-
-- focused test commands and results,
-- complete test-suite command and result,
-- static/import/CLI checks run,
-- Windows runtime status,
-- physical-camera status,
-- any failures or limitations.
-
-Use `NOT VERIFIED` for unavailable runtime or hardware checks.
-
-## Self-Review
-
-Summarize the concurrency, lifecycle, ownership, timing-fidelity, regression, and scope review. List any remaining meaningful risks or non-blocking notes.
-
-## Scope Confirmation
-
-Confirm all of the following:
-
-- no Milestone 1 functionality,
-- no face/eye/iris tracking,
-- no gaze estimation or correction,
-- no calibration, ML inference, or virtual-camera work,
-- no new major dependencies,
-- no changes pushed or merged to `main`.
-
-## Merge State
-
-State exactly:
-
-```text
-PR NOT MERGED
-```
-
-## Next Step
-
-State exactly:
-
-```text
-Ready for independent Codex review.
-```
-
-Do not begin Milestone 1. Do not merge the pull request.
+A full-suite failure prevents READY FOR REVIEW as a passing delivery; report any environment blocker explicitly rather than hiding omitted tests. Commit/push completed work and open the PR when access permits; otherwise report the exact blocker and local commit. Do not merge, declare M1 closed on behalf of the Product Manager, or begin M2.
