@@ -454,3 +454,41 @@ def test_processor_close_is_idempotent_and_safe_before_start() -> None:
     assert not processor.worker_alive
     processor.start()  # after close: no thread is started
     assert not processor.worker_alive
+
+
+def test_degenerate_face_arrays_are_bounded_errors_not_thread_deaths() -> None:
+    processor, factory = ready_processor()
+    driver = Driver(processor)
+    try:
+        driver.until_status(TrackingStatus.TRACKED)
+        tracker = factory.trackers[0]
+        tracker.faces = (RawFace(landmarks=np.zeros((0, 3), dtype=np.float32)),)  # empty face
+        output, _ = driver.until_status(TrackingStatus.ERROR)
+        assert "malformed" in output.tracking.message
+        assert processor.worker_alive
+        tracker.faces = (RawFace(landmarks=np.zeros(5, dtype=np.float32)),)  # 1-D garbage
+        driver.until_status(TrackingStatus.ERROR)
+        assert processor.worker_alive
+        tracker.faces = (face(),)
+        driver.until_status(TrackingStatus.TRACKED)  # still the same thread and tracker
+        assert tracker.close_calls == 0
+    finally:
+        processor.close()
+
+
+def test_thread_start_failure_labels_frames_unavailable_without_retrying(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    processor = TrackingProcessor(ScriptedFactory(), tracking_settings(), PipelineMetrics())
+    calls = {"n": 0}
+
+    def failing_start() -> None:
+        calls["n"] += 1
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(processor._worker, "start", failing_start)  # noqa: SLF001
+    driver = Driver(processor)
+    for _ in range(3):
+        output, _ = driver.frame_once()
+        assert output.tracking is not None and output.tracking.status is TrackingStatus.UNAVAILABLE
+        assert "could not be started" in output.tracking.message
+    assert calls["n"] == 1
+    processor.close()

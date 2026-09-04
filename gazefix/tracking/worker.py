@@ -40,6 +40,8 @@ from threading import Condition, Event, Thread
 import time
 from typing import Callable
 
+import numpy as np
+
 from gazefix.config import AppSettings
 from gazefix.diagnostics.metrics import PipelineMetrics
 from gazefix.pipeline.processor import Frame, FrameContext
@@ -179,16 +181,19 @@ class TrackerWorker:
             self._pending = submission
             self._condition.notify_all()
 
-    def wait_for(self, sequence: int, timeout_s: float) -> TrackingResult | None:
-        """Wait, bounded, for the result of ``sequence``; ``None`` if it is not available.
+    def wait_for(self, sequence: int, timeout_s: float) -> tuple[TrackingResult | None, WorkerStatus]:
+        """Wait, bounded, for the result of ``sequence``.
 
-        Returns at once, without waiting, when waiting cannot pay off: the
-        tracker is not ready (initialising or unavailable), the worker is
-        stopping, or an inference of an OLDER frame has already been running
-        longer than ``timeout_s`` (a stalled tracker: every later frame would
-        otherwise wait the full timeout and the preview would crawl). In
-        those cases the frame is published untracked and the video keeps
-        flowing at capture rate.
+        Returns the result (or ``None``) together with the worker status
+        captured under the same lock at the moment the decision was made, so
+        the caller labels the frame from the state that caused it, not from
+        a later snapshot. Returns at once, without waiting, when waiting
+        cannot pay off: the tracker is not ready (initialising or
+        unavailable), the worker is stopping, or an inference of an OLDER
+        frame has already been running longer than ``timeout_s`` (a stalled
+        tracker: every later frame would otherwise wait the full timeout and
+        the preview would crawl). In those cases the frame is published
+        untracked and the video keeps flowing at capture rate.
         """
 
         deadline = self._clock() + timeout_s
@@ -196,24 +201,32 @@ class TrackerWorker:
             while True:
                 latest = self._latest
                 if latest is not None and latest.capture_sequence == sequence:
-                    return latest
+                    return latest, self._status_locked()
                 if self._stop.is_set() or self._state != STATE_READY:
-                    return None
+                    return None, self._status_locked()
                 in_flight = self._in_flight
                 if (
                     in_flight is not None
                     and in_flight[0] < sequence
                     and self._clock() - in_flight[1] >= timeout_s
                 ):
-                    return None  # stalled on an older frame; do not pile up waits
+                    return None, self._status_locked()  # stalled on an older frame
                 remaining = deadline - self._clock()
                 if remaining <= 0:
-                    return None
+                    return None, self._status_locked()
                 self._condition.wait(remaining)
 
     def status(self) -> WorkerStatus:
         with self._condition:
-            return WorkerStatus(self._state, self._message, self._description, self._generation or 0)
+            return self._status_locked()
+
+    def _status_locked(self) -> WorkerStatus:
+        return WorkerStatus(self._state, self._message, self._description, self._generation or 0)
+
+    def mark_unavailable(self, message: str) -> None:
+        """Label every frame as unavailable (the thread could not be started)."""
+
+        self._set_state(STATE_UNAVAILABLE, message)
 
     # ------------------------------------------------------- tracker thread
     def _run(self) -> None:
@@ -369,8 +382,15 @@ class TrackerWorker:
         finally:
             with self._condition:
                 self._in_flight = None
+        try:
+            result = self._analyse(detection, submission)
+        except Exception as exc:  # noqa: BLE001  (analysis of one frame failed)
+            # Counts like an inference failure: bounded, rate-limited, and
+            # rebuilt only after repeated occurrences.
+            self._inference_failed(exc, submission)
+            return
         self._consecutive_errors = 0
-        self._publish(self._analyse(detection, submission))
+        self._publish(result)
 
     def _on_generation_change(self, generation: int) -> None:
         previous = self._generation
@@ -435,6 +455,9 @@ class TrackerWorker:
     def _rebuild_or_give_up(self, reason: str) -> None:
         """Close the tracker and schedule a rebuild, bounded per generation."""
 
+        # State first: the processor must stop waiting on this worker before
+        # the (possibly slow) close runs, not after it.
+        self._set_state(STATE_INITIALIZING, f"tracker restarting ({reason})")
         self._close_tracker(reason)
         self._consecutive_errors = 0
         self._rebuilds += 1
@@ -484,14 +507,24 @@ class TrackerWorker:
             total_ms=(self._clock() - submission.submitted_at) * 1000.0,
         )
         analysis = self._analysis
-        selection = self._selector.select(detection.faces)
+        # Selection works on plausible arrays only; a backend that returns a
+        # degenerate face must not take the selector down with it.
+        candidates = tuple(face for face in detection.faces if _plausible(face.landmarks))
+        if detection.faces and not candidates:
+            self._stabilizer.reset()
+            return untracked(
+                TrackingStatus.ERROR, context.capture_sequence, context.captured_at_ns,
+                context.camera_request_id, geometry, "malformed landmarks: no usable face array",
+                timing, len(detection.faces),
+            )
+        selection = self._selector.select(candidates)
         if selection is None:
             self._stabilizer.reset()
             return untracked(
                 TrackingStatus.NO_FACE, context.capture_sequence, context.captured_at_ns,
                 context.camera_request_id, geometry, "no face detected", timing, 0,
             )
-        face = detection.faces[selection.index]
+        face = candidates[selection.index]
         try:
             landmarks, iris_available = validate_landmarks(face.landmarks)
         except MalformedLandmarks as exc:
@@ -586,3 +619,15 @@ class TrackerWorker:
                     "close_ms": round((self._clock() - started) * 1000.0, 1),
                 },
             )
+
+
+def _plausible(landmarks: object) -> bool:
+    """Cheap shape/finiteness check before an array reaches the selector."""
+
+    shape = getattr(landmarks, "shape", None)
+    if shape is None or len(shape) != 2 or shape[1] != 3 or shape[0] not in (478, 468):
+        return False
+    try:
+        return bool(np.all(np.isfinite(landmarks)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False

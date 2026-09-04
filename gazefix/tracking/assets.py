@@ -109,7 +109,13 @@ def verify_model(path: Path, manifest: ModelManifest = FACE_LANDMARKER) -> Verif
     """
 
     model_path = Path(path)
-    if not model_path.is_file():
+    try:
+        exists = model_path.is_file()
+    except OSError as exc:
+        raise ModelAssetError(
+            "unreadable", f"{model_path} could not be read: {exc}", model_path
+        ) from exc
+    if not exists:
         raise ModelAssetError(
             "missing",
             f"{manifest.filename} not found at {model_path}. Run `{SETUP_COMMAND}` "
@@ -184,10 +190,16 @@ def provision_model(
     started = time.perf_counter()
     temporary: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb", prefix=f".{manifest.filename}.", suffix=".download",
-            dir=target_dir, delete=False,
-        ) as output:
+        try:
+            output = tempfile.NamedTemporaryFile(
+                mode="wb", prefix=f".{manifest.filename}.", suffix=".download",
+                dir=target_dir, delete=False,
+            )
+        except OSError as exc:
+            raise ModelAssetError(
+                "install", f"Cannot write into the model directory {target_dir}: {exc}", target
+            ) from exc
+        with output:
             temporary = Path(output.name)
             limit = manifest.size_bytes + _DOWNLOAD_SLACK_BYTES
             written = 0
@@ -204,7 +216,12 @@ def provision_model(
                             f"{manifest.size_bytes} bytes; aborted.",
                             target,
                         )
-                    output.write(chunk)
+                    try:
+                        output.write(chunk)
+                    except OSError as exc:
+                        raise ModelAssetError(
+                            "install", f"Cannot write the model into {target_dir}: {exc}", target
+                        ) from exc
         try:
             verified = verify_model(temporary, manifest)
         except ModelAssetError as exc:
@@ -216,7 +233,15 @@ def provision_model(
                 f"nothing was installed at {target}. Check the network path and retry.",
                 target,
             ) from exc
-        os.replace(temporary, target)
+        try:
+            os.replace(temporary, target)
+        except OSError as exc:
+            raise ModelAssetError(
+                "install",
+                f"Downloaded and verified, but {target} could not be replaced: {exc}. "
+                "Close GazeFix if it is running (the model file may be in use) and retry.",
+                target,
+            ) from exc
         temporary = None
         download_ms = round((time.perf_counter() - started) * 1000.0, 1)
         logger.info(

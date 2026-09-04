@@ -217,9 +217,17 @@ the budget. If an inference exceeds `tracking_wait_ms`, the frame is
 published as `TIMEOUT` and, while that same inference is still running,
 later frames are published as `TIMEOUT` immediately (no per-frame wait),
 so a slow or stalled tracker degrades to the original preview at capture
-rate rather than to a crawling one. When the stalled call returns, the
-tracker processes the newest waiting frame and results realign within a
-frame or two.
+rate rather than to a crawling one. When a one-off stall ends, the tracker
+processes the newest waiting frame and results realign within a frame or
+two. The boundary is sharp and worth stating plainly: results are attached
+only while an inference finishes inside the budget. A backend that is
+*persistently* slower than `tracking_wait_ms` produces `TIMEOUT` on every
+frame — each result arrives after the processor has moved on and is never
+picked up — so tracking is effectively paused while the tracker keeps
+computing discarded results at full CPU; the processor logs
+`tracking_budget_exceeded` once after 30 consecutive timeouts and the
+`Tracking:` metric shows `timeout`. Raising `tracking_wait_ms` trades
+display rate and latency for tracked frames on such a machine.
 
 A timeout cannot cancel the native call: the tracker thread stays inside
 it until the backend returns. Nothing else is blocked by that (the

@@ -69,7 +69,9 @@ def render_overlay(frame: Frame, result: TrackingResult, style: OverlayStyle | N
                 (result.left_eye, _LEFT_EYE, "L"),
             ):
                 if eye is not None:
-                    _draw_eye(canvas, eye, colour if not dim else _DIM_TEXT, label, width, height)
+                    # Same mapping as the mesh: the result's own geometry.
+                    _draw_eye(canvas, eye, colour if not dim else _DIM_TEXT, label,
+                              result.geometry.width, result.geometry.height)
             if style.pose_axes and result.pose is not None:
                 _draw_pose_axes(canvas, pixels[topology.NOSE_TIP], result, style.axis_length_px)
     if style.text:

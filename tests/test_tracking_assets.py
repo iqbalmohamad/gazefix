@@ -549,3 +549,64 @@ def test_fetch_model_script_runs_the_provisioning_cli(tmp_path: Path) -> None:
     report = json.loads(completed.stdout)
     assert report["error_kind"] == "missing"
     assert report["path"] == str(FACE_LANDMARKER.path_in(tmp_path))
+
+
+def test_permission_errors_on_the_model_path_are_reported_as_unreadable(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from pathlib import Path
+
+    from gazefix.tracking.assets import FACE_LANDMARKER, ModelAssetError, verify_model
+
+    target = FACE_LANDMARKER.path_in(tmp_path)
+    original = Path.is_file
+
+    def denied(self):  # type: ignore[no-untyped-def]
+        if self == target:
+            raise PermissionError(13, "Permission denied")
+        return original(self)
+
+    monkeypatch.setattr(Path, "is_file", denied)
+    try:
+        verify_model(target)
+    except ModelAssetError as exc:
+        assert exc.kind == "unreadable"
+    else:
+        raise AssertionError("a permission error must be classified, not raised raw")
+
+
+def test_install_failures_are_not_reported_as_download_failures(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import hashlib
+    import io
+    import os
+
+    from gazefix.tracking import assets
+
+    payload = b"model-bytes"
+    manifest = assets.ModelManifest(
+        name="tiny", filename="tiny.task", url="https://example.invalid/tiny.task",
+        size_bytes=len(payload), sha256=hashlib.sha256(payload).hexdigest(),
+        license="test", version="1", source="test",
+    )
+
+    class Response(io.BytesIO):
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *exc):  # type: ignore[no-untyped-def]
+            return None
+
+    def opener(url, timeout):  # type: ignore[no-untyped-def]
+        return Response(payload)
+
+    def failing_replace(src, dst):  # type: ignore[no-untyped-def]
+        raise PermissionError(32, "The process cannot access the file because it is being used by another process")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    try:
+        assets.provision_model(tmp_path, manifest, opener=opener)
+    except assets.ModelAssetError as exc:
+        assert exc.kind == "install"
+        assert "could not be replaced" in str(exc) and "Close GazeFix" in str(exc)
+    else:
+        raise AssertionError("a failed install must be reported")
+    assert not list(tmp_path.glob("*.download"))
+    assert not manifest.path_in(tmp_path).exists()

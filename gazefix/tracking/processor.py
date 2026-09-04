@@ -26,6 +26,8 @@ from gazefix.tracking.worker import STATE_INITIALIZING, STATE_READY, TrackerWork
 
 logger = logging.getLogger(__name__)
 
+_PERSISTENT_TIMEOUT_FRAMES = 30
+
 
 class TrackingProcessor:
     def __init__(
@@ -42,6 +44,8 @@ class TrackingProcessor:
         self._overlay_enabled = overlay_enabled
         self._closed = False
         self._started = False
+        self._consecutive_timeouts = 0
+        self._timeout_logged = False
 
     # ------------------------------------------------------------- UI-facing
     def set_overlay_enabled(self, enabled: bool) -> None:
@@ -75,19 +79,29 @@ class TrackingProcessor:
             self._worker.metrics = metrics
         if self._closed or self._started:
             return
-        self._started = True
-        self._worker.start()
+        try:
+            self._worker.start()
+        except Exception as exc:  # noqa: BLE001  (thread could not be launched)
+            logger.exception(
+                "Tracker thread could not be started; tracking unavailable",
+                extra={"event": "tracker_thread_start_error"},
+            )
+            self._worker.mark_unavailable(f"tracking unavailable: tracker thread could not be started ({exc})")
+        finally:
+            self._started = True  # never retried per frame
 
     def process(self, frame: Frame, context: FrameContext) -> ProcessorOutput:
         self.start()
         started = time.perf_counter()
         self._worker.submit(frame, context)
-        result = self._worker.wait_for(context.capture_sequence, self._settings.tracking_wait_ms / 1000.0)
+        result, status = self._worker.wait_for(
+            context.capture_sequence, self._settings.tracking_wait_ms / 1000.0
+        )
         waited_ms = (time.perf_counter() - started) * 1000.0
         if result is None or not result.belongs_to(context.capture_sequence, context.camera_request_id):
-            status = self._worker.status()
             if status.state == STATE_READY:
                 tracking_status, message = TrackingStatus.TIMEOUT, "tracking result not ready in time"
+                self._note_timeout()
             elif status.state == STATE_INITIALIZING:
                 tracking_status, message = TrackingStatus.INITIALIZING, status.message
             else:
@@ -102,6 +116,7 @@ class TrackingProcessor:
                 TrackingTiming(waited_ms=waited_ms),
             )
         else:
+            self._consecutive_timeouts = 0
             result = replace(result, timing=replace(result.timing, waited_ms=waited_ms))
         if self._metrics is not None:
             self._metrics.record_tracking(
@@ -111,6 +126,24 @@ class TrackingProcessor:
         if self.overlay_enabled:
             output = render_overlay(frame, result, OverlayStyle(description=self._worker.status().description))
         return ProcessorOutput(output, result)
+
+    def _note_timeout(self) -> None:
+        """Say once when the tracker is persistently slower than the wait budget."""
+
+        self._consecutive_timeouts += 1
+        if self._consecutive_timeouts == _PERSISTENT_TIMEOUT_FRAMES and not self._timeout_logged:
+            self._timeout_logged = True
+            logger.warning(
+                "Tracking results have not been ready in time for %d consecutive frames; "
+                "the tracker is slower than tracking_wait_ms and tracking is effectively "
+                "paused while the preview continues",
+                _PERSISTENT_TIMEOUT_FRAMES,
+                extra={
+                    "event": "tracking_budget_exceeded",
+                    "tracking_wait_ms": self._settings.tracking_wait_ms,
+                    "consecutive_timeouts": self._consecutive_timeouts,
+                },
+            )
 
     def close(self) -> None:
         if self._closed:

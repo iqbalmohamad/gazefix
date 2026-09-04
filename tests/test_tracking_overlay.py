@@ -226,3 +226,22 @@ def test_overlay_marks_are_drawn_at_the_landmark_pixel_positions() -> None:
         assert abs(centroid_x - cx) <= 2.0 and abs(centroid_y - cy) <= 2.0
     # Nothing is drawn far away from the face.
     assert canvas[:20, :20].max() == 0
+
+
+def test_eye_marks_follow_the_result_geometry_not_the_canvas_size() -> None:
+    """A result drawn on a differently sized canvas keeps one coordinate mapping."""
+
+    import numpy as np
+
+    from gazefix.tracking.models import FrameGeometry
+    from gazefix.tracking.overlay import OverlayStyle, render_overlay
+    from tracking_fakes import synthetic_landmarks, tracked_result
+
+    geometry = FrameGeometry(320, 180)
+    result = tracked_result(synthetic_landmarks(center=(0.5, 0.5), face_height=0.5), geometry)
+    big = np.zeros((360, 640, 3), dtype=np.uint8)
+    canvas = render_overlay(big, result, OverlayStyle(mesh_points=False, face_oval=False, pose_axes=False, text=False))
+    drawn = np.argwhere(canvas.max(axis=2) > 0)
+    assert len(drawn) > 0
+    # Everything lands inside the 320x180 region that the geometry describes.
+    assert drawn[:, 0].max() < 180 + 2 and drawn[:, 1].max() < 320 + 2
