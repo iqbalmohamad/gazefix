@@ -337,8 +337,8 @@ def test_gaze_degrades_on_a_low_quality_frame_instead_of_vanishing() -> None:
     assert result.confidence.score < 0.5
 
 
-def test_covering_one_eye_degrades_the_estimate_rather_than_abolishing_it() -> None:
-    """The production shape of a covered eye: LOW_QUALITY with one eye invalid."""
+def test_an_out_of_frame_eye_degrades_the_estimate_rather_than_abolishing_it() -> None:
+    """An eye M1 marks invalid: the other eye carries the estimate."""
 
     from dataclasses import replace
 
@@ -350,6 +350,52 @@ def test_covering_one_eye_degrades_the_estimate_rather_than_abolishing_it() -> N
     assert result.confidence.eyes_used == 1
     assert result.confidence.agreement_term == pytest.approx(GazeSettings().single_eye_factor)
     assert result.eye_yaw_deg == pytest.approx(15.0, abs=1.0)
+
+
+@pytest.mark.parametrize("shut_side", ["left", "right"])
+@pytest.mark.parametrize("aperture", [0.09, 0.05, 0.0])
+def test_one_shut_eye_does_not_take_the_whole_frame_down(shut_side: str, aperture: float) -> None:
+    """A winking or covered eye is the shape M1's ``valid`` flag cannot see.
+
+    ``EyeLandmarks.valid`` is in-frame-and-wide-enough and never looks at the
+    aperture, so a fully shut eye keeps its full corner-to-corner width and
+    stays valid. Merging it would corrupt the direction, and letting it into
+    the openness minimum used to take the whole frame to UNAVAILABLE while the
+    other eye was wide open — exactly what the Product Owner checklist and
+    docs/gaze.md promise will not happen.
+    """
+
+    apertures = {"right_eye_openness": 0.30, "left_eye_openness": 0.30}
+    apertures[f"{shut_side}_eye_openness"] = aperture
+    tracking = gaze_scene(15.0, **apertures).result()  # type: ignore[arg-type]
+
+    shut = tracking.left_eye if shut_side == "left" else tracking.right_eye
+    assert shut is not None
+    assert shut.valid is True, "the fixture must reproduce M1 calling a shut eye valid"
+
+    result = estimator().estimate(tracking)
+    assert result.status.has_direction, result.message
+    assert result.confidence.eyes_used == 1
+    assert result.confidence.agreement_term == pytest.approx(GazeSettings().single_eye_factor)
+    assert result.confidence.openness_term == pytest.approx(1.0), "the open eye is wide open"
+    assert result.eye_yaw_deg == pytest.approx(15.0, abs=1.0)
+    assert {eye.side for eye in result.per_eye} == {"left" if shut_side == "right" else "right"}
+
+
+def test_a_half_shut_eye_still_contributes_and_costs_confidence() -> None:
+    """Above the floor the eye is used, and drags the openness term with it."""
+
+    result = estimator().estimate(
+        gaze_scene(15.0, right_eye_openness=0.30, left_eye_openness=0.15).result()
+    )
+    assert result.confidence.eyes_used == 2
+    assert result.confidence.openness_term == pytest.approx(0.5, abs=0.05)
+
+
+def test_both_eyes_shut_is_still_unavailable_and_names_the_eyelids() -> None:
+    result = estimate({"eye_openness": 0.02})
+    assert result.status is GazeStatus.UNAVAILABLE
+    assert "eyelids" in result.message
 
 
 def test_an_untracked_result_yields_no_gaze() -> None:
@@ -590,10 +636,28 @@ def test_the_estimator_drops_temporal_state_when_gaze_goes_unavailable() -> None
 
 
 def test_reset_clears_the_estimator_state() -> None:
+    """Small steps on purpose: a large one passes the filter either way."""
+
+    settled, target = 3.0, 1.5
     engine = GeometricGazeEstimator(GazeSettings(smoothing=0.9))
-    engine.estimate(gaze_scene(25.0).result())
+    for _ in range(4):
+        engine.estimate(gaze_scene(settled).result())
     engine.reset()
-    assert engine.estimate(gaze_scene(-25.0).result()).eye_yaw_deg == pytest.approx(-25.0, abs=1.0)
+    after_reset = engine.estimate(gaze_scene(target).result())
+
+    unprimed = GeometricGazeEstimator(GazeSettings(smoothing=0.9)).estimate(
+        gaze_scene(target).result()
+    )
+    assert after_reset.eye_yaw_deg is not None and unprimed.eye_yaw_deg is not None
+    assert after_reset.eye_yaw_deg == pytest.approx(unprimed.eye_yaw_deg, abs=1e-9)
+
+    # And the step really is inside the filtered band, so a no-op reset fails.
+    primed = GeometricGazeEstimator(GazeSettings(smoothing=0.9))
+    for _ in range(4):
+        primed.estimate(gaze_scene(settled).result())
+    blended = primed.estimate(gaze_scene(target).result())
+    assert blended.eye_yaw_deg is not None
+    assert abs(blended.eye_yaw_deg - unprimed.eye_yaw_deg) > 1e-6
 
 
 def test_non_finite_eye_geometry_is_rejected_without_a_numpy_warning() -> None:

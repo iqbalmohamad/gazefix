@@ -129,6 +129,8 @@ def gaze_scene(
     fissure_width_mm: float = FISSURE_WIDTH_MM,
     canthus_depth_mm: float | None = None,
     pixels_per_mm: float = PIXELS_PER_MM,
+    right_eye_openness: float | None = None,
+    left_eye_openness: float | None = None,
 ) -> GazeScene:
     """A frame whose eyes look ``eye_yaw/eye_pitch`` degrees inside their sockets.
 
@@ -151,6 +153,13 @@ def gaze_scene(
     ``pixels_per_mm`` scales the whole projection, so lowering it models a
     face further from the camera: every angle is unchanged but the eye covers
     fewer pixels, which is what ``GazeConfidence.resolution_term`` reports.
+
+    ``right_eye_openness`` and ``left_eye_openness`` override ``eye_openness``
+    for one side, which is the only way to build the case that matters most
+    for graceful degradation: ONE eye winking, squinting or covered while the
+    other is wide open. A single shared aperture cannot express it, and M1's
+    own ``valid`` flag never looks at aperture, so an eye can be fully shut and
+    still be reported as valid.
     """
 
     geometry = geometry or FrameGeometry(1280, 720)
@@ -189,7 +198,10 @@ def gaze_scene(
         outer_px = _project(outer_head, rotation, centre_px, perspective_scale, pixels_per_mm)
         inner_px = _project(inner_head, rotation, centre_px, perspective_scale, pixels_per_mm)
         iris_px = _project(iris_head, rotation, centre_px, perspective_scale, pixels_per_mm)
-        _write_eye(landmarks, side, outer_px, inner_px, iris_px, geometry, eye_openness, with_iris)
+        aperture = right_eye_openness if side == "right" else left_eye_openness
+        if aperture is None:
+            aperture = eye_openness
+        _write_eye(landmarks, side, outer_px, inner_px, iris_px, geometry, aperture, with_iris)
 
     normalised = landmarks.astype(np.float32)
     transform = np.eye(4, dtype=np.float32)

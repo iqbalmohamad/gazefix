@@ -407,6 +407,17 @@ Other error sources, in rough order of size:
   lens. With no camera intrinsics there is nothing to correct this with. It is
   the same assumption as the orthographic projection, and it is why the smoke
   test asks the Product Owner to sit roughly in front of the camera.
+- **A shut eye is dropped, and the transition is not monotonic.** M1's
+  `EyeLandmarks.valid` is in-frame-and-wide-enough and never looks at the
+  aperture, so a fully closed eye keeps its corner-to-corner width and stays
+  valid. The estimator therefore drops any eye whose own aperture is below
+  `openness_floor` rather than averaging it in. One consequence is worth
+  knowing before it surprises anyone: as an eye closes, confidence *falls*
+  while it is still above the floor and dragging the openness term (0.20 at an
+  aperture of 0.12), then *rises* the moment it drops below and the estimate
+  falls back to the one good eye (0.60). Two regimes, not a bug — a half-open
+  eye is a bad measurement being averaged in, and one clean eye is better than
+  that.
 - **Eyelid aperture is re-measured for gaze, and M1's is not usable here.**
   M1's `EyeLandmarks.openness` is an image-space vertical lid separation over
   the corner distance, so it shrinks with head roll even though the eye has not
@@ -469,7 +480,9 @@ and turns any exception into an `UNAVAILABLE` result carrying the message.
 | tracker delivered a 468-point mesh (no iris refinement) | `UNAVAILABLE`, "no iris landmarks" |
 | both eyes degenerate (collapsed contour, non-finite geometry) | `UNAVAILABLE`, "no eye had usable iris geometry" |
 | eyelids too closed to locate the iris (blink) | `UNAVAILABLE`, names the eyelid term |
-| one eye unusable (covered, squinting, no iris) | estimate from the other, `eyes_used = 1`, agreement term fixed at 0.6 |
+| one eye unusable — M1 marks it invalid, or it has no iris | estimate from the other, `eyes_used = 1`, agreement term fixed at 0.6 |
+| one eye shut (winking, squinting, covered by a hand) | that eye is **dropped**, not merged; the other carries the estimate at `eyes_used = 1` |
+| both eyes shut (a blink) | `UNAVAILABLE`, "both eyelids are too closed to locate the iris" |
 | head pose present but non-finite | treated as no head pose at all, not as a zero angle |
 | head pose unavailable | estimate from eye-in-head angles alone, `head_pose_applied = False`, `pose_term` 0.7 |
 | confidence below `gaze_min_confidence` | `LOW_CONFIDENCE`: angles carried, `available` is `False` |

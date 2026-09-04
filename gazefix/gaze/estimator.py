@@ -259,14 +259,30 @@ class GeometricGazeEstimator:
         pose = _usable_pose(result.pose)
         cos_yaw, cos_pitch = self._foreshortening(pose)
         measurements: list[tuple[EyeGaze, float, float]] = []
+        closed = 0
         for eye in (result.right_eye, result.left_eye):
             if eye is None or not eye.valid or eye.iris is None:
                 continue
             measured = self._measure_eye(eye, result.geometry, cos_yaw, cos_pitch)
-            if measured is not None:
-                measurements.append(measured)
+            if measured is None:
+                continue
+            if measured[0].openness < settings.openness_floor:
+                # A shut eye is dropped, not merged. M1's ``valid`` flag is
+                # in-frame-and-wide-enough and never looks at the aperture, so
+                # a winking, squinting or covered eye stays valid at full
+                # corner-to-corner width: averaging it in would corrupt the
+                # direction, and letting it into the openness minimum would
+                # take the whole frame down while the other eye is wide open.
+                closed += 1
+                continue
+            measurements.append(measured)
         if not measurements:
-            return self._give_up("no gaze: no eye had usable iris geometry", started)
+            return self._give_up(
+                "no gaze: both eyelids are too closed to locate the iris"
+                if closed
+                else "no gaze: no eye had usable iris geometry",
+                started,
+            )
 
         x = float(np.mean([m[1] for m in measurements]))
         y = float(np.mean([m[2] for m in measurements]))
@@ -463,6 +479,8 @@ class GeometricGazeEstimator:
         settings = self._settings
         quality = result.quality.score if result.quality is not None else 0.0
 
+        # Over the eyes that CONTRIBUTED: a shut eye was dropped upstream, so
+        # this is the aperture of the eyes the direction actually came from.
         opennesses = [eye.openness for eye in per_eye]
         openness_term = _ramp(
             min(opennesses) if opennesses else 0.0, settings.openness_floor, settings.openness_full

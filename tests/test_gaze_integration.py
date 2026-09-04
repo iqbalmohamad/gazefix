@@ -189,40 +189,74 @@ def test_an_unavailable_tracker_still_publishes_frames_with_an_unavailable_gaze(
 # --- temporal state is reset with everything else the tracker learned ---
 
 
+# The smoother is velocity-adaptive: a large step passes through unfiltered
+# whether or not the reset happened, so a test that swings the eye from +25 to
+# -25 degrees proves nothing about resetting. These use a step INSIDE the
+# filtered band, where a stale previous sample changes the answer measurably:
+# settling at SETTLED and then jumping to TARGET reads TARGET exactly if the
+# filter was cleared, and about 1.66 degrees if it was not.
+SETTLED_DEG = 3.0
+TARGET_DEG = 1.5
+UNRESET_DEG = 1.66  # what a filter still primed with SETTLED_DEG would report
+
+
 def test_a_camera_generation_change_clears_the_gaze_smoother() -> None:
-    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(eye_yaw_deg=25.0),)})
+    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(eye_yaw_deg=SETTLED_DEG),)})
     processor, _ = ready_processor(factory, gaze_smoothing=0.9)
     try:
         driver = Driver(processor)
-        driver.until_tracked(generation=1)
-        driver.until_tracked(generation=1)
-        factory.trackers[0].faces = (scene_face(eye_yaw_deg=-25.0),)
+        for _ in range(4):
+            driver.until_tracked(generation=1)
+        factory.trackers[0].faces = (scene_face(eye_yaw_deg=TARGET_DEG),)
         # A new generation resets every piece of temporal state, so the first
         # frame of the new camera is not blended with the old eye position.
         fresh = driver.until_tracked(generation=2)[0].tracking
         assert fresh is not None and fresh.gaze is not None
-        assert fresh.gaze.eye_yaw_deg == pytest.approx(-25.0, abs=2.0)
+        assert fresh.gaze.eye_yaw_deg == pytest.approx(TARGET_DEG, abs=0.05)
+        assert abs(fresh.gaze.eye_yaw_deg - UNRESET_DEG) > 0.1
     finally:
         processor.close()
 
 
 def test_losing_the_face_clears_the_gaze_smoother() -> None:
-    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(eye_yaw_deg=25.0),)})
+    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(eye_yaw_deg=SETTLED_DEG),)})
     processor, _ = ready_processor(factory, gaze_smoothing=0.9)
     try:
         driver = Driver(processor)
-        driver.until_tracked()
-        driver.until_tracked()
+        for _ in range(4):
+            driver.until_tracked()
         factory.trackers[0].faces = ()
         for _ in range(50):
             output, _ = driver.once()
             if output.tracking is not None and output.tracking.status is TrackingStatus.NO_FACE:
                 break
             time.sleep(0.005)
-        factory.trackers[0].faces = (scene_face(eye_yaw_deg=-25.0),)
+        factory.trackers[0].faces = (scene_face(eye_yaw_deg=TARGET_DEG),)
         reacquired = driver.until_tracked()[0].tracking
         assert reacquired is not None and reacquired.gaze is not None
-        assert reacquired.gaze.eye_yaw_deg == pytest.approx(-25.0, abs=2.0)
+        assert reacquired.gaze.eye_yaw_deg == pytest.approx(TARGET_DEG, abs=0.05)
+        assert abs(reacquired.gaze.eye_yaw_deg - UNRESET_DEG) > 0.1
+    finally:
+        processor.close()
+
+
+def test_the_gaze_smoother_really_does_hold_state_between_frames() -> None:
+    """Guards the two tests above from becoming vacuous if the filter changes.
+
+    If smoothing ever stopped affecting a step of this size, both would pass
+    against a gutted reset without anyone noticing.
+    """
+
+    factory = ScriptedFactory(tracker_kwargs={"faces": (scene_face(eye_yaw_deg=SETTLED_DEG),)})
+    processor, _ = ready_processor(factory, gaze_smoothing=0.9)
+    try:
+        driver = Driver(processor)
+        for _ in range(4):
+            driver.until_tracked()
+        factory.trackers[0].faces = (scene_face(eye_yaw_deg=TARGET_DEG),)
+        blended = driver.until_tracked()[0].tracking
+        assert blended is not None and blended.gaze is not None
+        assert blended.gaze.eye_yaw_deg == pytest.approx(UNRESET_DEG, abs=0.1)
     finally:
         processor.close()
 
@@ -390,12 +424,12 @@ def test_app_settings_carry_the_documented_gaze_defaults() -> None:
     assert 0.0 < settings.gaze_min_confidence < 1.0
 
 
-def test_building_a_fresh_tracker_also_clears_the_gaze_smoother() -> None:
-    """The gaze smoother resets everywhere the other temporal state does.
+def test_every_site_that_drops_landmark_history_drops_the_gaze_filter_too() -> None:
+    """Structural guard on the call sites; the behaviour is covered above.
 
-    A rebuilt tracker starts from nothing; leaving the gaze filter primed with
-    the pre-failure eye position would blend it into the first frame after
-    recovery.
+    This counts call sites, so it cannot notice a ``reset()`` that does
+    nothing — that is what the behavioural tests are for. It exists to stop a
+    future reset path being added for the stabiliser and forgotten for gaze.
     """
 
     import inspect
