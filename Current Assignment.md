@@ -18,7 +18,7 @@
 
 Workflow for M2: assignment → implementation with self-review → automated verification → Product Owner Windows/webcam smoke test → Product Manager gate decision → authorized merge. There is no automatic progression to M3.
 
-**Independent external AI QA (Kimi, Codex, or any other reviewer) is not part of this assignment.** The M1 multi-reviewer loop is retired for M2. Escalate to the Product Manager only for a specific unresolved or high-risk concern.
+**Independent external AI QA (Kimi, Codex, or any other reviewer) is not part of this assignment.** The M1 multi-reviewer loop is retired for M2; independent review is risk-triggered and commissioned by the Product Manager under `docs/qa-policy.md`. Escalate to the Product Manager only for a specific unresolved or high-risk concern.
 
 ## Frozen milestone state
 
@@ -180,14 +180,21 @@ Mark each item `VERIFIED` / `NOT VERIFIED` / `FAILED` and state its level: imple
 
 ## Lean QA policy
 
-This project is a solo/DIY MVP. **QA must be proportional to risk.** Do not design a release-certification process.
+`docs/qa-policy.md` is the repository-level QA policy from M2 onward. Read it;
+it governs verification depth, independent review, stopping rules, and Product
+Owner interaction. This section states only what is specific to M2.
 
-Engineering verification is, in order:
+M2 risk level: **MEDIUM** (integration change with meaningful behavior change,
+no concurrency, platform, or dependency risk beyond what M1 already carries).
+Under `docs/qa-policy.md` section 3 that means Claude self-review + automated
+tests + PM review + a short Product Owner Windows/webcam smoke test.
+
+Engineering verification for M2 is, in order:
 
 1. targeted unit tests,
 2. relevant integration tests,
 3. the full automated suite once before handoff,
-4. a short Product Owner Windows/webcam smoke test.
+4. a short Product Owner Windows/webcam smoke test (aim for 5–10 minutes).
 
 Explicitly **not** required for M2:
 
