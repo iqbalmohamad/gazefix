@@ -1,0 +1,38 @@
+{
+  "source": "synthetic realistic-anatomy fixture",
+  "eye_width_px": 90.0,
+  "aperture": 0.249999965940203,
+  "iris_radius_px": 17.54999816417694,
+  "target_pitch_deg": 15,
+  "effective_strength": 1,
+  "numpy": "1.26.4",
+  "opencv": "4.11.0",
+  "measurements": [
+    {
+      "variant": "B field",
+      "status": "corrected",
+      "displacement_px": [
+        0.0,
+        -9.317485570907593
+      ],
+      "centroid_movement_px": [
+        -0.0354607619667604,
+        -0.8764246173884658
+      ],
+      "required_C_minimum_px": 5.5904913425445555
+    },
+    {
+      "variant": "C layered",
+      "status": "corrected",
+      "displacement_px": [
+        0.0,
+        -9.317485570907593
+      ],
+      "centroid_movement_px": [
+        0.008935850003240375,
+        -1.2776070734307723
+      ],
+      "required_C_minimum_px": 5.5904913425445555
+    }
+  ]
+}

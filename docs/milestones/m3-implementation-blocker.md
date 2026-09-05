@@ -1,5 +1,10 @@
 # M3 implementation stop: layered blend versus required no-ghosting test
 
+**Historical v1.0 report.** Amendment A1 in frozen SA v1.1 resolves this
+compositing-order conflict. The original evidence remains below for traceability.
+For the resumed implementation's separate centroid finding, see
+`m3-v11-implementation-report.md`.
+
 Date: 2026-09-05. Status: **M3 IMPLEMENTATION BLOCKED**.
 This is an implementation finding, not an amendment to the frozen SA and
 not a Product Owner visual-gate verdict. No M3 PASS is claimed.
