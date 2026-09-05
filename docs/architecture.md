@@ -4,8 +4,8 @@ This document has two parts. **Part I** describes the system that actually
 exists at the frozen Milestone 2 baseline (`milestone-2` at
 `81e06118801c23d2337629fc676d6ad8ac13716a`) — it describes reality, verified
 against the code, not an aspiration. **Part II** is the architecture baseline
-proposed at the overall architecture pass (2026-09-04, awaiting Product
-Manager architecture review) for Milestones 3–10: the
+accepted at the overall architecture pass (2026-09-04) and frozen 2026-09-05
+as the canonical post-M2 architecture baseline, for Milestones 3–10: the
 stage boundaries, contracts, ownership and failure domains that future
 milestones implement incrementally, without rewriting the application core.
 
@@ -641,11 +641,14 @@ and truthfully rather than folded into it.
 
 # Part II — Architecture baseline for M3–M10
 
-Proposed at the overall architecture pass (2026-09-04) on the frozen M2
-baseline, awaiting Product Manager architecture review — the same status the
-two ADRs it summarizes carry. This part answers one question: given what
-GazeFix actually is
-after M2, how do the remaining milestones — offline correction (M3),
+Accepted at the overall architecture pass (2026-09-04) on the frozen M2
+baseline, then independently reviewed, corrected, and frozen 2026-09-05 as the
+canonical post-M2 architecture baseline — the same status the two ADRs it
+summarizes carry. Extend it through milestone Solution Architecture or a
+deliberate new ADR; do not edit it silently during implementation work.
+
+This part answers one question: given what GazeFix actually is after M2, how
+do the remaining milestones — offline correction (M3),
 real-time correction (M4), temporal stabilization (M5), calibration (M6),
 performance (M7), virtual camera (M8), neural evaluation (M9),
 productization (M10) — fit into the pipeline without rewriting the core?

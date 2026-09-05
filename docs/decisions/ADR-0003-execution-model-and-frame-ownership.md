@@ -1,7 +1,10 @@
 # ADR-0003: One processing worker through M4–M8; copy-once frame ownership; per-consumer output buffers
 
-**Status:** proposed at the overall architecture pass (2026-09-04), awaiting
-Product Manager architecture review. **Decides:** the execution model that
+**Status:** accepted for M3–M10 (2026-09-04) at the overall architecture pass;
+independently reviewed, corrected, and **frozen 2026-09-05** as part of the
+canonical post-M2 architecture baseline (`architecture-v1`). Amend only through
+milestone Solution Architecture or a deliberate new ADR, never by silent edits
+during implementation. **Decides:** the execution model that
 carries correction, compositing and virtual-camera output into the frozen
 real-time pipeline, who may write to frame memory and when frames are
 copied, and how multiple consumers receive processed frames.

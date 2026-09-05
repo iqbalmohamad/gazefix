@@ -1,7 +1,10 @@
 # ADR-0002: Correction is a separate engine stage; gaze estimation stays with tracking
 
-**Status:** proposed at the overall architecture pass (2026-09-04), awaiting
-Product Manager architecture review. **Decides:** the boundary of the gaze
+**Status:** accepted for M3–M10 (2026-09-04) at the overall architecture pass;
+independently reviewed, corrected, and **frozen 2026-09-05** as part of the
+canonical post-M2 architecture baseline (`architecture-v1`). Amend only through
+milestone Solution Architecture or a deliberate new ADR, never by silent edits
+during implementation. **Decides:** the boundary of the gaze
 *correction* engine for M3 onward, how it relates to the gaze *estimation*
 stage that M2 already shipped, and who owns compositing.
 
