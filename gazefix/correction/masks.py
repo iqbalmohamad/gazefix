@@ -1,13 +1,42 @@
 """ROI-only mask, remap and blend primitives from frozen M3 SA section 8.
 
-Coordinates passed here are ROI-local image pixels (y down). Sampling reads
-only the original ROI; blending writes only the caller's exclusive canvas.
+Coordinates passed here are ROI-local image pixels (y down). The iris samples
+the original ROI; C's background samples a private sclera plate.
 """
 
 from __future__ import annotations
 
 import cv2
 import numpy as np
+
+
+def sclera_plate(source: np.ndarray, mask: np.ndarray, center: np.ndarray,
+                 radius: float) -> np.ndarray:
+    """A2: replace the grown source-iris hole using only visible sclera.
+
+    Image rows approximate eye-axis scanlines as permitted by section 8.1.
+    Interpolation uses the nearest available interior samples on each side;
+    np.interp replicates a lone side. Empty rows use the eye-wide median.
+    """
+    y, x = np.indices(mask.shape)
+    hole = (np.hypot(x - center[0], y - center[1]) <= radius + 1) & (mask != 0)
+    available = (mask != 0) & ~hole
+    if not available.any():
+        raise ValueError("no sclera to sample")
+    median = np.median(source[available], axis=0)
+    plate = source.copy()
+    for row in np.flatnonzero(hole.any(axis=1)):
+        missing_x = np.flatnonzero(hole[row])
+        sample_x = np.flatnonzero(available[row])
+        if sample_x.size:
+            colour = np.column_stack([
+                np.interp(missing_x, sample_x, source[row, sample_x, channel])
+                for channel in range(3)
+            ])
+        else:
+            colour = median
+        plate[row, missing_x] = np.clip(np.rint(colour), 0, 255).astype(np.uint8)
+    return plate
 
 
 def opening_fields(opening: np.ndarray, shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
@@ -58,6 +87,28 @@ def sample(source: np.ndarray, map_x: np.ndarray, map_y: np.ndarray,
            interpolation: int = cv2.INTER_LINEAR) -> np.ndarray:
     return cv2.remap(source, map_x, map_y, interpolation,
                      borderMode=cv2.BORDER_REPLICATE)
+
+
+def sample_background(source: np.ndarray, mask: np.ndarray, map_x: np.ndarray,
+                      map_y: np.ndarray, interpolation: int) -> np.ndarray:
+    """Cubic experiment uses linear sampling at unsafe 4x4 footprints.
+
+    The frozen guard proves safety for bilinear taps. Cubic's wider support
+    needs this extra check; it must not sample lashes/skin across the lid.
+    """
+    if interpolation == cv2.INTER_LINEAR:
+        return sample(source, map_x, map_y, interpolation)
+    x, y = np.floor(map_x).astype(int), np.floor(map_y).astype(int)
+    safe = np.ones(mask.shape, dtype=bool)
+    for dy in (-1, 0, 1, 2):
+        for dx in (-1, 0, 1, 2):
+            xx, yy = x + dx, y + dy
+            safe &= (xx >= 0) & (yy >= 0) & (xx < mask.shape[1]) & (yy < mask.shape[0])
+            safe &= mask[np.clip(yy, 0, mask.shape[0]-1), np.clip(xx, 0, mask.shape[1]-1)] == 1
+    cubic = sample(source, map_x, map_y, interpolation)
+    linear = sample(source, map_x, map_y)
+    cubic[~safe] = linear[~safe]
+    return cubic
 
 
 def iris_alpha(mask: np.ndarray, center: np.ndarray, radius: float,

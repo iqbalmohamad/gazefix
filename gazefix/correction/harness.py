@@ -15,6 +15,7 @@ import json
 import math
 from pathlib import Path
 import sys
+import subprocess
 import time
 
 from gazefix.config import AppSettings
@@ -210,6 +211,19 @@ def _percentiles(rows):
     return {k:{"median":float(np.median(v)),"p90":float(np.percentile(v,90)),"samples":len(v)} for k,v in values.items()}
 
 
+def repository_provenance():
+    """Read local revision only; runs correctly even outside the checkout cwd."""
+    root=Path(__file__).resolve().parents[2]
+    try:
+        def git(*args):
+            return subprocess.check_output(["git","-C",str(root),*args],text=True,
+                stderr=subprocess.DEVNULL,timeout=5).strip()
+        return {"head":git("rev-parse","HEAD"),"tracked_changes":bool(git("status","--porcelain","--untracked-files=no")),
+                "m3_sa":"m3-architecture-v1.2 @ 6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93"}
+    except (OSError,subprocess.SubprocessError):
+        return {"head":None,"tracked_changes":None}
+
+
 def main(argv=None, tracker_factory=None):
     parser = build_parser(); args = parser.parse_args(argv)
     # Dependencies remain lazy so --help never loads a backend or OpenCV.
@@ -264,6 +278,7 @@ def main(argv=None, tracker_factory=None):
     root=args.out/name
     report={"arguments":vars(args),"source":{"name":source.name,"sha256":None,"unmirror":args.unmirror},
             "settings":settings,"label":args.label,"gazefix_version":__import__("gazefix").__version__,
+            "repository":repository_provenance(),
             "mapping_mismatch":{k:getattr(settings["engine"],k)!=getattr(settings["gaze"],k) for k in ("eye_model_ratio","min_cos")}}
     tracker = capture = None
     sinks={}; experiments=[]; timing_rows=[]; failures=0; frame_count=0
@@ -315,6 +330,8 @@ def main(argv=None, tracker_factory=None):
                         row={"correction_ms":output.result.correction_ms,"compositing_ms":output.result.compositing_ms,
                              "stage_ms":output.result.debug.stage_ms if output.result.debug else ()}
                         repeats.append(row); timing_rows.append(row)
+                        if output.result.status is CorrectionStatus.FAILED:
+                            break  # a later repetition must never hide a fault
                     entry={"tracking":tracking_metadata(tr),"gaze":tr.gaze,"policy":decision,"correction":output.result,
                            "target":{"yaw":yaw,"pitch":pitch},"timings":_percentiles(repeats)}
                     if output.result.status is CorrectionStatus.FAILED:
@@ -352,6 +369,7 @@ def main(argv=None, tracker_factory=None):
                 thumbnails.append(cv2.resize(im,(960,int(im.shape[0]*960/im.shape[1]))))
             _write_image(root/"sweep.png",np.vstack(thumbnails))
         report.update(frame_count=frame_count,failures=failures,experiments=experiments,timings=_percentiles(timing_rows),
+                      last_frame=entry if args.video else None,
                       video_outputs={k:{"path":str(v.path.relative_to(root)),"png_fallback":v.fallback} for k,v in sinks.items()})
     except Exception as exc:
         failures+=1; report["error"]=f"{type(exc).__name__}: {exc}"
@@ -364,6 +382,7 @@ def main(argv=None, tracker_factory=None):
             except Exception as exc: failures+=1; report["close_error"]=str(exc)
     # Never overwrite a prior experiment when mkdir failed.
     if report["source"]["sha256"] is not None:
+        report["failures"]=failures
         try: (root/"report.json").write_text(json.dumps(_json(report),indent=2,allow_nan=False),encoding="utf-8")
         except (OSError,ValueError) as exc: print(str(exc),file=sys.stderr); return 1
     print(f"{root}: {frame_count} frames, {failures} failures")

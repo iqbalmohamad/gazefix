@@ -58,3 +58,29 @@ def render_eyes(result):
         x, y = np.floor(opening.min(axis=0) - 25).astype(int)
         frame[y:y+patch.shape[0], x:x+patch.shape[1]] = patch
     return frame
+
+
+def visible_centroid_ideal(result, d, side="right", supersample=24):
+    """Independent area centroid of a translated disc clipped by the lids.
+
+    Integrate pixel subcells against the analytic polygon and circle, without
+    correction geometry, masks, raster rendering, or engine code.
+    """
+    eye = getattr(result, side + "_eye")
+    scale = np.array([result.geometry.width, result.geometry.height])
+    polygon = eye.contour[:, :2] * scale
+    center = eye.iris[0, :2] * scale + np.asarray(d)
+    radius = np.linalg.norm((eye.iris[1:, :2] - eye.iris[0, :2]) * scale, axis=1).mean()
+    lo = np.maximum(polygon.min(axis=0), center - radius)
+    hi = np.minimum(polygon.max(axis=0), center + radius)
+    xx = np.arange(np.floor(lo[0]), np.ceil(hi[0]), 1 / supersample) + .5 / supersample
+    yy = np.arange(np.floor(lo[1]), np.ceil(hi[1]), 1 / supersample) + .5 / supersample
+    x, y = np.meshgrid(xx, yy)
+    inside = np.zeros(x.shape, dtype=bool)
+    for a, b in zip(polygon, np.roll(polygon, -1, axis=0)):
+        if b[1] != a[1]:
+            inside ^= ((a[1] > y) != (b[1] > y)) & (x < (b[0]-a[0])*(y-a[1])/(b[1]-a[1])+a[0])
+    inside &= (x - center[0]) ** 2 + (y - center[1]) ** 2 <= radius ** 2
+    if not inside.any():
+        raise ValueError("empty visible ideal")
+    return np.array([x[inside].mean(), y[inside].mean()])

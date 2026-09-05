@@ -1,10 +1,9 @@
-# Offline gaze correction (M3, SA v1.1)
+# Offline gaze correction (M3, SA v1.2)
 
-**Implementation in progress; not ready for the Product Owner gate.**
-The A1 amendment is implemented and its regression tests pass. A separate
-visible-iris displacement conflict with SA section 15.2 stops implementation;
-see `milestones/m3-v11-implementation-report.md`. No M3 PASS or M4 readiness
-is implied by an individual frame's CORRECTED status.
+The A1/A2 implementation is ready for Product Owner visual evaluation.
+See `milestones/m3-v12-implementation-report.md` for engineering evidence and
+`milestones/m3-po-checklist.md` for the single capture-and-score session.
+No M3 PASS or M4 readiness is implied by an individual frame's CORRECTED status.
 
 ## Boundary and ownership
 
@@ -22,7 +21,7 @@ displacement and processing faults fail the whole frame. These distinctions
 are metadata, not logs or recovery budgets.
 
 The engine creates one full-frame working copy when correction can proceed,
-samples only the original frame and blends both eyes into that canvas. A
+samples the original iris and a private ROI background, and blends both eyes into that canvas. A
 failure after partial rendering discards the entire canvas and returns the
 input object. The successful canvas is writable and exclusively caller-owned;
 the engine retains no alias. M4 publication/freezing is not implemented here.
@@ -43,7 +42,13 @@ clamped along its direction, and checked for destination containment. It
 does not reposition the iris absolutely from the corner midpoint.
 
 Variant B applies the frozen guarded displacement field through a precise
-opening-distance transform. Variant C adds a rigid iris layer. A1 blends the
+opening-distance transform on the original pixels. Variant C builds the A2
+sclera plate: remove the source iris disc grown by one pixel, inside the
+opening only; interpolate nearest visible sclera across image rows. One-sided
+rows replicate the available side; rows with no available sample use the
+eye-wide median. No sclera anywhere fails the whole frame with
+`mask generation failed: no sclera to sample`. Outside the hole is identical
+to the source. C remaps this plate and adds a rigid original iris layer. A1 blends the
 background with the existing canvas first and then overlays the iris:
 
 ```text
@@ -58,10 +63,17 @@ opaque iris pixels even where background alpha is partial. The destination
 edge may stair-step by one pixel; this is the accepted A1/Q12 trade-off to
 evaluate visually, not a claim of naturalness.
 
-The explicit displacement tests currently fail despite matching the frozen
-equations. In particular, fixed boundary content can retain the old iris
-near the lids; the translated layer does not remove all of it. Do not tune
-away or suppress those tests without resolving the reported SA conflict.
+The A2 structural tests reject all non-sclera source remnants outside the
+destination iris plus a one-pixel fringe. The only permitted original remnant
+is the bounded `(1-alpha)` contribution in the partial-alpha lid ring.
+Independent supersampled geometric centroids account for occlusion; actual
+raster-specific tolerances and their measured basis are recorded in the
+implementation report under the user's implementation/tuning authority.
+The old raw-background variant C fails both structural and centroid controls.
+
+The cubic background experiment falls back to linear sampling wherever its
+4x4 footprint would cross the opening. The default bilinear guard and iris
+source rule are unchanged. Cubic is optional; the gate uses default linear.
 
 ## Settings and policy
 
@@ -120,6 +132,22 @@ fall back to explicit per-stream PNG sequences. `frames.jsonl` records
 per-frame metadata. Reports include source hash/dimensions, settings, tracking
 quality, full gaze confidence, policy, correction outcomes, timings and
 version. Reports contain no pixel arrays or full landmark arrays.
+Reports also record the local tested commit, whether tracked files differed,
+and the canonical SA pointer. Clip reports retain the final frame's metadata
+as a summary; the complete sequence is in `frames.jsonl`.
+
+The maintained batch wrapper runs this same harness, without another pipeline:
+
+```powershell
+.\.venv-m1-qa-r2\Scripts\python.exe -m scripts.correction_batch fixture
+.\.venv-m1-qa-r2\Scripts\python.exe -m scripts.correction_batch po --inputs experiments/inputs
+```
+
+The fixture batch covers all 96 B/C, axis, strength and target combinations.
+The PO batch validates all eleven captures before running, then produces eight
+sheets and three clip outputs at default C, strength .7 with policy, plus an
+HTML index, JSON manifest and blank CSV scores. Both reject existing output
+directories. No capture, upload or automatic quality verdict is performed.
 
 Exit codes: 0 means artifacts were written without an engine/tracking error
 (expected safe skips are permitted); 1 means an input/backend/rendering/I/O

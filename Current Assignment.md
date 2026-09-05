@@ -58,7 +58,6 @@ regression coverage. No new ADR or dependency is required.
 | `architecture-v1` | `003180d52d39d30a038333541b1b187824714e87` |
 | `m3-architecture-v1` | `a459e6be36122bf10ce707731d5f847007847e96` |
 | `m3-architecture-v1.1` | `00eed0e893b73dcd490f69af8df852a0609ccbaa` |
-
 | `m3-architecture-v1.2` | `6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93` |
 
 All eight are frozen: do not advance, rewrite, force-push, or merge into any

@@ -171,13 +171,15 @@ class GeometricCorrectionEngine:
                         distance = cv2.distanceTransform(mask, cv2.DIST_L2, 3 if s.distance_transform == "chamfer3" else 5)
                     if not mask.any() or not np.isfinite(distance).all():
                         raise ValueError("empty/non-finite mask")
+                    background_source = masks.sclera_plate(source, mask,
+                        geometry.iris_center - (x0, y0), geometry.iris_radius) if s.iris_layer else source
                 except Exception as exc:
                     return fault(f"mask generation failed: {exc}")
                 try:
                     mx, my, _ = masks.warp_maps(distance, d, geometry.half_width_px,
                                                 s.falloff_fraction, s.field_guard_px)
                     interpolation = cv2.INTER_LINEAR if s.interpolation == "linear" else cv2.INTER_CUBIC
-                    background = masks.sample(source, mx, my, interpolation)
+                    background = masks.sample_background(background_source, mask, mx, my, interpolation)
                     iris = masks.sample(source, *masks.translated_maps(mask.shape, d)) if s.iris_layer else None
                     layers.append((eye, geometry, roi, mask, distance, background, iris))
                 except Exception as exc:
