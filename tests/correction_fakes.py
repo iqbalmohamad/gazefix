@@ -10,8 +10,9 @@ from gazefix.gaze.estimator import GazeSettings, GeometricGazeEstimator
 from gazefix.tracking.models import readonly
 
 
-def correction_scene(*, realistic: bool = False):
-    result = gaze_scene(eye_openness=0.25 if realistic else 0.30).result()
+def correction_scene(*, realistic: bool = False, **scene_kwargs):
+    scene_kwargs.setdefault("eye_openness", 0.25 if realistic else 0.30)
+    result = gaze_scene(**scene_kwargs).result()
     if realistic:
         eyes = {}
         for side in ("right", "left"):
@@ -46,3 +47,14 @@ def render_eye_roi(result, side="right"):
     highlight = (x - center[0] + radius * 0.25) ** 2 + (y - center[1] + radius * 0.25) ** 2 < 1.5 ** 2
     frame[highlight & (mask != 0)] = (245, 245, 245)
     return frame, opening, center, radius
+
+
+def render_eyes(result):
+    frame = np.full((result.geometry.height, result.geometry.width, 3), (110, 155, 195), np.uint8)
+    for side in ("right", "left"):
+        patch, _, _, _ = render_eye_roi(result, side)
+        eye = getattr(result, side + "_eye")
+        opening = eye.contour[:, :2] * (result.geometry.width, result.geometry.height)
+        x, y = np.floor(opening.min(axis=0) - 25).astype(int)
+        frame[y:y+patch.shape[0], x:x+patch.shape[1]] = patch
+    return frame

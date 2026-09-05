@@ -69,23 +69,34 @@ def iris_alpha(mask: np.ndarray, center: np.ndarray, radius: float,
     radial_distance = np.hypot(x - destination[0], y - destination[1])
     disc = np.clip((radius_scale * radius - radial_distance) / edge_px, 0, 1)
     mx, my = translated_maps(mask.shape, displacement)
-    source_opening = sample(mask.astype(np.float32), mx, my)
+    source_opening = source_coverage(mask, mx, my)
     return (disc * mask * source_opening).astype(np.float32)
+
+
+def source_coverage(mask: np.ndarray, map_x: np.ndarray, map_y: np.ndarray) -> np.ndarray:
+    """A1: exclude every footprint with even one tap outside the opening."""
+    x, y = np.floor(map_x).astype(np.int32), np.floor(map_y).astype(np.int32)
+    inside = (x >= 0) & (y >= 0) & (x + 1 < mask.shape[1]) & (y + 1 < mask.shape[0])
+    safe_x = np.clip(x, 0, mask.shape[1] - 2)
+    safe_y = np.clip(y, 0, mask.shape[0] - 2)
+    for dx, dy in ((0, 0), (1, 0), (0, 1), (1, 1)):
+        inside &= mask[safe_y + dy, safe_x + dx] == 1
+    return inside.astype(np.float32)
 
 
 def blend_into(canvas_roi: np.ndarray, background: np.ndarray, alpha: np.ndarray,
                iris_layer: np.ndarray | None = None,
                iris_opacity: np.ndarray | None = None) -> None:
-    """Section 8.4 verbatim: layer composition followed by opening blend.
+    """Section 8.4/A1: opening blend first, then the occluded iris layer.
 
     Round once, after both blends. The canvas (not the original source) is
     the base so disjoint eyes survive overlapping padded ROIs.
     """
-    composed = background.astype(np.float32)
+    a = alpha[..., None]
+    composed = a * background + (1 - a) * canvas_roi
     if iris_layer is not None:
         if iris_opacity is None:
             raise ValueError("iris layer needs opacity")
         opacity = iris_opacity[..., None]
         composed = opacity * iris_layer + (1 - opacity) * composed
-    a = alpha[..., None]
-    canvas_roi[:] = np.clip(np.rint(a * composed + (1 - a) * canvas_roi), 0, 255).astype(np.uint8)
+    canvas_roi[:] = np.clip(np.rint(composed), 0, 255).astype(np.uint8)

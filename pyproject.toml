@@ -36,6 +36,7 @@ gazefix = "gazefix.main:main"
 gazefix-camera-test = "gazefix.camera.diagnostics:main"
 gazefix-fetch-model = "gazefix.tracking.provision:main"
 gazefix-tracking-test = "gazefix.tracking.validate:main"
+gazefix-correction-test = "gazefix.correction.harness:main"
 
 [tool.setuptools.packages.find]
 include = ["gazefix*"]
