@@ -2,8 +2,9 @@
 
 **Status:** **APPROVED / FROZEN — amended (A1)** — approved by the Product
 Manager on 2026-09-05, frozen as the canonical M3 Solution Architecture, and
-amended once since, narrowly, under PM approval: **Amendment A1** corrects the
-§8.4 compositing order (see §8.7). Design only:
+amended twice since, narrowly, under PM approval: **A1** corrects the §8.4
+compositing order (§8.7); **A2** stops the variant-C background from
+retaining a competing source iris (§8.8). Design only:
 no M3 code exists, and this document does not authorize M3 implementation
 (the Product Manager issues that assignment separately). Amend only through a
 deliberate, PM-authorized revision of this document or a new ADR — never by
@@ -14,8 +15,9 @@ carry.
 | --- | --- |
 | Reviewed SA content | `28dac348749e956acbeb709e3abb4ff3654451d5` (the HEAD the Product Manager reviewed) |
 | Original frozen reference | branch `m3-architecture-v1` @ `a459e6be36122bf10ce707731d5f847007847e96` — unchanged and still immutable; superseded as the implementation baseline by A1 |
-| **Canonical frozen reference** | branch **`m3-architecture-v1.1`** — this commit: `m3-architecture-v1` plus Amendment A1 (§8.7) and nothing else |
-| Amendments | **A1** (2026-09-05, PM-approved): §8.4 compositing order — §8.7 records the evidence, both formulas, the rationale and the required regression coverage |
+| **Canonical frozen reference** | branch **`m3-architecture-v1.2`** — this commit: `m3-architecture-v1` plus Amendments A1 (§8.7) and A2 (§8.8), and nothing else |
+| Superseded canonical | `m3-architecture-v1.1` @ `00eed0e893b73dcd490f69af8df852a0609ccbaa` — unchanged and still immutable |
+| Amendments | **A1** (2026-09-05, PM-approved): §8.4 compositing order — §8.7. **A2** (2026-09-05, PM-approved): the variant-C background becomes a sclera plate that carries no iris — §8.8. Each record holds its evidence, the before/after, the rationale and the required regression coverage |
 | Review record | PR #7 against `architecture-v1`; closed, not merged |
 | Written / corrected | 2026-09-05, after an eight-lens adversarial review of the first draft (50 confirmed findings applied) |
 | Role | Solution Architect / Principal Engineer |
@@ -331,7 +333,7 @@ sub-pixel sampling and edge behaviour matter more than algorithmic power).
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | **A. Iris patch cut-and-paste + fill** (translate the iris disc; fill the vacated sclera by inpainting/clone) | medium; seams at the disc edge, fill texture | good if clipped by the lid | exact | **high** (disc seam, fill texture, lid slivers) | medium (inpaint is fiddly) | low–medium (`cv2.inpaint` is not cheap) | linear | yes |
 | **B. Field-only eye-region remap** (one smooth displacement field: ≈ 1 over the iris interior wherever it is farther than the falloff width from the contour, 0 at the eyelid contour; `cv2.remap` on the eye ROI) | medium–good horizontally; **iris compresses against a lid** on vertical moves | exact (field is 0 on the contour) | rigid except within the falloff band | medium (iris flattening near lids at larger vertical moves; sclera stretch) | **low** | very low (ROI ≈ 100×60 px) | linear | yes |
-| **C. Layered eye-region remap** (= B for the background/sclera + a rigidly translated iris layer clipped by the eye-opening mask) | good; iris keeps its shape and slides **under** the lid, sclera fills behind it | exact | rigid, occluded correctly | medium–low (catchlight moves with the iris; lid does not follow upward gaze) | low–medium (B + one translated layer + two masks) | very low | linear | yes |
+| **C. Layered eye-region remap** (a **sclera-plate** background — B's field applied to the eye with the source iris removed and filled with sclera, A2 §8.8 — plus a rigidly translated iris layer clipped by the eye-opening mask, which is then the frame's only iris) | good; iris keeps its shape and slides **under** the lid, sclera fills behind it | exact | rigid, occluded correctly | medium–low (catchlight moves with the iris; lid does not follow upward gaze) | low–medium (B + one translated layer + two masks) | very low | linear | yes |
 | **D. Piecewise-affine / Delaunay mesh warp** (contour + iris landmarks as vertices) | similar to B, with C0 creases across triangles in the sclera; 5 iris points give a coarse disc | good | approximate | medium (creases) | medium–high | low | linear | yes |
 | **E. Thin-plate spline / moving-least-squares field** from control points | equivalent to C's background with a smoother field; no structural gain | good | approximate | low–medium | medium–high (solve per eye per frame) | low–medium | linear | yes |
 | F. Face-wide 3-D re-rendering / neural redirection | — | — | — | — | — | — | — | out of scope (M9) |
@@ -670,10 +672,17 @@ compositor component exists (ADR-0002 §4). Everything here runs in phase 3
 | --- | --- | --- |
 | `opening_mask` | `cv2.fillPoly` of the 16-point eyelid polygon (optionally with sub-pixel `shift` bits or a Catmull-Rom-smoothed contour — implementor's choice); values `{0, 1}` | occlusion, distance field, blend region |
 | `distance` | `cv2.distanceTransform(opening_mask, DIST_L2, DIST_MASK_PRECISE)` — the exact Euclidean distance, for each inside pixel, to the nearest **zero pixel**; 0 outside. The precise mask is the default because the §8.2 bound and its test rely on it; a chamfer approximation (3×3/5×5, up to ≈ 4 % over-estimate) is allowed only together with `field_guard_px ≥ 2.5` | warp falloff (§8.2) and blend alpha — **not** containment, which is analytic (§5.3) |
+| `sclera_plate` (variant C only, **A2**) | `roi_src` with the **iris hole** — the source iris disc grown by 1 px, intersected with `opening_mask` — replaced by sclera: for each scan-line along the eye axis `ex`, linearly interpolate between the nearest non-hole pixels inside the opening on either side; replicate the one available side if the hole reaches the opening edge on the other; and if a line has no non-hole interior pixel at all, use the median colour of the eye's non-hole interior pixels. Pixels outside the hole are copied unchanged, so nothing outside the opening is touched. Deterministic, ROI-local, ~35×35 px of work | the image the **background** field samples in variant C (§8.2), so the background carries no iris. Variant B does **not** use it — its whole mechanism is warping the real iris |
 | `alpha` (blend) | `clip(distance / edge_px, 0, 1) · opening_mask` (default `edge_px` **1.5**, range 1–3), or a `shift`-bit anti-aliased `fillPoly` multiplied by `opening_mask`. A Gaussian blur is **not** an allowed construction (it never reaches exactly 1 near the edge, §15.2). Exactly 0 outside the opening; exactly 1 at every interior pixel with `distance ≥ edge_px` | eye-shaped blend that never writes on lid skin; see §8.4 for why it is *not* a wide feather |
 | `iris_alpha` (variant C) | soft disc at the **destination** iris centre, radius `iris_layer_radius_scale·iris_radius` (default 1.05), 1–1.5 px edge; multiplied by two **binary** occlusion factors — `opening_mask` at the **destination** (occlusion by the lid), and `opening_mask` at the **source** position `p − d`, the latter *conservative* in the sense §8.2 already uses for the background: it is 1 only when **all four bilinear taps** of `p − d` have `opening_mask == 1`, and 0 otherwise. Both factors stay binary deliberately. A fractional source factor would not deliver the guarantee it looks like it delivers: `iris_layer` is itself the bilinear sample at `p − d` (§8.3), so a straddling footprint has already baked lid-skin taps into the sample, and merely attenuating it by the coverage `c` still leaves `c·(1 − c)` — up to **25 %** of the pixel — as skin colour inside the opening. Only excluding straddling footprints keeps "lid skin that clipped the iris in the source is never carried into the eye" literally true | iris layer compositing. **Since A1 (§8.7) this mask alone keeps the iris layer off lid skin**: `iris_alpha == 0` wherever `opening_mask == 0` is a mandatory invariant, separately tested (§15.2), because the outer `alpha` multiply no longer wraps the iris layer. `iris_alpha ∈ [0, 1]` and finite is likewise mandatory: A1 makes it the outermost weight of the composite, so nothing else bounds it |
 
 ### 8.2 Warp field (variant B/C background)
+
+**What the field samples (A2, §8.8).** The field below is unchanged, and so
+is its lid-safety bound; only the *image* it samples differs by variant:
+variant C samples the `sclera_plate` (§8.1) so the background is sclera and
+never a second iris, while variant B samples `roi_src`, because warping the
+real iris is variant B's entire mechanism. Call that image `roi_bg`.
 
 For each output pixel `p` in the ROI:
 
@@ -698,16 +707,17 @@ compresses/stretches smoothly; the boundary ring (`distance ≤ m`) does not
 move at all; the vacated region behind a moving iris is filled with real,
 stretched sclera.
 
-Sampling: `cv2.remap(roi_src, map_x, map_y, INTER_LINEAR, BORDER_REPLICATE)`
-with `map = grid − D`; `INTER_CUBIC` is an experimental alternative for a
+Sampling: `cv2.remap(roi_bg, map_x, map_y, INTER_LINEAR, BORDER_REPLICATE)`
+with `map = grid − D` (`roi_bg` = `sclera_plate` in C, `roi_src` in B); `INTER_CUBIC` is an experimental alternative for a
 sharper iris. Maps are ROI-local float32.
 
 ### 8.3 Iris layer (variant C only)
 
 `iris_layer(p) = roi_src(p − d)` for `p` in the destination disc — a pure
 translation, sampled bilinearly (a second small `remap` or an equivalent
-`warpAffine`). Composited with `iris_alpha` over the alpha-blended base of
-§8.4 (A1; before that amendment it was composited over the background alone).
+`warpAffine`) — sampled from `roi_src`, never from the plate, so it carries
+real iris texture. After A2 it is the **only** iris in a variant-C frame.
+Composited with `iris_alpha` over the alpha-blended base of §8.4 (A1; before that amendment it was composited over the background alone).
 Where the iris layer has no valid source (lid-clipped in the source),
 `iris_alpha` falls to 0 and that base shows through, so variant C degrades
 gracefully to B locally. That cut-off is sharp by construction (§8.1): a
@@ -722,7 +732,8 @@ Two steps, in this order (**Amendment A1**, §8.7 — the pre-A1 single-step
 form is superseded):
 
 ```text
-base         = alpha · background + (1 − alpha) · canvas[roi]     opening alpha blends the warped sclera into the canvas
+base         = alpha · background + (1 − alpha) · canvas[roi]     opening alpha blends the warped background into the canvas
+                                                                  (`background` = the warped sclera plate in C, A2 §8.8)
 canvas[roi]  = iris_alpha · iris_layer + (1 − iris_alpha) · base  the translated iris is composited over that base
                                                                   (variant B: iris_alpha ≡ 0, so canvas[roi] = base)
 ```
@@ -781,6 +792,9 @@ sclera dilution a wide feather causes if the PM asks.
   strength ≤ 0.8 on 10–20° deviations.
 - The iris/sclera boundary stays sharp in the direction of motion (a soft
   disc edge of 1–1.5 px, not a wide feather).
+- **Exactly one iris is visible (A2).** No remnant of the iris at its
+  original position, in particular no darkened band retained against either
+  eyelid, and no double or smeared iris edge between the two positions.
 - **Where the opaque part of the moved iris meets the eyelid contour (A1),
   the iris/lid edge shows no stair-stepping a viewer would notice at 100 %
   zoom, and no bright or dark fringe.** This is the edge A1 moved from the
@@ -899,6 +913,104 @@ not a pre-emptive redesign here.
 8. the sclera-dilution control — `edge_px = 4` measurably dilutes the
    *background* correction — which is the replacement coverage for the
    `edge_px = 4` negative control A1 voids in item 1.
+
+### 8.8 Amendment A2 — the variant-C background is a sclera plate (2026-09-05, PM-approved)
+
+**Scope.** Milestone-local. It changes *which image the background field
+samples* in variant C, and nothing else about the field, the masks, the
+compositing order or any contract. The `CorrectionEngine` contract (§3),
+provider-neutral boundaries (§18), the gaze-to-displacement mapping (§6), the
+policy boundary (§7), frame ownership (§11), **A1's compositing order (§8.4,
+§8.7)**, the harness architecture (§12) and the M3/M4 boundary (§23) are all
+unchanged, so **no new ADR is required**.
+
+**Implementation evidence.** On the required realistic-anatomy upward case
+the implementation reproduced the frozen v1.1 equations pixel-for-pixel and
+measured: commanded displacement **9.317 px**, frozen minimum visible
+centroid movement **5.590 px**, actual visible movement **1.278 px**. All
+seven suite failures were visible-iris-movement assertions; A1, engine,
+mapping, policy, real-model, ownership/fallback, boundary and M3/M4
+separation tests passed. An independent geometric simulation of the frozen
+equations on the same fixture reproduces the failure at **1.14 px**,
+confirming the mechanism rather than an implementation slip.
+
+**Root cause.** The background was `roi_src(p − D(p))` — the *unmodified*
+source. `D(p) = d · w(p)` and `w` is pinned to 0 within `f + m` of the
+eyelid contour so the warp can never sample lid skin (§8.2). On a realistic
+eye the iris is **taller than the palpebral opening** (`docs/gaze.md` §5: an
+≈ 11.7 mm iris behind an 8–12 mm aperture; on the realistic fixture a 17.55 px
+iris radius behind a 15.7 px opening half-height), so the pixels adjacent to
+both lids *are* iris. The background therefore reproduced the source iris
+exactly in the pinned band, while the translated layer was additionally
+masked off wherever the destination left the opening or the source coverage
+was incomplete. Output held an old iris against the lids and a new iris in
+the middle; the visible centroid barely moved. The defect is inherent to
+sampling the unmodified source for a layer that is supposed to be
+background-only, and it is worst exactly where the product needs it most —
+upward correction, the PRD's primary scenario.
+
+**Correction.** Variant C's background samples a **sclera plate** (§8.1):
+`roi_src` with the source iris hole filled by sclera. The iris then exists
+only in the translated layer. The displacement field, its guard, `alpha`,
+`iris_alpha`, the compositing order and every mask are untouched; variant B
+keeps sampling `roi_src`.
+
+**Why this one.** Rejected alternatives are recorded in §8.8's companion
+list: filling only the vacated crescent (leaves the retained iris wherever
+the layer is clipped — the failing case); forcing `w = 1` over the iris
+(breaks the §8.2 lid-safety bound and pulls lid skin into the eye);
+`cv2.inpaint` (the §4.1 candidate-A cost and artifact risk, plus
+build-dependent output in a deterministic suite); reverting to variant B
+(the compression defect C exists to avoid). The plate is the only option
+that removes the competing content at its source while leaving every safety
+invariant and A1 untouched.
+
+**Measured effect** (same simulation, realistic fixture, ratio to the
+geometric ideal — the visible centroid a perfect renderer would produce):
+
+| case | v1.1 | A2 | geometric ideal | A2 / ideal |
+| --- | --- | --- | --- | --- |
+| vertical 15° | 1.14 px | 5.19 px | 4.76 px | 1.09 |
+| vertical 10° | 0.96 px | 3.67 px | 3.22 px | 1.14 |
+| horizontal 15° | 6.84 px | 8.99 px | 8.97 px | 1.00 |
+| horizontal 10° | 4.95 px | 6.10 px | 6.07 px | 1.00 |
+
+**A threshold that was not achievable, and its replacement.** The same
+simulation shows the frozen `0.6·|d|` floor exceeds what *any* correct
+implementation can reach on the clipped fixture for vertical moves: the
+geometric ideal is 4.76 px against a 5.59 px floor at 15°, and 3.22 px
+against 3.75 px at 10°. A clipped iris cannot move its *visible* centroid by
+`0.6·|d|` — the upper lid cuts the leading edge as fast as the trailing edge
+rises. The floor is therefore replaced by a comparison against the geometric
+ideal computed from the fixture's own landmarks (§15.1). This is a
+**strengthening, not a relaxation**: the ideal band rejects the v1.1
+behaviour on the horizontal rows too (0.76 and 0.82 of ideal), which the
+`0.6·|d|` floor passed.
+
+**Known consequences, recorded rather than designed around.** (1) The
+sclera fill is synthetic where the iris used to be; it is low-texture and
+sits behind the iris layer, but it can read flat next to real sclera — §24
+Q13, scored at the gate. (2) A1's conservative source-coverage rule removes
+a thin crescent (≈ 1.9 px on the fixture) from the bottom of an
+upward-moved iris, because that content was under the lower lid in the
+source and does not exist; the visible iris can therefore show a slightly
+flattened trailing edge, and the measured centroid sits marginally *above*
+the ideal — §24 Q14.
+
+**Required regression coverage** (in §15.2, marked *A2*):
+
+1. the background carries no iris — the plate has no iris-tone pixel inside
+   the iris hole;
+2. exactly one iris in the output — inside the opening, every iris-tone
+   pixel lies within the destination disc dilated by 1 px;
+3. visible-centroid movement inside the geometric-ideal band on the
+   realistic fixture, with the v1.1 background as the negative control;
+4. variant B is untouched by A2 — its output is bit-identical with the plate
+   code path present;
+5. the plate never writes outside the opening, and the §8.2 lid-safety bound
+   still holds when sampling the plate;
+6. the fill's degenerate fallbacks (one-sided, and no interior sclera on a
+   line) are exercised deterministically.
 
 ---
 
@@ -1267,6 +1379,12 @@ eye renderer**, not image assets.
   fixed catchlight. Deterministic, a few lines of OpenCV. Its value: the
   **iris centroid is measurable** (dark-pixel centroid inside the opening),
   so tests can assert *where the iris actually moved*.
+- **Geometric-ideal reference (*A2*).** `visible_centroid_ideal(result, d)`
+  computes, from the fixture's own landmarks and with no engine code, the
+  area-weighted centroid of `(iris disc + d) ∩ eyelid polygon` — the visible
+  iris a perfect renderer would show. Centroid assertions on the clipped
+  realistic fixture are made against it, because a lid-clipped iris cannot
+  move its visible centroid by the commanded `|d|` (§8.8).
 - Golden images are **not** used (brittle across OpenCV builds) — and no
   checksum of the renderer either, for the same reason; the renderer is
   verified by geometric properties (the rendered iris centroid lies at the
@@ -1300,9 +1418,14 @@ per case rather than as one number.
 | masks | pixels outside the opening unchanged | for CORRECTED output, (*A1*) `frame[opening_mask == 0] == canvas[opening_mask == 0]` — the invariant §11 actually names, and the selector that stays correct under either permitted `alpha` construction; repeated with a face small enough that the two ROI boxes overlap |
 | warp | eye order does not matter (*A1*) | the §8.4 blend helper applied to the two eyes in either order, into copies of the same canvas, gives bit-identical results (asserted at the helper level: the engine's own order is fixed right-then-left by §10.1 and is not a setting) |
 | warp | sampling stays inside the opening | with the default precise distance transform and `field_guard_px = 1.5`: for every `p` with `w(p) > 0`, the four pixels of the bilinear footprint of `p − D(p)` have `opening_mask == 1` (§8.2 discrete bound); repeated with a 3×3 chamfer mask and `field_guard_px = 2.5` |
-| warp | the iris actually moves — variant C | horizontal 10° and 15° on the realistic fixture: centroid of the visible disc moves by `d ± 0.5 px`. Vertical 10° and 15° on the **default** fixture (iris ratio 0.24, disc unclipped before and after): `d ± 0.5 px`. Vertical 15° on the realistic fixture (disc lid-clipped, so the visible-disc centroid cannot move by the full `d`): correct direction and at least `0.6·|d|`, the same form as variant B — the B-vs-C row below is where the two are compared |
-| warp | the iris actually moves — variant B | horizontal 10°/15° and vertical 10°: `d ± 1 px`; vertical 15°: correct direction and at least `0.6·|d|` (the compression near the lid is the designed behaviour, §4.1) |
-| warp | B vs C occlusion | vertical 15° on the realistic fixture: C's centroid displacement exceeds B's, and C keeps iris texture where B compresses |
+| warp | the iris actually moves — variant C (*A2*) | **default** fixture (unclipped), vertical and horizontal 10° and 15°: visible centroid moves by `d ± 0.5 px` (there the geometric ideal equals `d`). **Realistic** fixture (lid-clipped), vertical and horizontal 10° and 15°: movement is in the right direction and within **[0.85, 1.25] × the geometric ideal** of §15.1 — the lower bound rejects a background that retains the source iris, the upper bound rejects an implementation that erases so much iris that a sliver drags the centroid. Negative control: the v1.1 background (sampling `roi_src` instead of the plate) scores 0.24, 0.30, 0.76 and 0.82 of ideal on those four cases and must fail every one |
+| warp | background carries no iris (*A2*) | the `sclera_plate` contains no iris-tone pixel inside the iris hole (colour test against the renderer's iris tone), and is bit-identical to `roi_src` everywhere outside the hole |
+| warp | exactly one iris (*A2*) | in the corrected output, every iris-tone pixel inside the opening lies within the destination disc dilated by 1 px — no remnant at the source position; fails on the v1.1 background |
+| warp | variant B untouched by A2 (*A2*) | with `iris_layer = False` the output is bit-identical whether or not the plate code path is present: variant B samples `roi_src` |
+| warp | plate safety (*A2*) | the plate writes no pixel outside `opening_mask`, and the §8.2 footprint bound still holds when the field samples the plate |
+| warp | fill fallbacks (*A2*) | a scan-line whose hole reaches the opening edge on one side replicates the other side; a line with no non-hole interior pixel uses the median interior colour; both exercised deterministically |
+| warp | the iris actually moves — variant B | default fixture, horizontal 10°/15° and vertical 10°: `d ± 1 px`; realistic fixture, vertical 15°: correct direction only — variant B compresses the iris against the lid by design (§4.1), so no centroid floor is asserted for it |
+| warp | B vs C occlusion | vertical 15° on the realistic fixture: C's visible-centroid displacement exceeds B's by a clear margin, and C keeps iris texture where B compresses |
 | warp | iris layer opaque at centre | at the destination iris centre and its 3×3 neighbourhood, output equals `frame(p − d)` within interpolation tolerance (variant C) |
 | warp | no ghosting near the lid (*A1*) | vertical move bringing the moved iris under the upper lid: at pixels inside the moved disc (`iris_alpha ≥ 1 − 1e-6`; assert the set is **non-empty** so the row cannot pass vacuously) that lie in the partial-alpha band along the lid (`0.5 < alpha < 1`), output equals `frame(p − d)` within tolerance — the moved iris is not mixed with the unmoved original. **Negative control: the superseded pre-A1 order** (`alpha·(iris_alpha·iris_layer + (1−iris_alpha)·background) + (1−alpha)·canvas`), computed inline in the test, must violate it on at least one selected pixel. (The old `edge_px = 4` control is void under A1 — a wide feather no longer dilutes an opaque iris; `edge_px` is still exercised by the sclera-dilution check below) |
 | masks | iris alpha never reaches lid skin (*A1*) | `iris_alpha == 0` at every pixel where `opening_mask == 0`, on both the default and realistic fixtures and for a displacement large enough to push the disc across the contour — the invariant §11 now rests on |
@@ -1356,7 +1479,7 @@ M3 measures; it does not claim.
 | Measure | How (harness, `--repeat 50`, medians and p90) | Why |
 | --- | --- | --- |
 | `correction_ms` total | inside the engine | the number M4 will budget against |
-| per-eye warp cost, copy cost | `CorrectionDebug.stage_ms` with `--debug` | where the time goes; the copy-once budget's actual price at 720p |
+| per-eye warp cost, copy cost, plate build (*A2*) | `CorrectionDebug.stage_ms` with `--debug` | where the time goes; the copy-once budget's actual price at 720p |
 | `compositing_ms` | nested, one definition (§3.2) | PRD §21 visibility |
 | resolution sensitivity | same still at 640×360, 1280×720, 1920×1080 (`--canvas`) | eye-region work should scale with eye size, the copy with frame size |
 | variant B vs C | `--variant` | the price of the iris layer |
@@ -1482,7 +1605,7 @@ Four items are flagged to the PM as *observations*, not amendments:
 | eye-region geometry, derived quantities, analytic check list and order, pair rule, disjointness, containment margin rationale | §5 |
 | gaze → head-frame Δ → per-eye pixel displacement, pose branch, relative application, clamp, gain, shared constants | §6 |
 | policy function shape, tier, curve breakpoints as defaults, reasons, harness bypass | §7 |
-| mask construction, discrete warp-field bound, iris layer alphas, the two-step blend-into-canvas order (Amendment A1), acceptable-blend definition | §8, §8.7 |
+| mask construction, discrete warp-field bound, iris layer alphas, the two-step blend-into-canvas order (A1), the sclera-plate background and what each variant samples (A2), acceptable-blend definition | §8, §8.7, §8.8 |
 | blink/closed-eye rules, no temporal state | §9 |
 | failure vocabulary and outcomes | §10.3 |
 | harness inputs/outputs/report contents, no camera, unmirror, video justification and limits, injectable factory | §12 |
@@ -1547,6 +1670,8 @@ root. The harness and `debug.py` remain development tooling and may gain a
 | Q9 | Video writer codec availability on the PO's Windows OpenCV | build-dependent | harness fallback to PNG sequence |
 | Q10 | Whether the result assembly the harness repeats from `worker.py` should become a tracking helper | touches frozen M2 code | M4 tidy-up candidate; not M3 |
 | Q11 | `iris_margin_fraction 0.15` (and the point-containment form of the check) at real fissure heights | sized by arithmetic (§5.3), not by captures; too large excludes the upward range, too small lets the iris centre reach the lid line | realistic-anatomy tests + PO captures; area-based check as ITERATE option |
+| Q13 | **synthetic sclera where the iris used to be (A2, §8.8)**: the plate's fill is interpolated, not real sclera, so it can read flat or slightly banded beside genuine sclera, most visibly on a large correction that uncovers much of it | the fill is cheap and deterministic by design; whether it is convincing on a real eye at 720p is unmeasured | §15.2 plate tests bound its extent; scored under iris/eye realism and artifact visibility at the gate (§14.2); a textured or inpainted fill is an ITERATE option with evidence |
+| Q14 | **flattened trailing edge of an upward-moved iris (A2 + A1)**: the conservative source-coverage rule drops a thin crescent (≈ 1.9 px on the fixture) whose source lay under the lower lid, so the moved iris can show a slightly flat bottom and the measured centroid sits just above the geometric ideal | the missing content genuinely does not exist in the source; synthesising it would be invention | the §15.2 ideal band's upper bound keeps it honest; PO scores it under iris realism |
 | Q12 | **lid-edge aliasing of the opaque iris after Amendment A1** (§8.7): the iris-to-skin transition at the eyelid contour is now governed by the binary destination mask, so it can stair-step by one pixel where the opaque disc crosses the lid | the trade was taken deliberately — smoothing it with the anti-aliased `alpha` would make the no-ghosting test vacuous; whether one pixel of step is visible at 720p on a real face is unmeasured | bounded by the §15.2 aliasing test; scored under artifact visibility at the gate (§14.2); an ITERATE-round fix with evidence if the PO sees it |
 
 None of these is an architecture blocker. The frozen baseline created no
