@@ -3,13 +3,13 @@
 **Active assignment: Milestone 3 — Offline Gaze Correction Prototype
 (implementation)**
 
-**M3 implementation: ACTIVE — against SA v1.1**
+**M3 implementation: ACTIVE — against SA v1.2**
 
 **M0 / M1 / M2 status: PASS / CLOSED / FROZEN**
 
 **Overall architecture baseline (`architecture-v1`): APPROVED / FROZEN / CANONICAL**
 
-**M3 Solution Architecture (`m3-architecture-v1.1`): APPROVED / FROZEN / CANONICAL**
+**M3 Solution Architecture (`m3-architecture-v1.2`): APPROVED / FROZEN / CANONICAL**
 
 **Updated: 2026-09-05**
 
@@ -20,34 +20,32 @@ in the frozen M3 Solution Architecture and is authoritative there.
 
 | Item | Value |
 | --- | --- |
-| **Canonical M3 SA** | **`m3-architecture-v1.1` @ `00eed0e893b73dcd490f69af8df852a0609ccbaa`** |
+| **Canonical M3 SA** | **`m3-architecture-v1.2` @ `6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93`** |
 | SA document | `docs/milestones/m3-solution-architecture.md` (frozen at that SHA) |
 | Preferred implementation branch | `codex/m3-gaze-correction` |
-| Branch from | the frozen SA v1.1 SHA above — mandatory |
+| Implementation lineage | preserve existing M3 work and incorporate the frozen SA v1.2 above |
 
-The implementation branch must descend from
-`00eed0e893b73dcd490f69af8df852a0609ccbaa`. This assignment commit is a
-documentation-only commit sitting directly on top of that SHA (branch
-`codex/m3-assignment-v1.1`); cutting the implementation branch from either
-point satisfies the baseline requirement, and cutting it from this commit also
-carries this file — the pattern M1 used (`codex/m1-assignment` →
-`claude/m1-face-eye-tracking`).
+The existing implementation at `bf6f24c02a36060b901e71debce3547026e07613`
+on `codex/m3-gaze-correction` is preserved. This pointer update belongs on
+that implementation lineage; no separate assignment branch is created.
+Incorporate the frozen v1.2 baseline without discarding passing work.
 
-## SA v1.0 is superseded for implementation
+## Superseded implementation baselines — immutable history
 
 | Reference | SHA | Standing |
 | --- | --- | --- |
-| `m3-architecture-v1.1` | `00eed0e893b73dcd490f69af8df852a0609ccbaa` | **implement against this** |
-| `m3-architecture-v1` | `a459e6be36122bf10ce707731d5f847007847e96` | superseded for implementation; **immutable history**, never moved or rewritten |
-| `codex/m3-assignment` | `06c9c5926fde425c49c3776f5bfd110df18a9538` | superseded assignment pointer (named v1.0); retained |
+| `m3-architecture-v1.2` | `6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93` | **implement against this** |
+| `m3-architecture-v1.1` | `00eed0e893b73dcd490f69af8df852a0609ccbaa` | superseded for implementation; immutable history |
+| `m3-architecture-v1` | `a459e6be36122bf10ce707731d5f847007847e96` | superseded for implementation; immutable history |
+| `codex/m3-assignment-v1.1` | `42fc15b3f54f130d7db7cb4078a91ed529281d1c` | superseded assignment pointer; retained |
+| `codex/m3-assignment` | `06c9c5926fde425c49c3776f5bfd110df18a9538` | superseded assignment pointer; retained |
 
-v1.1 is v1.0 plus **Amendment A1** and nothing else. A1 corrects the §8.4
-compositing order after M3 implementation found that the frozen §8.4 formula
-and the frozen §15.2 no-ghosting test were mathematically incompatible; it was
-approved by the Product Manager and is **part of the authoritative design**,
-not an optional note. Its evidence, both formulas, rationale, accepted
-consequence and the eight required regression tests are recorded in SA §8.7 —
-read that section before touching compositing. No new ADR was required.
+v1.2 adds **Amendment A2** to v1.1. Implement the specified sclera-background
+representation in variant C so its background does not retain competing
+source-iris texture; variant B stays unchanged. Preserve A1 compositing,
+binary source/destination occlusion, lid safety, ownership and atomic
+fallback. Read SA §8.8 and use its frozen visible-centroid ideal and A2
+regression coverage. No new ADR or dependency is required.
 
 ## Frozen repository state
 
@@ -61,7 +59,9 @@ read that section before touching compositing. No new ADR was required.
 | `m3-architecture-v1` | `a459e6be36122bf10ce707731d5f847007847e96` |
 | `m3-architecture-v1.1` | `00eed0e893b73dcd490f69af8df852a0609ccbaa` |
 
-All seven are frozen: do not advance, rewrite, force-push, or merge into any
+| `m3-architecture-v1.2` | `6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93` |
+
+All eight are frozen: do not advance, rewrite, force-push, or merge into any
 of them. `claude/m3-solution-architecture` and PR #7 are the retained M3 SA
 review record; `claude/m3-sa-blend-amendment` is the A1 amendment branch.
 Neither is a work branch.
@@ -71,22 +71,27 @@ bootstrap case in `docs/architecture.md`) remains accepted and out of scope.
 
 ## What M3 implements
 
-Build the offline gaze-correction prototype **exactly as frozen SA v1.1
+Build the offline gaze-correction prototype **exactly as frozen SA v1.2
 specifies**: the `gazefix/correction/` package (engine protocol, metadata-only
 result contract, geometric engine, eye-region geometry, mask/blend library,
 correction policy), the offline harness CLI and its `scripts/` wrapper, the
 hardware-independent tests, and `docs/correction.md`.
 
-**Implement the frozen SA; do not redesign it.** The engine boundary,
-geometric technique, eye-region geometry, gaze-to-deformation mapping, policy,
-mask and blending approach (including A1's two-step compositing order and its
-binary `iris_alpha` occlusion factors), failure semantics, frame ownership,
-harness design and test strategy are settled decisions (SA §22). Ordinary
-implementation detail is the engineer's (SA §22, PRD §26). If implementation
-evidence contradicts a settled decision, stop and escalate to the Product
-Manager with the evidence — that route produced A1 and it is the route to use
-again. Do not amend a frozen SA, `docs/architecture.md`, or an accepted ADR,
-and do not work around a contradiction silently.
+## Engineering authority (Product Owner instruction, 2026-09-05)
+
+Implement the frozen M3 design and preserve passing work. Ordinary
+implementation-detail and tuning issues do not require escalation. Codex may
+adjust local fill/interpolation/mask details, deterministic helper organization,
+experimental constants and test tolerances derived from reproducible evidence.
+
+This authority preserves the CorrectionEngine contract, ADR-0002/0003,
+provider neutrality, A1/A2 behavioral invariants, frame ownership and atomic
+fallback, M3/M4 separation, CPU-only/no-new-dependency constraints, and the PO
+visual-quality gate. Escalate only if evidence requires changing one of those
+architecture/product invariants, later-milestone scope, hardware/dependencies,
+or weakening a product-quality requirement. Do not request an SA amendment
+merely because an implementation heuristic needs iteration. Frozen documents
+remain immutable.
 
 ## Sources of truth, in precedence order
 
@@ -94,7 +99,7 @@ and do not work around a contradiction silently.
    constraints, milestone gates.
 2. `docs/architecture.md` and the accepted ADRs (`docs/decisions/`) — frozen
    architecture.
-3. `docs/milestones/m3-solution-architecture.md` **at SA v1.1** — the M3
+3. `docs/milestones/m3-solution-architecture.md` **at SA v1.2** — the M3
    design to implement.
 4. `docs/qa-policy.md` — verification depth, stopping rules, Product Owner
    interaction budget.
@@ -124,8 +129,9 @@ and do not work around a contradiction silently.
 
 ## Next step
 
-Create `codex/m3-gaze-correction` from the frozen SA v1.1 baseline and
-implement the frozen SA. Work already done against v1.0 is **preserved and
-migrated** — rebased or cherry-picked onto this lineage, not discarded — since
-v1.1 differs from v1.0 only by A1. Report at the milestone gate with PRD §25
-evidence levels; do not proceed past M3.
+Resume on `codex/m3-gaze-correction`: implement A2, run focused tests, fix
+ordinary implementation issues autonomously, complete the M3 test matrix,
+run the full regression suite per QA policy, and prepare the complete offline
+visual-evaluation batch. Stop when M3 is ready for PO evaluation or a genuine
+architecture/product blocker remains. Do not report PASS before the PO gate.
+Do not begin M4.
