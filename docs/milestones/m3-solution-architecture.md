@@ -392,10 +392,10 @@ experimental constants in `GeometricCorrectionSettings` (§22).
 | # | Check | Rule | Outcome |
 | --- | --- | --- | --- |
 | 1 | landmarks present | `eye is not None`, `contour` finite, `iris is not None` and finite | SKIPPED `no iris` (open or unknown → pair rule) |
-| 2 | polygon sanity | contour points finite; shoelace area of `opening` ≥ `min_polygon_area_px` (default **30**) and the polygon is simple (no self-intersection) | SKIPPED `degenerate contour` (open or unknown → pair rule) |
-| 3 | M1 validity | `eye.valid` (all points in frame, `width_px ≥ tracking_min_eye_width_px`) | SKIPPED `eye invalid` (open or unknown → pair rule) |
-| 4 | minimum size | `half_width_px ≥ min_half_width_px` (default **8**; below this a 1–3 px displacement is interpolation blur, not correction) | SKIPPED `eye too small` (pair rule) |
-| 5 | eyelid aperture | `aperture ≥ min_aperture` (default **0.18**; M2's `openness_floor` 0.10 is where the iris centre becomes untrustworthy, 0.20 is "full"; open eyes measure 0.25–0.4) | SKIPPED `eye closed` (**closed → other eye may proceed**) |
+| 2 | eyelid aperture | `aperture ≥ min_aperture` (default **0.18**; M2's `openness_floor` 0.10 is where the iris centre becomes untrustworthy, 0.20 is "full"; open eyes measure 0.25–0.4). Evaluated **before** polygon sanity on purpose: a blink or wink drives the lid landmarks onto or across each other, and that must read as a closed eye (other eye may proceed), never as a degenerate contour (both skipped) | SKIPPED `eye closed` (**closed → other eye may proceed**) |
+| 3 | polygon sanity | shoelace area of `opening` ≥ `min_polygon_area_px` (default **30**) and the polygon is simple (no self-intersection) — with a normal aperture, a failure here is mistracking, not a blink | SKIPPED `degenerate contour` (open or unknown → pair rule) |
+| 4 | M1 validity | `eye.valid` (all points in frame, `width_px ≥ tracking_min_eye_width_px`) | SKIPPED `eye invalid` (open or unknown → pair rule) |
+| 5 | minimum size | `half_width_px ≥ min_half_width_px` (default **8**; below this a 1–3 px displacement is interpolation blur, not correction) | SKIPPED `eye too small` (pair rule) |
 | 6 | iris plausibility | `0.2 ≤ iris_radius/half_width_px ≤ 0.6` (anatomy ≈ 0.39: 11.7 mm iris over a 30 mm fissure); `iris_center` inside `opening` (the plausibility check `docs/gaze.md` §5 notes M2 lacks) | SKIPPED `iris implausible` (pair rule) |
 | 7 | displacement finite | `d` (§6; needs only gaze, pose, `half_width_px`, `ex`, `ey`) finite | **FAILED** `displacement not finite` — an engine fault: the whole frame is FAILED regardless of the other eye or `pair_coupling` (§10.1). Defensive: unreachable with contract-valid inputs |
 | 8 | displacement clamp | §6.4 | applied, `clamped=True` |
@@ -408,8 +408,8 @@ open-eye aperture 0.25–0.30 (centre height ≈ 1.4 × the mean lid separation
 for a lens-shaped opening, so the half-height at the centre is ≈ 0.35–0.42
 `hw`) and `R_px = 0.8·hw`, a margin of `0.5·r ≈ 0.195·hw` would admit only
 ≈ 11–16° of upward travel for a centred iris — it would refuse most of the
-10–20° operating range and, for apertures below 0.195, refuse every
-correction while the aperture gate still passes. The default `0.15·r ≈
+10–20° operating range, and nothing at all once the centre half-height
+drops to the margin (aperture ≈ 0.14). The default `0.15·r ≈
 0.06·hw` admits ≈ 21–27°, leaving the hard clamp (§6.4, ≈ 39°) and the
 policy (§7) to bound the rest. The margin is a knob the gate may move
 (Q11); an area-based alternative ("the destination disc keeps ≥ X % of its
@@ -639,7 +639,7 @@ compositor component exists (ADR-0002 §4). Everything here runs in phase 3
 | Field | Construction | Purpose |
 | --- | --- | --- |
 | `opening_mask` | `cv2.fillPoly` of the 16-point eyelid polygon (optionally with sub-pixel `shift` bits or a Catmull-Rom-smoothed contour — implementor's choice); values `{0, 1}` | occlusion, distance field, blend region |
-| `distance` | `cv2.distanceTransform(opening_mask, DIST_L2, DIST_MASK_PRECISE)` — the exact Euclidean distance, for each inside pixel, to the nearest **zero pixel**; 0 outside. The precise mask is the default because the §8.2 bound and its test rely on it; a chamfer approximation (3×3/5×5, up to ≈ 4 % over-estimate) is allowed only together with `field_guard_px ≥ 2` | warp falloff (§8.2) and blend alpha — **not** containment, which is analytic (§5.3) |
+| `distance` | `cv2.distanceTransform(opening_mask, DIST_L2, DIST_MASK_PRECISE)` — the exact Euclidean distance, for each inside pixel, to the nearest **zero pixel**; 0 outside. The precise mask is the default because the §8.2 bound and its test rely on it; a chamfer approximation (3×3/5×5, up to ≈ 4 % over-estimate) is allowed only together with `field_guard_px ≥ 2.5` | warp falloff (§8.2) and blend alpha — **not** containment, which is analytic (§5.3) |
 | `alpha` (blend) | `clip(distance / edge_px, 0, 1) · opening_mask` (default `edge_px` **1.5**, range 1–3), or a `shift`-bit anti-aliased `fillPoly` multiplied by `opening_mask`. A Gaussian blur is **not** an allowed construction (it never reaches exactly 1 near the edge, §15.2). Exactly 0 outside the opening; exactly 1 at every interior pixel with `distance ≥ edge_px` | eye-shaped blend that never writes on lid skin; see §8.4 for why it is *not* a wide feather |
 | `iris_alpha` (variant C) | soft disc at the **destination** iris centre, radius `iris_layer_radius_scale·iris_radius` (default 1.05), 1–1.5 px edge; multiplied by `opening_mask` at the destination (occlusion by the lid) and by `opening_mask` sampled at the **source** position `p − d` (so lid skin that clipped the iris in the source is never carried into the eye) | iris layer compositing |
 
@@ -648,16 +648,18 @@ compositor component exists (ADR-0002 §4). Everything here runs in phase 3
 For each output pixel `p` in the ROI:
 
 ```text
-D(p) = d · w(p),      w(p) = min(1, max(0, distance(p) − m) / f),      m = field_guard_px (1 px with the precise transform),      f = max(|d|, f_min)
+D(p) = d · w(p),      w(p) = min(1, max(0, distance(p) − m) / f),      m = field_guard_px (1.5 px with the precise transform),      f = max(|d|, f_min)
 f_min = falloff_fraction · half_width_px        (default falloff_fraction 0.15)
 ```
 
 Because `f ≥ |d|`, `|D(p)| ≤ distance(p) − m` wherever `w > 0`: the sampled
 location `p − D(p)` and its 2×2 bilinear footprint stay inside
-`opening_mask` (with the exact Euclidean `distance` of §8.1, the 1 px guard
-`m` covers the transform's zero-pixel-centre semantics and the bilinear
-footprint; an approximate chamfer transform needs `m ≥ 2`), so lid skin
-cannot be sampled into the eye. This is a discrete bound on the rasterised
+`opening_mask`: `distance` is measured centre-to-centre to the nearest zero
+pixel, and every tap of the bilinear footprint lies less than √2 px from
+the sample, so a guard `m ≥ √2` (default **1.5 px**) keeps every tap on a
+pixel with `opening_mask == 1`; an approximate chamfer transform (up to
+≈ 4 % over-estimate) needs `m ≥ 2.5`. Lid skin therefore cannot be sampled
+into the eye. This is a discrete bound on the rasterised
 mask and becomes a test (§15.2); it is not claimed for the continuous
 polygon.
 Far from the contour (the iris interior and the sclera middle) `w = 1`:
@@ -732,7 +734,7 @@ contour. Glasses frames crossing the eye opening: the mask is
 landmark-shaped, so a frame edge inside the opening will be warped with the
 sclera — an expected artifact class for the glasses condition in §14, not a
 pre-emptive M3 fix. An empty or non-finite mask **after** the analytic
-checks passed (area ≥ 30 px is guaranteed by §5.3 #2) can only be an engine
+checks passed (area ≥ 30 px is guaranteed by §5.3 #3) can only be an engine
 fault and is `FAILED` (§10.3).
 
 ---
@@ -749,7 +751,8 @@ blink prediction, no stale gaze. Messages follow the fixed gate order of
 | one eye closed (wink), gaze `ESTIMATED` from the other | that eye's `aperture < min_aperture` | that eye SKIPPED `eye closed`; the other corrected (pair rule §5.6) |
 | squint / aperture under threshold on an eye M2 still used | engine `aperture < min_aperture` (0.18 > M2's 0.10 floor: the engine is stricter than the estimator because it needs a visible iris to move, not just a centre to measure) | SKIPPED `eye closed` for that eye; pair rule |
 | iris landmarks unavailable/implausible | §5.3 #1/#6 | SKIPPED; pair rule (open eye → both) |
-| eye geometry collapses (contour degenerate, area tiny, eyes overlap) | §5.3 #2, §5.4 | SKIPPED both |
+| eye geometry collapses with a normal aperture (self-intersecting or tiny polygon, eyes overlap) | §5.3 #3, §5.4 | SKIPPED both |
+| lid landmarks collapsed onto each other (a shut eye seen by the tracker) | §5.3 #2 fires first (aperture ≈ 0) | SKIPPED `eye closed`; the other eye may proceed |
 | warp unsafe (destination leaves the eye after clamp; at the border) | §5.3 #10/#11 | SKIPPED; pair rule |
 | non-finite displacement | §5.3 #7 | frame FAILED (engine fault) |
 
@@ -776,10 +779,14 @@ failure names the message and returns the input:
 disjointness check (§5.4) and the pair rule (§5.6) — **no pixel is written
 yet**. Any per-eye FAILED here makes the frame FAILED at once.
 
-**Phase 3 — commit**, only if at least one eye is CORRECTED-eligible:
-allocate the working copy, build masks and warps per eye into ROI-sized
-buffers, blend into the canvas. Any exception in phase 3 discards the
-canvas and returns the input with `FAILED`. A half-corrected frame is
+**Phase 3 — commit**, only if at least one eye is CORRECTED-eligible, in
+this order: allocate the working copy; for the right eye then the left,
+build the opening mask, distance field and warped layers (background remap
+and, in variant C, the iris-layer remap) into ROI-sized buffers; then
+composite both eyes into the canvas (alpha/iris-alpha construction and the
+§8.4 blend, right then left) — `compositing_ms` spans exactly this last
+step. Any exception in phase 3 discards the canvas and returns the input
+with `FAILED`. A half-corrected frame is
 therefore impossible, and skipping costs no copy.
 
 ### 10.2 Per-eye fallback before whole-frame fallback?
@@ -802,7 +809,7 @@ fallback is always the input array, never a modified frame.
 | `tracking.gaze is None` or status ≠ `ESTIMATED` | SKIPPED | `no gaze: <gaze status or "missing">` | () | input |
 | `status.has_landmarks` False / `iris_available` False | SKIPPED | `no landmarks` / `no iris` | () | input |
 | per-eye SKIPPED reasons (§5.3): `no iris`, `degenerate contour`, `eye invalid`, `eye too small`, `eye closed`, `iris implausible`, `negligible displacement`, `iris would leave the eye`, `eye at image border`; two-eye: `eyes overlap`; pairing: `pair skipped: <side> <reason>` | — | (per-eye `reason`) | 2 | — |
-| one eye SKIPPED (closed/negligible), other corrected | CORRECTED | `` | 2 | canvas |
+| one eye SKIPPED (closed/negligible; any reason when `pair_coupling=False`), other corrected | CORRECTED | `` | 2 | canvas |
 | one eye open-unsafe (pair rule) | SKIPPED | `both eyes skipped: right <reason>; left <reason>` | 2 | input |
 | both eyes SKIPPED for any reasons | SKIPPED | `both eyes skipped: right <reason>; left <reason>` | 2 | input |
 | per-eye `displacement not finite` (§5.3 #7) | FAILED | `<side> displacement not finite` | 2 | input |
@@ -828,7 +835,7 @@ Applies ADR-0003 §5 and the baseline "Frame ownership and copying" section.
 
 | Rule | M3 behaviour |
 | --- | --- |
-| input immutability | never written; tests assert bitwise equality after `correct()`, on writable inputs too, including after a phase-3 exception on the second eye |
+| input immutability | never written; tests assert bitwise equality after `correct()`, on writable inputs too, including after a phase-3 exception raised once the first eye has already been blended into the canvas |
 | working copy | **one** `np.array(frame, copy=True, order="C")` per corrected frame, allocated after validation (§10.1); both eyes blend into it via ROI views; ROI-sized scratch buffers (maps, masks, layers) are engine-private and released per call (pooling is M7) |
 | zero-copy passthrough | every SKIPPED/FAILED outcome and strength 0 returns the input object (`output.frame is frame`) |
 | publication immutability | not the engine's job: the caller re-freezes (`setflags(write=False)`) before publication (M4) — the engine returns a writable canvas so the M4 overlay helper can draw into it **without another full-frame copy**, exactly the baseline's draw-into-owned-canvas plan |
@@ -863,10 +870,10 @@ factory so the CLI is testable with the existing fakes (§15.2).
 | `--target-yaw DEG --target-pitch DEG` | target direction (default 0, 0 = optical axis). Also the way to **sweep redirection magnitude on any still**: with a near-frontal fixture, `--target-pitch 15` exercises a 15° redirection even though no real deviation exists |
 | `--sweep-strength a,b,c` / `--sweep-target-pitch …` / `--sweep-target-yaw …` | produce one output per value plus a labelled contact sheet (`sweep.png`) |
 | `--variant layered\|field` | `iris_layer` on/off (§4.2) |
-| `--set engine.KEY=V` / `--set policy.KEY=V` / `--set gaze.KEY=V` (repeatable) | override one field of `GeometricCorrectionSettings`, `PolicySettings` or `GazeSettings` by namespaced name (dataclass `replace`, validated). The namespace is required because the three dataclasses share field names (`eye_model_ratio`, `min_cos`, `min_half_width_px`). Technique/tuning comparison without code changes |
+| `--set engine.KEY=V` / `--set policy.KEY=V` / `--set gaze.KEY=V` (repeatable) | override one field of `GeometricCorrectionSettings`, `PolicySettings` or `GazeSettings` by namespaced name (dataclass `replace`, validated). The namespace is required because `GazeSettings` and `GeometricCorrectionSettings` share field names (`eye_model_ratio`, `min_cos`, `min_half_width_px`). Technique/tuning comparison without code changes |
 | `--eye-model-ratio K` | **new to this harness** (not a `validate.py` flag); default `AppSettings.gaze_eye_model_ratio` (1.25); written to **both** `GazeSettings` and `GeometricCorrectionSettings` (§6.6) |
 | `--stabilizer S` / `--gaze-smoothing S` | video only; default **0/off** for reproducibility (baseline recommendation); when on, the harness owns and resets them at start |
-| `--debug` | write `debug.png` / `debug.mp4` (§13) and dump `CorrectionDebug` into the report |
+| `--debug` / `--debug-layers L,…` | write `debug.png` / `debug.mp4` (§13), optionally selecting layers, and dump `CorrectionDebug` into the report |
 | `--repeat N` | re-run `correct()` N times on the same frame for timing percentiles (§17) |
 | `--out DIR --name NAME --label TEXT` | output root (default `experiments/`, git-ignored), experiment name (default `<input-stem>_<timestamp>`), free-text label |
 | `--model-dir` | as in `validate.py` |
@@ -1061,8 +1068,8 @@ and prepares every sheet.
 This exceeds the 5–10 minute smoke-test norm of `docs/qa-policy.md` §9
 because M3 is the PRD's major quality gate, and it is flagged here so the PM
 can justify it before execution rather than discover it mid-session.
-Variant A/B (`--variant`), `--set` tuning and `pair_coupling` demonstrations
-are **not** part of the gate pass: they are ITERATE-round activities the PM
+B-vs-C comparison (`--variant`), `--set` tuning and `pair_coupling`
+demonstrations are **not** part of the gate pass: they are ITERATE-round activities the PM
 authorises, prepared by the engineer as additional sheets. The step-by-step
 checklist (one action, one expected observation per line, the `gaze.md`
 §11 style) is written with the implementation, not here.
@@ -1117,25 +1124,25 @@ per case rather than as one number.
 | mapping | closed-loop **under head rotation** (the `Rᵀ` discriminator) | `gaze_scene(head_yaw_deg=20)` and separately `head_pitch_deg=20`, eyes fixating the camera, target = camera-frame yaw +10° (resp. pitch +10°), `s=1`: shift the iris landmarks by `d`, re-estimate → recovered camera-frame gaze within ~1.5° of the target. Using `R` instead of `Rᵀ` rotates the head-frame Δ by ~40° and fails by several degrees. (A Δ≈0 sanity case may be kept with a tolerance derived from the estimator's documented ~1.3° fixating-subject residual — ≈ 1 px at half-width 45 — and is *not* the transpose test) |
 | mapping | sign conventions | looking subject's-left (image right) → `dx < 0`; looking down → `dy < 0` (image up); frontal head |
 | mapping | eye-size scaling | same scene at `pixels_per_mm` 2 and 4 → `|d|` doubles |
-| mapping | clamp | absurd target (`s` forced, 60° away) → `|d| == max_fraction·half_width`, `clamped=True` |
+| mapping | clamp | absurd target (`s` forced, 60° away): the geometry helper returns `|d| == max_fraction·half_width` with `clamped=True` (asserted on the helper's return value, since a containment skip that follows would zero `displacement_px` on the result) |
 | mapping | no-pose branch | hand-built `ESTIMATED` gaze with `head_pose_applied=False` on `gaze_scene(...).result(with_pose=False)` → `d` equals the frontal-head value, status not FAILED |
 | geometry | aperture gate | `left_eye_openness=0.05` → left SKIPPED `eye closed`, right CORRECTED |
 | geometry | pair rule | right eye made invalid (contour point outside frame) → both SKIPPED, message `both eyes skipped: right eye invalid; left pair skipped: right eye invalid`; with `pair_coupling=False` → left CORRECTED |
-| geometry | containment at realistic anatomy | realistic fixture (§15.1): 10° and 15° upward at `s=1` → CORRECTED (the default `iris_margin_fraction` admits the operating range); a 40°-equivalent forced displacement → `iris would leave the eye` |
-| geometry | degenerate contour | collapse the 16 points onto a line → SKIPPED `degenerate contour` on that eye, pair rule → both skipped; 468-point result → frame `no iris`; `eyes overlap` on a face shrunk until the polygons' boxes intersect; eye at the image border → `eye at image border` |
+| geometry | containment at realistic anatomy | realistic fixture (§15.1): 10° and 15° upward at `s=1` → CORRECTED (the default `iris_margin_fraction` admits the operating range); a forced **upward** displacement of `0.5·half_width` (the clamp value) → `iris would leave the eye` (a horizontal move of the same size stays clear of the corners and is CORRECTED) |
+| geometry | degenerate contour | swap two lid points so the polygon self-intersects while the aperture stays normal → SKIPPED `degenerate contour` on that eye, pair rule → both skipped; collapse the 16 points onto a line → `eye closed` (aperture 0; the other eye may proceed — the accepted reading, §5.3 #2); 468-point result → frame `no iris`; `eyes overlap` on a face shrunk until the polygons' boxes intersect; eye at the image border → `eye at image border` |
 | geometry | negligible displacement | `s` tiny → both eyes `negligible displacement`, frame SKIPPED, `output.frame is frame` |
-| masks | alpha validity (`test_correction_masks`) | `0 ≤ alpha ≤ 1`, finite; `alpha == 0` outside the opening polygon; `alpha == 1` (within 1e-6) at every interior pixel with `distance ≥ edge_px`; zero-area polygon rejected |
+| masks | alpha validity (`test_correction_masks`) | `0 ≤ alpha ≤ 1`, finite; `alpha == 0` wherever `opening_mask == 0`; `alpha == 1` (within 1e-6) at every interior pixel with `distance ≥ edge_px`; zero-area polygon rejected |
 | masks | pixels outside the opening unchanged | for CORRECTED output, `frame[alpha == 0] == canvas[alpha == 0]`; repeated with a face small enough that the two ROI boxes overlap |
-| warp | sampling stays inside the opening | with the default precise distance transform and `field_guard_px = 1`: for every `p` with `w(p) > 0`, the four pixels of the bilinear footprint of `p − D(p)` have `opening_mask == 1` (§8.2 discrete bound); repeated with a 3×3 chamfer mask and `field_guard_px = 2` |
+| warp | sampling stays inside the opening | with the default precise distance transform and `field_guard_px = 1.5`: for every `p` with `w(p) > 0`, the four pixels of the bilinear footprint of `p − D(p)` have `opening_mask == 1` (§8.2 discrete bound); repeated with a 3×3 chamfer mask and `field_guard_px = 2.5` |
 | warp | the iris actually moves — variant C | horizontal 10° and 15° on the realistic fixture: centroid of the visible disc moves by `d ± 0.5 px`. Vertical 10° and 15° on the **default** fixture (iris ratio 0.24, disc unclipped before and after): `d ± 0.5 px`. Vertical 15° on the realistic fixture (disc lid-clipped, so the visible-disc centroid cannot move by the full `d`): correct direction and at least `0.6·|d|`, the same form as variant B — the B-vs-C row below is where the two are compared |
 | warp | the iris actually moves — variant B | horizontal 10°/15° and vertical 10°: `d ± 1 px`; vertical 15°: correct direction and at least `0.6·|d|` (the compression near the lid is the designed behaviour, §4.1) |
 | warp | B vs C occlusion | vertical 15° on the realistic fixture: C's centroid displacement exceeds B's, and C keeps iris texture where B compresses |
 | warp | iris layer opaque at centre | at the destination iris centre and its 3×3 neighbourhood, output equals `frame(p − d)` within interpolation tolerance (variant C) |
-| warp | no ghosting near the lid | vertical move bringing the moved iris within a few px of the upper lid: pixels in the `alpha > 0.5` band between the moved iris edge and the lid equal `frame(p − d)` within tolerance; negative control at `edge_px = 4` violates it |
+| warp | no ghosting near the lid | vertical move bringing the moved iris under the upper lid: at pixels inside the moved disc (`iris_alpha == 1`) that lie in the partial-alpha band along the lid (`0.5 < alpha < 1`), output equals `frame(p − d)` within tolerance — the moved iris is not mixed with the unmoved original; negative control at `edge_px = 4` (a wide feather) violates it |
 | warp | lid-clipped source iris | source iris partly under the upper lid, horizontal move: no lid-skin pixels appear inside the opening (colour test against the renderer's skin tone) |
 | failure | exception fallback, phase 3 | monkeypatch the mask helper to raise → `FAILED "mask generation failed…"`; `cv2.remap` raising → `FAILED "compositing failed…"`; input returned, no exception escapes, `correction_ms` populated |
 | failure | exception fallback, phases 1–2 | a geometry/mapping helper raising → `FAILED "engine exception: …"`, `output.frame is frame` |
-| failure | second-eye failure after the first eye blended | `cv2.remap` raising only on its second invocation → `output.frame is frame` and the input is bitwise unchanged (D8) |
+| failure | failure after the first eye blended | the blend helper raising on its second invocation (the right eye is already composited into the canvas) → `FAILED "compositing failed…"`, `output.frame is frame`, input bitwise unchanged (D8); likewise the left eye's background remap raising after the right eye's layers exist |
 | failure | per-eye FAILED | monkeypatch the displacement helper to return NaN → frame `FAILED "<side> displacement not finite"`, both eyes recorded, `pair_coupling` irrelevant |
 | policy | curve (`test_correction_policy`) | 0° → 0.3·s, 5–25° → s, 30° → 0.5·s, ≥35° → 0 with `deviation above disable threshold`; confidence ramp; `LOW_CONFIDENCE` → 0 `gaze not estimated`; `m_conf == 0` → `low confidence`; `max_effective_strength` cap |
 | boundary | provider-neutral dependency enforcement (`test_correction_boundary`) | walking the **engine and library modules** (`__init__.py`, `models.py`, `engine.py`, `geometry.py`, `masks.py`, `geometric.py`, `policy.py`): no `mediapipe`, no `gazefix.tracking.mediapipe_tracker`, no `PySide6`/`Qt`, no `gazefix.pipeline`, no `gazefix.camera`, no `gazefix.ui`, no `harness`, no `debug`; `engine.py`/`geometric.py` do not import `policy.py`; `models.py` imports contracts + NumPy only; `geometry.py` imports no `cv2`. **`harness.py` and `debug.py`** are the named development-tooling exceptions: they may import `gazefix.tracking.mediapipe_tracker` (factory only), `gazefix.tracking.analysis`, `gazefix.gaze.estimator`, `gazefix.config` and perform file I/O, and are still checked for no `mediapipe`, no Qt, no `gazefix.pipeline`, no `gazefix.camera`, no `gazefix.ui` |
@@ -1222,8 +1229,8 @@ Dependency direction (baseline diagram): `correction.models →
 tracking.models, gaze.models`; `geometry`, `masks`, `geometric` → `models`
 + contracts + NumPy (`masks`/`geometric` also cv2); `policy → gaze.models`;
 `harness → everything above + tracking.mediapipe_tracker (factory) +
-tracking.analysis + gaze.estimator + config`; `debug → geometry, masks,
-models + cv2`. **Import rules:** nothing imports `harness`; nothing but
+tracking.analysis + tracking.stabilizer + gaze.estimator + config`; `debug →
+geometry, masks, models + cv2`. **Import rules:** nothing imports `harness`; nothing but
 `harness.py` imports `debug`; the engine and library modules import neither
 and import no backend, camera, pipeline, UI or Qt code. The baseline's
 sentence that the correction module "imports no Qt, no pipeline, no camera
@@ -1328,7 +1335,7 @@ Settings defaults collected (all experimental, `GeometricCorrectionSettings`
 `iris_radius_bounds (0.2, 0.6)`, `min_polygon_area_px 30`,
 `padding_fraction 0.25`, `edge_px 1.5`, `falloff_fraction 0.15`,
 `distance_transform precise` (`DIST_MASK_PRECISE`; a chamfer mask requires
-`field_guard_px ≥ 2`), `field_guard_px 1`, `iris_layer True`,
+`field_guard_px ≥ 2.5`), `field_guard_px 1.5`, `iris_layer True`,
 `iris_layer_radius_scale 1.05`,
 `pair_coupling True`, `interpolation linear`, `debug False`;
 `PolicySettings` (runtime-constants tier): `light_factor 0.3`, breakpoints
