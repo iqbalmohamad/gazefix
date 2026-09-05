@@ -720,12 +720,37 @@ fields are `None` when nothing was measured.
 
 | Contract | Purpose | Producer → consumers | Notes |
 | --- | --- | --- | --- |
-| `TrackingResult` (exists) | landmarks, eyes, pose, quality + embedded gaze for one frame | tracker thread → correction policy/engine, overlay, UI | unchanged; already carries everything correction needs |
+| `TrackingResult` (exists) | landmarks, eyes, pose, quality + embedded gaze for one frame | tracker thread → correction policy/engine, overlay, UI | unchanged today; already carries everything correction needs. Extended at M4 with the reserved continuity epoch (below) |
+| tracking continuity epoch (reserved, arrives with M4) | frame-associated signal that downstream temporal state is no longer continuous | tracker worker → correction policy/engine, M5 temporal state | a monotonically changing identifier carried on `TrackingResult`; see below |
 | `GazeResult` (exists) | uncalibrated source gaze + confidence | gaze estimator → target resolution, policy, UI | unchanged; the *source gaze* of PR-5 |
 | target gaze | where corrected eyes should appear to look | target resolution → policy, engine | a unit direction in the `GazeResult` camera frame; default `(0, 0, 1)` — the camera's *optical axis*, which equals "the camera" only for a centred user (`docs/gaze.md` §5); calibration (M6) exists partly to close that gap. Not a new dataclass until M6 gives it structure |
-| `CorrectionResult` (M4) | what correction did to one frame | correction stage → `ProcessedFrame`, metrics, UI | metadata only — status `CORRECTED` / `SKIPPED(reason)` / `FAILED(reason)`, applied (effective) strength, `correction_ms`, optional debug metadata (e.g. mask bounds) for the overlay. The corrected pixels travel beside it in the engine's output pair (ADR-0002) and rest in `ProcessedFrame.frame`. Immutable; identity comes from the `TrackingResult` it answers |
+| `CorrectionResult` (M4) | what correction did to one frame | correction stage → `ProcessedFrame`, metrics, UI | metadata only — status `CORRECTED` / `SKIPPED(reason)` / `FAILED(reason)`, applied (effective) strength, `correction_ms`, optionally an engine-internal `compositing_ms` (nested within `correction_ms`; unavailable when the algorithm has no meaningful compositing boundary), and optional debug metadata (e.g. mask bounds) for the overlay. The corrected pixels travel beside it in the engine's output pair (ADR-0002) and rest in `ProcessedFrame.frame`. Immutable; identity comes from the `TrackingResult` it answers |
 | `ProcessedFrame` (exists, extended M4) | the frame a consumer shows/sends + its metadata | processing worker → preview, virtual camera | gains `correction: CorrectionResult \| None` exactly as it carries `tracking` today; `ProcessorOutput`, its transport, gains the same field |
 | `CalibrationProfile` (M6) | per-user gaze mapping | calibration store → target resolution | immutable; schema-versioned; persisted locally; see "Calibration seam" |
+
+**The tracking continuity epoch** closes a real observability gap: the
+frozen tracker can detect a selected-face identity change, reset its own
+temporal state, and then publish another perfectly normal `TRACKED` result —
+camera generation and timestamps do not change, so downstream temporal
+state (correction policy, engine state, M5) would have no way to know the
+tracked subject is no longer the same one. The epoch is the provider-neutral
+fix: a monotonically changing identifier, produced at the tracking boundary
+(the tracker worker) and carried on every `TrackingResult`, that changes
+whenever downstream temporal state must no longer be treated as continuous
+with the previous tracked subject/state. Its semantic is "tracking-side
+temporal continuity broke" — the selected-face identity change is the
+concrete motivating trigger, and mapping the tracker's existing reset sites
+onto epoch changes is an implementation detail, not new selection logic.
+Because the value changes monotonically, a consumer that compares it with
+the last value it saw detects a break even when intermediate frames or
+results were skipped (every hand-off here is latest-wins). Correction-policy
+state, correction-engine temporal state (via `reset()`), and later M5
+temporal state reset when it changes; downstream code never inspects
+MediaPipe internals and never re-derives face selection. This is a
+compatible metadata extension of the provider-neutral `TrackingResult`
+contract (an optional field with a default, exactly like `gaze` was):
+**reserved now, implemented at M4 when the first consumer arrives** — the
+frozen M2 implementation is not modified by this pass.
 
 There is deliberately no `CorrectionRequest` object: the engine call takes
 `(frame, tracking, target, strength)` directly (ADR-0002). Bundling those
@@ -748,9 +773,18 @@ and the rule is **copy once, then reuse** (ADR-0003):
   captured frame per corrected frame, warps and blends into it, and returns
   it. Masks, patches and blending are engine-internal; no second full-frame
   copy exists on the correction path.
-- The dev overlay draws on whatever frame the stage chain hands it: the
-  working copy when correction ran (no extra copy), its own copy of the
-  original otherwise (exactly as today).
+- The dev overlay reuses the working copy when correction ran — but the
+  frozen `render_overlay` API always allocates its own full-frame copy, so
+  honoring the copy-once budget needs a small, compatible M4 helper: a
+  draw-into-an-exclusively-owned-canvas variant that mutates the working
+  copy correction already made, while the existing copy-producing wrapper
+  stays for the frozen callers. Ownership rules for that canvas: it is
+  exclusively owned by the staged processor until publication; overlay
+  drawing may mutate only that canvas; no writable alias survives
+  publication; and the published frame is re-frozen read-only. With
+  correction skipped and the overlay on, the overlay's own copy is the
+  frame's single copy (today's behavior) — zero-copy passthrough claims
+  apply only when no overlay or other mutating stage runs.
 - Before publication the working copy is frozen (`setflags(write=False)`),
   so `ProcessedFrame.frame` is immutable again and both consumers share it
   by reference, exactly as the preview shares captured frames today.
@@ -813,11 +847,40 @@ buys throughput at the price of one frame of extra latency and a second
 stale-result guard; it is designed now, reserved, and not built until the
 measurement demands it.
 
+**Lifecycle blocking is a separate concern from steady-state throughput.**
+The arithmetic above budgets *per-frame* work; a stage can fit the average
+frame budget and still stall the sole frame publisher during a lifecycle
+transition — engine or model/provider initialization, provider switching,
+reset, shutdown/cleanup. Newest-wins buffering does not help there: it
+prevents queued stale-frame latency from accumulating, but it cannot keep
+frames flowing while the worker itself is inside a blocking call. The
+frozen system already isolates its one slow lifecycle this way (model
+loading runs on the tracker thread while frames pass through as
+`INITIALIZING`), and that is the binding rule for correction too — the
+**lifecycle-isolation trigger**, independent of the split trigger above
+(ADR-0003): an engine or provider whose initialization, provider switch,
+reset or shutdown cannot be bounded tightly enough to preserve video
+continuity must perform that transition off the active frame-publication
+path. While such a transition is pending, the pipeline keeps publishing the
+original frame with correction `SKIPPED (initializing)`; a transition that
+completes late or was superseded (a newer camera generation, engine
+selection, or session) is discarded under the same generation/identity
+rules that gate results today, never applied to newer state; and the
+transitioning resource keeps a single owner with explicit bounded cleanup —
+the tracker-thread pattern, reused, not a new mechanism. The geometric
+engine (M3/M4) is expected to have a trivial, tightly bounded lifecycle and
+stays fully synchronous on the worker; **no extra thread is created until
+an actual engine or provider requires the isolation** (the M9 neural
+engine's session/provider setup is the expected first candidate).
+
 **Backpressure is unchanged everywhere:** newest wins at every one-slot
 buffer. If correction is slower than capture, frames are replaced in the
-capture buffer and output FPS drops; latency never grows and no queue ever
-forms. A slow consumer (preview or virtual camera) replaces values in its
-own output buffer and affects nobody else.
+capture buffer and output FPS drops; queued stale-frame latency cannot
+accumulate and no frame queue ever forms. That guarantee is about queuing
+only — it does not shorten a blocking operation already executing on the
+worker, which is what the lifecycle-isolation trigger above exists for. A
+slow consumer (preview or virtual camera) replaces values in its own output
+buffer and affects nobody else.
 
 **Stage skipping:** target resolution falls back to the fixed camera target
 when no profile exists; correction is skipped (frame passes as original)
@@ -842,7 +905,8 @@ offline — not a prototype to be rewritten for M4:
 
 - **`gazefix/correction/`** is created in M3 with the engine behind the
   `CorrectionEngine` protocol (ADR-0002): `description`,
-  `correct(frame, tracking, target, strength) -> CorrectionResult`,
+  `correct(frame, tracking, target, strength)` returning the output pair
+  (output frame + metadata-only `CorrectionResult`),
   `reset()`, `close()`, created by a factory on its owning thread. The
   module consumes only the existing contracts (`TrackingResult`,
   `GazeResult`) and NumPy/OpenCV; it imports no Qt, no pipeline, no camera
@@ -893,21 +957,38 @@ result's gaze is `ESTIMATED`, resolve target, compute effective strength,
 call the engine, and publish the working copy with a `CORRECTED` result; in
 every other case publish the original frame with a `SKIPPED` reason
 (`no gaze`, `low confidence`, `timeout`, `disabled`, `strength 0`, engine
-retired) or `FAILED`. The dev overlay moves to the end of the chain so it
+initializing, engine retired) or `FAILED`. The dev overlay moves to the end of the chain so it
 annotates what the consumer actually sees — concretely, the staged
 processor builds the tracking stage with the overlay off, owns the overlay
-toggle itself (the existing thread-safe-setter pattern), and calls
-`render_overlay` after correction, with the tracker/gaze description
-strings exposed through small public accessors on `TrackingProcessor`.
+toggle itself (the existing thread-safe-setter pattern), and renders the
+overlay after correction — into the exclusively owned working canvas via
+the M4 draw-in-place helper (see "Frame ownership and copying"; the frozen
+copy-producing `render_overlay` stays for compatibility) — with the
+tracker/gaze description strings exposed through small public accessors on
+`TrackingProcessor`.
 Correction's user-facing controls at M4 (enabled, strength, engine
 selection) are session-only mutable state behind the same thread-safe
 setters, seeded from `AppSettings` defaults; they migrate to the persisted
 tier when the M6 settings file arrives.
 
-- **Gaze unavailable / low confidence:** correction fades rather than
-  snaps — the policy ramps effective strength toward zero over a bounded
-  interval (refined in M5), then frames pass as originals. Correction never
-  runs on `LOW_CONFIDENCE` or stale gaze.
+- **Gaze unavailable / low confidence — asymmetric transitions.** While
+  current input remains valid enough to correct (an `ESTIMATED` gaze for
+  the frame in hand), the policy may ramp effective strength: fade-in on
+  acquisition, slew-limited changes, fade-down when confidence or deviation
+  calls for less correction (refined in M5). The moment current input is
+  unsafe — `LOW_CONFIDENCE`, `UNAVAILABLE`, a tracking timeout, a
+  continuity-epoch change — the frame passes through as the original
+  **immediately**, and correction-parameter state resets per the
+  continuity/failure rules. No stale gaze is ever reused to preserve a
+  visual fade; PRD §13 explicitly permits this immediate safe fallback
+  (fading is optional there). If a later milestone wants a smoother visual
+  off-transition, that is an explicit, proven-safe technique proposed at
+  that milestone — never an implicit stale-state behavior.
+- **Continuity:** the staged processor watches the tracking continuity
+  epoch (see "Stage boundaries and data contracts") and, when it changes,
+  resets correction-policy state and calls the engine's `reset()` — so
+  temporal state from a previously selected face can never shape a new
+  face's correction, without downstream code re-deriving face selection.
 - **Correction failure:** contained like gaze — its own consecutive-error
   budget; retirement until camera generation change or the user toggles
   correction off/on; rate-limited logging; the frame path always keeps the
@@ -917,10 +998,16 @@ tier when the M6 settings file arrives.
   engine + freeze, on the processing worker, and joins the metrics snapshot
   and dev detail line; the existing `processing_ms` automatically absorbs it,
   keeping the end-to-end pipeline latency truthful.
-- **Engine lifecycle:** the factory is invoked and the engine created,
-  reset and closed on the processing worker (mirroring the tracker-thread
-  ownership rule); engine initialization failure marks correction
-  unavailable with an actionable message and never blocks the preview.
+- **Engine lifecycle:** for the geometric engine, whose lifecycle is
+  trivial and tightly bounded, the factory is invoked and the engine
+  created, reset and closed synchronously on the processing worker
+  (mirroring the tracker-thread ownership rule). An engine or provider
+  whose lifecycle cannot be bounded that tightly falls under the
+  lifecycle-isolation trigger (see "Threading and execution model"):
+  it initializes and transitions off the frame-publication path while
+  original frames keep flowing. Either way, engine initialization failure
+  marks correction unavailable with an actionable message and never blocks
+  the preview.
 - The M4 acceptance target (≥ 20 FPS development prototype) is measured
   with the diagnostics below, not asserted.
 
@@ -934,18 +1021,26 @@ rules:
    jitter.
 2. **Gaze smoother** (exists, inside the estimator) — eye-in-head direction.
 3. **Correction-parameter smoothing** (M4/M5, policy layer, processing
-   worker) — effective strength and target ramps: fade-in on acquisition,
-   fade-out on loss/disable, slew-limited strength changes. This is the
-   primary tool against correction flicker and oscillation.
+   worker) — effective strength and target ramps **between valid operating
+   states only**: fade-in on acquisition, slew-limited strength changes,
+   fade-down while input stays valid. On invalid/unavailable input the
+   output snaps to the original frame immediately and the ramp state resets
+   (see the M4 transition semantics) — ramps never extend correction past
+   the last valid frame. This is the primary tool against correction
+   flicker and oscillation.
 4. **Image/output stabilization** (M5, only if 1–3 prove insufficient) — a
    last resort, because image-space smoothing costs copies and risks ghosting;
    its necessity is an M5 SA question, not a foregone conclusion.
 
 Reset rules extend the frozen matrix: correction-parameter state resets on
 face loss, camera generation change, Refresh/camera switch, correction
-disable, and calibration profile change. The structural test pattern that
-guards gaze resets today (every stabiliser-reset site must reset the gaze
-smoother) extends to the correction-parameter state at M4/M5.
+disable, calibration profile change — and, covering all tracker-side breaks
+in one frame-associated signal, whenever the **tracking continuity epoch**
+changes (see "Stage boundaries and data contracts"); a selected-face
+identity change is the case that is otherwise invisible downstream. The
+structural test pattern that guards gaze resets today (every
+stabiliser-reset site must reset the gaze smoother) extends to the
+correction-parameter state at M4/M5.
 
 ## Calibration seam (M6)
 
@@ -961,12 +1056,20 @@ schema details are M6 SA.
   stage as an immutable object through a thread-safe setter on the staged
   processor — the same pattern as the overlay toggle — and a profile change
   resets correction-parameter smoothing.
-- **What it transforms:** target resolution consumes
-  (`GazeResult`, `CalibrationProfile`) and produces the target gaze and any
-  per-user parameters (e.g. a calibrated `eye_model_ratio` replacing the
-  population average — `docs/gaze.md` already designates it as the constant
-  calibration would replace). Uncalibrated operation (no profile) remains a
-  first-class mode: fixed camera target, population constants.
+- **What it transforms:** M6 calibration is **target/mapping calibration**.
+  Target resolution consumes (`GazeResult`, `CalibrationProfile`) and
+  produces the resolved target gaze — the profile is the persisted,
+  user-specific mapping between uncalibrated gaze and the target the
+  correction should aim for. It does **not** mutate `GazeEstimator`
+  internals at runtime: the estimator keeps its own fixed settings, and no
+  component in this baseline consumes estimator parameters from a profile.
+  (`docs/gaze.md` notes `eye_model_ratio` is the constant a calibration
+  *could* replace; that is a possible future extension, not a commitment of
+  this baseline — M6 SA may propose an estimator-parameter extension only
+  if empirical evidence shows target/mapping calibration insufficient, and
+  it would then need an explicit compatible contract/ownership decision.)
+  Uncalibrated operation (no profile) remains a first-class mode: fixed
+  camera-optical-axis target, population constants.
 - **Independence:** calibration depends on the gaze contract only — never on
   a correction-engine implementation, never on the virtual camera. Engines
   receive the *resolved* target and strength and cannot tell whether a
@@ -1061,7 +1164,7 @@ pattern, no observability platform:
 | tracking inference/total ms, per-status counters, replaced counters | yes | — |
 | gaze estimation ms, per-status counters | yes | — |
 | correction ms (EMA), corrected/skipped/failed counters, applied strength (dev display) | no | M4 |
-| compositing time | folded into correction ms (engine owns compositing); split only if a compositor stage ever exists | — |
+| compositing ms | nested, optional: an engine *may* report an engine-internal `compositing_ms`, included within total correction latency, giving PRD §21 visibility without a separate compositor stage; an algorithm with no meaningful independent compositing boundary reports it unavailable (`NOT MEASURED`, per the existing no-invented-timing convention) | M4, engine-dependent |
 | per-consumer output replacement counters | output buffer only | M8 (second buffer) |
 | virtual-camera send ms, sent FPS, send-error counter | no | M8 |
 | CPU / memory (PRD §21; psutil is the PRD §22 optional dependency) | no | M7, where optimization needs it |
@@ -1256,7 +1359,10 @@ requires a new ADR):
    (deviation/confidence → effective strength) is outside engines
    (ADR-0002).
 4. One processing worker through M4–M8, with a defined, measurement-gated
-   split trigger and a reserved split design (ADR-0003).
+   split trigger, a reserved split design, and an independent
+   lifecycle-isolation trigger for engine/provider lifecycle work that
+   cannot be bounded tightly enough to preserve video continuity
+   (ADR-0003).
 5. Frame ownership: published frames immutable; correction copies once,
    downstream reuses; `ProcessedFrame` re-frozen before fan-out (ADR-0003).
 6. Every stage is its own failure domain with its own bounded budget and
@@ -1272,6 +1378,20 @@ requires a new ADR):
 12. Diagnostics extend `PipelineMetrics` in place; no telemetry service.
 13. Repository layout evolves by adding milestone packages; no speculative
     restructuring.
+14. Downstream temporal continuity is signalled by the tracking continuity
+    epoch — a reserved, compatible `TrackingResult` extension produced at
+    the tracking boundary; downstream code resets on epoch change and never
+    re-derives face selection. Invalid/unavailable input always falls back
+    to the original frame immediately; ramps apply only between valid
+    operating states, and stale gaze is never reused.
+
+**Specified in this baseline but deliberately not implemented yet** (each
+arrives with the milestone that first consumes it): the tracking continuity
+epoch field and its epoch-driven resets (M4); the overlay
+draw-into-owned-canvas helper (M4); correction metrics including the
+optional nested `compositing_ms` (M4); the lifecycle-isolation mechanism
+for slow engine/provider transitions (built only when an engine requires
+it — M9 expected); calibration itself (M6).
 
 **Deferred to M3 SA:** warp/redirection technique; mask construction and
 blending method; eye-region definition; the strength↔deviation curve values;
@@ -1280,7 +1400,9 @@ harness input formats and CLI shape; the PRD §28 scoring procedure;
 
 **Deferred to later milestone SA:** M5 — whether image-space output
 stabilization is needed at all, and its algorithm; M6 — calibration math,
-profile schema/persistence format, sampling UI, settings-file format; M7 —
+profile schema/persistence format, sampling UI, settings-file format, and —
+only with empirical evidence that target/mapping calibration is
+insufficient — a proposed estimator-parameter extension; M7 —
 optimization targets, psutil adoption, and whether the split trigger fires;
 M8 — virtual-camera backend choice (ADR then), pacing/format details,
 client-compatibility handling; M9 — neural model choice, ONNX

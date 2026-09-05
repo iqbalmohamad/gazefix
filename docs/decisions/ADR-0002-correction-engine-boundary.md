@@ -44,8 +44,9 @@ throwaway.
 
    ```text
    description                      one line naming the engine, for logs/overlay/UI
-   correct(frame, tracking, target, strength) -> CorrectionResult
-   reset()                          drop temporal state (face/camera change)
+   correct(frame, tracking, target, strength)
+                                    -> output pair (frame, CorrectionResult)
+   reset()                          drop temporal state (continuity break)
    close()                          release resources; idempotent
    ```
 
@@ -62,10 +63,11 @@ throwaway.
    reference, and is what the staged processor publishes as
    `ProcessedFrame.frame`; `CorrectionResult` itself is **metadata only**
    (status `CORRECTED` / `SKIPPED(reason)` / `FAILED(reason)`, applied
-   strength, `correction_ms`, optional debug metadata) and is what
-   `ProcessedFrame.correction` carries. Strength `0` is a guaranteed no-op
-   passthrough; interpolation is required (PRD §9, PR-5), binary correction
-   is not acceptable.
+   strength, `correction_ms`, optionally an engine-internal
+   `compositing_ms` nested within `correction_ms`, and optional debug
+   metadata) and is what `ProcessedFrame.correction` carries. Strength `0`
+   is a guaranteed no-op passthrough; interpolation is required (PRD §9,
+   PR-5), binary correction is not acceptable.
 
 3. **Policy sits outside engines.** The deviation-dependent strength curve
    (PRD §10), confidence gating, and fade ramps are a policy layer in the
@@ -76,6 +78,12 @@ throwaway.
 4. **The engine owns masks and compositing** and returns a complete
    corrected frame. Mask/blending helpers are shared library code inside
    `gazefix/correction/`; a separate compositor *stage* is not created.
+   For PRD §21 visibility, an engine *may* report an engine-internal
+   `compositing_ms` on its `CorrectionResult`, included within total
+   correction latency; an algorithm with no meaningful independent
+   compositing boundary reports it unavailable (`NOT MEASURED`) per the
+   existing metrics convention. The engine is never split solely for
+   metrics.
 
 5. **Failure semantics repeat the M2 lesson.** The protocol documents
    never-raise (unusable input becomes a `SKIPPED`/`FAILED` result with a
@@ -85,10 +93,19 @@ throwaway.
    tracker's or the gaze stage's budgets. The original frame always passes
    through.
 
-6. **Thread ownership.** The engine is created, called, `reset` and
-   `close`d on the processing worker (M4). In M3 the same engine runs
-   synchronously in an offline harness; the engine itself is
-   thread-agnostic, single-threaded-by-contract like `FaceTracker`.
+6. **Thread ownership and reset trigger.** The engine is created, called,
+   `reset` and `close`d on the processing worker (M4). The staged
+   processor calls `reset()` whenever the **tracking continuity epoch**
+   changes — the provider-neutral, frame-associated continuity signal
+   reserved as a compatible `TrackingResult` extension in the architecture
+   baseline (a selected-face identity change is the motivating trigger) —
+   so engines never inspect backend internals or re-derive face selection.
+   An engine or provider whose initialization, reset or shutdown cannot be
+   bounded tightly enough to preserve video continuity falls under
+   ADR-0003's lifecycle-isolation trigger and transitions off the
+   frame-publication path. In M3 the same engine runs synchronously in an
+   offline harness; the engine itself is thread-agnostic,
+   single-threaded-by-contract like `FaceTracker`.
 
 7. **Neural engines (M9) plug in behind this same protocol.** One adapter
    module is the only importer of ONNX Runtime (the `mediapipe_tracker.py`

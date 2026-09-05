@@ -51,23 +51,55 @@ complexity: speculative worker fan-out, in-place mutation, or frame queues.
    stale-result guard (the same `belongs_to` identity check). Until the
    trigger fires, the split does not exist.
 
-3. **Backpressure stays newest-wins at every boundary.** Slow correction
-   lowers output FPS by replacement in the capture buffer; it never grows
-   latency and never forms a queue. Slow consumers replace values in their
-   own output buffers and affect nobody else.
+3. **A lifecycle-isolation trigger, independent of the split trigger.**
+   Steady-state throughput and lifecycle blocking are separate concerns: a
+   component can fit the average frame budget and still stall the sole
+   frame publisher during engine/model/provider initialization, provider
+   switching, reset, or shutdown/cleanup. Newest-wins buffering prevents
+   queued stale-frame latency from accumulating; it does not keep frames
+   flowing while the worker itself is inside a blocking call. Therefore:
+   an engine or provider whose lifecycle transitions cannot be bounded
+   tightly enough to preserve video continuity must initialize or
+   transition **off the active frame-publication path**, the way the
+   frozen tracker already loads its model on the tracker thread while
+   frames pass through as `INITIALIZING`. While such a transition is
+   pending, the live pipeline keeps publishing safe original/passthrough
+   frames (correction `SKIPPED (initializing)`); a transition that
+   completes late or was superseded (newer camera generation, engine
+   selection, or session) is discarded under the existing
+   generation/identity rules and never applied to newer state; the
+   transitioning resource keeps a single owner with explicit bounded
+   cleanup. **No extra worker or thread is created until an actual engine
+   or provider requires this behavior** — the geometric engine's lifecycle
+   is trivial and stays synchronous; the M9 neural engine's
+   session/provider setup is the expected first candidate.
 
-4. **Copy-once frame ownership.** Captured frames remain immutable and
+4. **Backpressure stays newest-wins at every boundary.** Slow correction
+   lowers output FPS by replacement in the capture buffer; queued
+   stale-frame latency cannot accumulate and no frame queue ever forms.
+   That guarantee is about queuing only — it does not shorten a blocking
+   operation already executing on the worker, which is what item 3 exists
+   for. Slow consumers replace values in their own output buffers and
+   affect nobody else.
+
+5. **Copy-once frame ownership.** Captured frames remain immutable and
    shared. The correction engine allocates exactly **one** writable working
-   copy per corrected frame and blends into it; the dev overlay draws on
-   that same copy when correction ran (its own copy of the original
-   otherwise, as today); the copy is re-frozen (`setflags(write=False)`)
-   before publication, so `ProcessedFrame.frame` is immutable for all
-   consumers. Uncorrected frames pass through as the original read-only
-   array with zero copies. Per corrected 720p frame: one ≈2.8 MB copy
+   copy per corrected frame and blends into it; the dev overlay reuses
+   that same copy when correction ran — via a small compatible M4
+   draw-into-owned-canvas helper, because the frozen `render_overlay`
+   always allocates a copy of its own (the copy-producing wrapper stays
+   for existing callers); with correction skipped, the overlay's own copy
+   is the frame's single copy, as today. The working canvas is exclusively
+   owned by the staged processor until publication, only it may be
+   mutated, no writable alias survives publication, and the copy is
+   re-frozen (`setflags(write=False)`) before publication, so
+   `ProcessedFrame.frame` is immutable for all consumers. Uncorrected,
+   un-overlaid frames pass through as the original read-only array with
+   zero copies. Per corrected 720p frame: one ≈2.8 MB copy
    (2,764,800 bytes) plus the preview's existing QImage copy; a backend
    that needs another pixel format converts in its own adapter buffer.
 
-5. **Per-consumer one-slot output buffers.** The processing worker
+6. **Per-consumer one-slot output buffers.** The processing worker
    publishes the same immutable `ProcessedFrame` reference into one buffer
    per consumer: the preview buffer (today's behavior, unchanged) and, from
    M8, an output buffer drained by a dedicated virtual-camera worker
@@ -80,7 +112,7 @@ complexity: speculative worker fan-out, in-place mutation, or frame queues.
    single-consumer per instance; fan-out is N buffers, not a multicast
    buffer. Each consumer's replacement counter is its own staleness metric.
 
-6. **The virtual-camera worker is an isolated, window-owned consumer.**
+7. **The virtual-camera worker is an isolated, window-owned consumer.**
    Like the discovery service, it is started and stopped from the UI and
    joined in `closeEvent` against the single shutdown deadline with its own
    timeout attribution; `PipelineRuntime`, its `STOPPED` latch and its
@@ -108,6 +140,11 @@ complexity: speculative worker fan-out, in-place mutation, or frame queues.
   not by consumer speed.
 - If the split trigger fires, the change is contained: a worker + hand-off
   slot behind the correction stage, with contracts and ownership unchanged.
+- Lifecycle isolation (item 3) is specified, not built: it adds no thread
+  today, and when an engine first requires it, the mechanism is the
+  already-proven tracker-thread pattern — off-path initialization,
+  passthrough publication while pending, generation-gated adoption of the
+  finished transition, single-owner bounded cleanup.
 
 ## Alternatives considered
 
