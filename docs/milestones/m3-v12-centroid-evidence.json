@@ -1,0 +1,326 @@
+{
+  "tested_sha": "2bbe6cffed03028b9d8b7ac52a92a1ddf49309b4",
+  "method": "tests/correction_fakes.py visible_centroid_ideal supersample=24 (independent polygon/circle area centroid); tests/test_correction_warp.py centroid red<130 inside opening; right eye shown, both asserted in tests. No production constants changed.",
+  "rows": [
+    {
+      "fixture": "default",
+      "axis": "yaw",
+      "degrees": 10,
+      "variant": "B",
+      "command_px": [
+        6.2513344287872314,
+        0.0
+      ],
+      "measured_px": [
+        5.977827750818619,
+        0.00036296208628527893
+      ],
+      "ideal_px": [
+        6.251695132736359,
+        -5.684341886080802e-14
+      ],
+      "error_to_ideal_px": 0.27386762243820095,
+      "error_to_command_px": 0.2735069188062748
+    },
+    {
+      "fixture": "default",
+      "axis": "yaw",
+      "degrees": 10,
+      "variant": "C",
+      "command_px": [
+        6.2513344287872314,
+        0.0
+      ],
+      "measured_px": [
+        6.358413735864701,
+        0.006561884012910468
+      ],
+      "ideal_px": [
+        6.251695132736359,
+        -5.684341886080802e-14
+      ],
+      "error_to_ideal_px": 0.10692015046502858,
+      "error_to_command_px": 0.10728017676155259
+    },
+    {
+      "fixture": "default",
+      "axis": "yaw",
+      "degrees": 15,
+      "variant": "B",
+      "command_px": [
+        9.317485570907593,
+        0.0
+      ],
+      "measured_px": [
+        8.582280816518164,
+        0.01641255304519973
+      ],
+      "ideal_px": [
+        9.318238780654042,
+        -5.684341886080802e-14
+      ],
+      "error_to_ideal_px": 0.7361409490528898,
+      "error_to_command_px": 0.7353879267259434
+    },
+    {
+      "fixture": "default",
+      "axis": "yaw",
+      "degrees": 15,
+      "variant": "C",
+      "command_px": [
+        9.317485570907593,
+        0.0
+      ],
+      "measured_px": [
+        9.362818811735224,
+        0.019165560961255323
+      ],
+      "ideal_px": [
+        9.318238780654042,
+        -5.684341886080802e-14
+      ],
+      "error_to_ideal_px": 0.04852522950137298,
+      "error_to_command_px": 0.04921810084608696
+    },
+    {
+      "fixture": "default",
+      "axis": "pitch",
+      "degrees": 10,
+      "variant": "B",
+      "command_px": [
+        0.0,
+        -6.2513344287872314
+      ],
+      "measured_px": [
+        0.009529213614655418,
+        -4.791113873201994
+      ],
+      "ideal_px": [
+        0.0,
+        -6.2516951327360175
+      ],
+      "error_to_ideal_px": 1.4606123447424746,
+      "error_to_command_px": 1.460251648472199
+    },
+    {
+      "fixture": "default",
+      "axis": "pitch",
+      "degrees": 10,
+      "variant": "C",
+      "command_px": [
+        0.0,
+        -6.2513344287872314
+      ],
+      "measured_px": [
+        0.006561884012853625,
+        -6.345289967838994
+      ],
+      "ideal_px": [
+        0.0,
+        -6.2516951327360175
+      ],
+      "error_to_ideal_px": 0.09382457822847651,
+      "error_to_command_px": 0.09418440231962734
+    },
+    {
+      "fixture": "default",
+      "axis": "pitch",
+      "degrees": 15,
+      "variant": "B",
+      "command_px": [
+        0.0,
+        -9.317485570907593
+      ],
+      "measured_px": [
+        -0.009523809523898308,
+        -6.385994397759077
+      ],
+      "ideal_px": [
+        2.2737367544323206e-13,
+        -8.944120569888469
+      ],
+      "error_to_ideal_px": 2.558143900464011,
+      "error_to_command_px": 2.931506643553022
+    },
+    {
+      "fixture": "default",
+      "axis": "pitch",
+      "degrees": 15,
+      "variant": "C",
+      "command_px": [
+        0.0,
+        -9.317485570907593
+      ],
+      "measured_px": [
+        0.035887709315716165,
+        -9.243109155888021
+      ],
+      "ideal_px": [
+        2.2737367544323206e-13,
+        -8.944120569888469
+      ],
+      "error_to_ideal_px": 0.30113469118971464,
+      "error_to_command_px": 0.08258195196950055
+    },
+    {
+      "fixture": "realistic",
+      "axis": "yaw",
+      "degrees": 10,
+      "variant": "B",
+      "command_px": [
+        6.2513344287872314,
+        0.0
+      ],
+      "measured_px": [
+        3.831389918346531,
+        0.000843653017568613
+      ],
+      "ideal_px": [
+        6.038218217764893,
+        -2.8333420914350427e-05
+      ],
+      "error_to_ideal_px": 2.2068284716928246,
+      "error_to_command_px": 2.4199446574999386
+    },
+    {
+      "fixture": "realistic",
+      "axis": "yaw",
+      "degrees": 10,
+      "variant": "C",
+      "command_px": [
+        6.2513344287872314,
+        0.0
+      ],
+      "measured_px": [
+        6.39390320553116,
+        -0.13516656191075072
+      ],
+      "ideal_px": [
+        6.038218217764893,
+        -2.8333420914350427e-05
+      ],
+      "error_to_ideal_px": 0.3804919858836199,
+      "error_to_command_px": 0.19645827944129243
+    },
+    {
+      "fixture": "realistic",
+      "axis": "yaw",
+      "degrees": 15,
+      "variant": "B",
+      "command_px": [
+        9.317485570907593,
+        0.0
+      ],
+      "measured_px": [
+        4.648088180346349,
+        0.001774816290947001
+      ],
+      "ideal_px": [
+        8.937726587966836,
+        -1.8430600107421924e-05
+      ],
+      "error_to_ideal_px": 4.289638782446284,
+      "error_to_command_px": 4.669397727860952
+    },
+    {
+      "fixture": "realistic",
+      "axis": "yaw",
+      "degrees": 15,
+      "variant": "C",
+      "command_px": [
+        9.317485570907593,
+        0.0
+      ],
+      "measured_px": [
+        9.320592020592017,
+        -0.13774131274129786
+      ],
+      "ideal_px": [
+        8.937726587966836,
+        -1.8430600107421924e-05
+      ],
+      "error_to_ideal_px": 0.40688270025222634,
+      "error_to_command_px": 0.13777633782815496
+    },
+    {
+      "fixture": "realistic",
+      "axis": "pitch",
+      "degrees": 10,
+      "variant": "B",
+      "command_px": [
+        0.0,
+        -6.2513344287872314
+      ],
+      "measured_px": [
+        -0.03852127990057852,
+        -0.689095992544253
+      ],
+      "ideal_px": [
+        -1.1368683772161603e-13,
+        -3.1029176419390865
+      ],
+      "error_to_ideal_px": 2.4141290032001943,
+      "error_to_command_px": 5.562371824197292
+    },
+    {
+      "fixture": "realistic",
+      "axis": "pitch",
+      "degrees": 10,
+      "variant": "C",
+      "command_px": [
+        0.0,
+        -6.2513344287872314
+      ],
+      "measured_px": [
+        0.01159366262822914,
+        -3.975992544268422
+      ],
+      "ideal_px": [
+        -1.1368683772161603e-13,
+        -3.1029176419390865
+      ],
+      "error_to_ideal_px": 0.873151875729829,
+      "error_to_command_px": 2.2753714212098965
+    },
+    {
+      "fixture": "realistic",
+      "axis": "pitch",
+      "degrees": 15,
+      "variant": "B",
+      "command_px": [
+        0.0,
+        -9.317485570907593
+      ],
+      "measured_px": [
+        -0.0354607619667604,
+        -0.8764246173884658
+      ],
+      "ideal_px": [
+        -3.410605131648481e-13,
+        -4.631025040656766
+      ],
+      "error_to_ideal_px": 3.754767876186987,
+      "error_to_command_px": 8.441135438237234
+    },
+    {
+      "fixture": "realistic",
+      "axis": "pitch",
+      "degrees": 15,
+      "variant": "C",
+      "command_px": [
+        0.0,
+        -9.317485570907593
+      ],
+      "measured_px": [
+        0.05937297297305122,
+        -5.454227027027059
+      ],
+      "ideal_px": [
+        -3.410605131648481e-13,
+        -4.631025040656766
+      ],
+      "error_to_ideal_px": 0.8253403299752747,
+      "error_to_command_px": 3.8637147574304187
+    }
+  ]
+}

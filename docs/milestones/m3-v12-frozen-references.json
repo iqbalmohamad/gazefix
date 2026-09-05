@@ -1,0 +1,15 @@
+{
+  "verified_remote_heads": {
+    "main": "b40d74faef55811d67de258660b6040c7c8dc790",
+    "milestone-0": "3b0a2eee8b0fc207875702250955e78173857957",
+    "milestone-1": "097c4d69b9e7c7e8a2772445315ccb51a263dca7",
+    "milestone-2": "81e06118801c23d2337629fc676d6ad8ac13716a",
+    "architecture-v1": "003180d52d39d30a038333541b1b187824714e87",
+    "m3-architecture-v1": "a459e6be36122bf10ce707731d5f847007847e96",
+    "m3-architecture-v1.1": "00eed0e893b73dcd490f69af8df852a0609ccbaa",
+    "m3-architecture-v1.2": "6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93"
+  },
+  "sa_prd_architecture_adrs_qa_unchanged": true,
+  "m0_m2_runtime_code_and_existing_tests_unchanged": true,
+  "prior_implementation_and_v12_are_ancestors": true
+}

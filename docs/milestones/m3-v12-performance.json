@@ -1,0 +1,335 @@
+{
+  "method": "50 correction-only repetitions on one real-tracker-analyzed licensed fixture frame per case; no concurrent regression or batch job; debug on, strength .75, pitch target 15; warmup not discarded. No M4 FPS inference.",
+  "python": "3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "numpy": "1.26.4",
+  "opencv": "4.11.0",
+  "cases": [
+    {
+      "name": "field-1280x720",
+      "status": "corrected",
+      "eyes": [
+        "corrected",
+        "corrected"
+      ],
+      "timings": {
+        "correction_ms": {
+          "median": 5.93025,
+          "p90": 6.7602400000000005,
+          "samples": 50
+        },
+        "compositing_ms": {
+          "median": 0.49545,
+          "p90": 0.58873,
+          "samples": 50
+        },
+        "copy": {
+          "median": 1.2806,
+          "p90": 1.3965,
+          "samples": 50
+        },
+        "warp_right": {
+          "median": 0.4746,
+          "p90": 0.5585100000000001,
+          "samples": 50
+        },
+        "warp_left": {
+          "median": 0.40035,
+          "p90": 0.48366,
+          "samples": 50
+        },
+        "composite": {
+          "median": 0.49545,
+          "p90": 0.58873,
+          "samples": 50
+        }
+      },
+      "source": {
+        "name": "astronaut_face.png",
+        "sha256": "66102c9a1f345f73cfc421fca230200045d9e8a7c3a55fdef77fdb907f814b74",
+        "unmirror": false,
+        "dimensions": [
+          338,
+          307
+        ]
+      },
+      "repository": {
+        "head": "2bbe6cffed03028b9d8b7ac52a92a1ddf49309b4",
+        "tracked_changes": false,
+        "m3_sa": "m3-architecture-v1.2 @ 6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93"
+      }
+    },
+    {
+      "name": "field-1920x1080",
+      "status": "corrected",
+      "eyes": [
+        "corrected",
+        "corrected"
+      ],
+      "timings": {
+        "correction_ms": {
+          "median": 10.21705,
+          "p90": 11.52483,
+          "samples": 50
+        },
+        "compositing_ms": {
+          "median": 1.02175,
+          "p90": 1.25753,
+          "samples": 50
+        },
+        "copy": {
+          "median": 3.1778500000000003,
+          "p90": 3.6192800000000003,
+          "samples": 50
+        },
+        "warp_right": {
+          "median": 0.8003,
+          "p90": 0.9936000000000001,
+          "samples": 50
+        },
+        "warp_left": {
+          "median": 0.6234,
+          "p90": 0.85575,
+          "samples": 50
+        },
+        "composite": {
+          "median": 1.02175,
+          "p90": 1.25753,
+          "samples": 50
+        }
+      },
+      "source": {
+        "name": "astronaut_face.png",
+        "sha256": "66102c9a1f345f73cfc421fca230200045d9e8a7c3a55fdef77fdb907f814b74",
+        "unmirror": false,
+        "dimensions": [
+          338,
+          307
+        ]
+      },
+      "repository": {
+        "head": "2bbe6cffed03028b9d8b7ac52a92a1ddf49309b4",
+        "tracked_changes": false,
+        "m3_sa": "m3-architecture-v1.2 @ 6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93"
+      }
+    },
+    {
+      "name": "field-640x480",
+      "status": "corrected",
+      "eyes": [
+        "corrected",
+        "corrected"
+      ],
+      "timings": {
+        "correction_ms": {
+          "median": 2.6368,
+          "p90": 3.2858,
+          "samples": 50
+        },
+        "compositing_ms": {
+          "median": 0.1994,
+          "p90": 0.25455,
+          "samples": 50
+        },
+        "copy": {
+          "median": 0.07585,
+          "p90": 0.09201000000000001,
+          "samples": 50
+        },
+        "warp_right": {
+          "median": 0.24405,
+          "p90": 0.2941900000000002,
+          "samples": 50
+        },
+        "warp_left": {
+          "median": 0.2018,
+          "p90": 0.32908000000000004,
+          "samples": 50
+        },
+        "composite": {
+          "median": 0.1994,
+          "p90": 0.25455,
+          "samples": 50
+        }
+      },
+      "source": {
+        "name": "astronaut_face.png",
+        "sha256": "66102c9a1f345f73cfc421fca230200045d9e8a7c3a55fdef77fdb907f814b74",
+        "unmirror": false,
+        "dimensions": [
+          338,
+          307
+        ]
+      },
+      "repository": {
+        "head": "2bbe6cffed03028b9d8b7ac52a92a1ddf49309b4",
+        "tracked_changes": false,
+        "m3_sa": "m3-architecture-v1.2 @ 6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93"
+      }
+    },
+    {
+      "name": "layered-1280x720",
+      "status": "corrected",
+      "eyes": [
+        "corrected",
+        "corrected"
+      ],
+      "timings": {
+        "correction_ms": {
+          "median": 9.4042,
+          "p90": 12.41192,
+          "samples": 50
+        },
+        "compositing_ms": {
+          "median": 1.6522000000000001,
+          "p90": 1.95082,
+          "samples": 50
+        },
+        "copy": {
+          "median": 1.1353,
+          "p90": 1.39233,
+          "samples": 50
+        },
+        "warp_right": {
+          "median": 1.81855,
+          "p90": 2.40356,
+          "samples": 50
+        },
+        "warp_left": {
+          "median": 1.6569,
+          "p90": 2.32614,
+          "samples": 50
+        },
+        "composite": {
+          "median": 1.6522000000000001,
+          "p90": 1.95082,
+          "samples": 50
+        }
+      },
+      "source": {
+        "name": "astronaut_face.png",
+        "sha256": "66102c9a1f345f73cfc421fca230200045d9e8a7c3a55fdef77fdb907f814b74",
+        "unmirror": false,
+        "dimensions": [
+          338,
+          307
+        ]
+      },
+      "repository": {
+        "head": "2bbe6cffed03028b9d8b7ac52a92a1ddf49309b4",
+        "tracked_changes": false,
+        "m3_sa": "m3-architecture-v1.2 @ 6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93"
+      }
+    },
+    {
+      "name": "layered-1920x1080",
+      "status": "corrected",
+      "eyes": [
+        "corrected",
+        "corrected"
+      ],
+      "timings": {
+        "correction_ms": {
+          "median": 13.56245,
+          "p90": 16.263379999999998,
+          "samples": 50
+        },
+        "compositing_ms": {
+          "median": 2.73205,
+          "p90": 3.44,
+          "samples": 50
+        },
+        "copy": {
+          "median": 2.9002499999999998,
+          "p90": 3.26715,
+          "samples": 50
+        },
+        "warp_right": {
+          "median": 2.38865,
+          "p90": 3.10191,
+          "samples": 50
+        },
+        "warp_left": {
+          "median": 2.07675,
+          "p90": 3.00089,
+          "samples": 50
+        },
+        "composite": {
+          "median": 2.73205,
+          "p90": 3.44,
+          "samples": 50
+        }
+      },
+      "source": {
+        "name": "astronaut_face.png",
+        "sha256": "66102c9a1f345f73cfc421fca230200045d9e8a7c3a55fdef77fdb907f814b74",
+        "unmirror": false,
+        "dimensions": [
+          338,
+          307
+        ]
+      },
+      "repository": {
+        "head": "2bbe6cffed03028b9d8b7ac52a92a1ddf49309b4",
+        "tracked_changes": false,
+        "m3_sa": "m3-architecture-v1.2 @ 6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93"
+      }
+    },
+    {
+      "name": "layered-640x480",
+      "status": "corrected",
+      "eyes": [
+        "corrected",
+        "corrected"
+      ],
+      "timings": {
+        "correction_ms": {
+          "median": 7.0931,
+          "p90": 9.10828,
+          "samples": 50
+        },
+        "compositing_ms": {
+          "median": 1.153,
+          "p90": 1.56311,
+          "samples": 50
+        },
+        "copy": {
+          "median": 0.10894999999999999,
+          "p90": 0.12951000000000001,
+          "samples": 50
+        },
+        "warp_right": {
+          "median": 1.47045,
+          "p90": 1.85777,
+          "samples": 50
+        },
+        "warp_left": {
+          "median": 1.3105,
+          "p90": 1.6915,
+          "samples": 50
+        },
+        "composite": {
+          "median": 1.153,
+          "p90": 1.56311,
+          "samples": 50
+        }
+      },
+      "source": {
+        "name": "astronaut_face.png",
+        "sha256": "66102c9a1f345f73cfc421fca230200045d9e8a7c3a55fdef77fdb907f814b74",
+        "unmirror": false,
+        "dimensions": [
+          338,
+          307
+        ]
+      },
+      "repository": {
+        "head": "2bbe6cffed03028b9d8b7ac52a92a1ddf49309b4",
+        "tracked_changes": false,
+        "m3_sa": "m3-architecture-v1.2 @ 6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93"
+      }
+    }
+  ],
+  "cpu": "11th Gen Intel Core i7-1165G7 @ 2.80GHz",
+  "mediapipe": "0.10.21"
+}
