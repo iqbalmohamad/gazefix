@@ -975,6 +975,15 @@ geometric ideal — the visible centroid a perfect renderer would produce):
 | horizontal 15° | 6.84 px | 8.99 px | 8.97 px | 1.00 |
 | horizontal 10° | 4.95 px | 6.10 px | 6.07 px | 1.00 |
 
+**Why the default fixture never caught this.** The same simulation, swept
+across apertures 0.20–0.30 and iris ratios 0.32–0.45, shows the defect exists
+**only when the iris is clipped by the lids**: with an unclipped iris the v1.1
+equations score 1.00 of the geometric ideal, because the source iris then sits
+inside the field's `w = 1` region and travels with the background. That is
+exactly why the default (unclipped) fixture passed while the realistic
+(clipped) one failed, and why the realistic-anatomy fixture A1 introduced is
+what exposed it.
+
 **A threshold that was not achievable, and its replacement.** The same
 simulation shows the frozen `0.6·|d|` floor exceeds what *any* correct
 implementation can reach on the clipped fixture for vertical moves: the
@@ -986,6 +995,18 @@ ideal computed from the fixture's own landmarks (§15.1). This is a
 **strengthening, not a relaxation**: the ideal band rejects the v1.1
 behaviour on the horizontal rows too (0.76 and 0.82 of ideal), which the
 `0.6·|d|` floor passed.
+
+**What the band is and is not.** It is calibrated for the two named fixtures
+and is asserted only there. The sweep shows the ratio is anatomy-dependent by
+construction: on a tight aperture with a large iris, A1's conservative
+source-coverage rule removes so much of the moved disc that a correct
+implementation legitimately reaches 1.4–4.2 × the ideal, and for *horizontal*
+moves on a barely-clipped eye the retained source iris overlaps the moved one
+so the centroid barely notices it (v1.1 scores up to 0.98 of ideal there).
+Two consequences for the test design: the band is fixture-bound, not a
+general acceptance criterion; and the **primary, threshold-free discriminator
+of this defect is the "exactly one iris" structural assertion**, with the
+centroid band as the quantitative check beside it.
 
 **Known consequences, recorded rather than designed around.** (1) The
 sclera fill is synthetic where the iris used to be; it is low-texture and
@@ -1001,10 +1022,12 @@ the ideal — §24 Q14.
 
 1. the background carries no iris — the plate has no iris-tone pixel inside
    the iris hole;
-2. exactly one iris in the output — inside the opening, every iris-tone
-   pixel lies within the destination disc dilated by 1 px;
+2. **primary:** exactly one iris in the output — inside the opening, every
+   iris-tone pixel lies within the destination disc dilated by 1 px. This is
+   the threshold-free assertion that pins the defect on every clipped case;
 3. visible-centroid movement inside the geometric-ideal band on the
-   realistic fixture, with the v1.1 background as the negative control;
+   realistic fixture, with the v1.1 background as the negative control —
+   quantitative support for item 2, fixture-bound (see above);
 4. variant B is untouched by A2 — its output is bit-identical with the plate
    code path present;
 5. the plate never writes outside the opening, and the §8.2 lid-safety bound
@@ -1418,9 +1441,9 @@ per case rather than as one number.
 | masks | pixels outside the opening unchanged | for CORRECTED output, (*A1*) `frame[opening_mask == 0] == canvas[opening_mask == 0]` — the invariant §11 actually names, and the selector that stays correct under either permitted `alpha` construction; repeated with a face small enough that the two ROI boxes overlap |
 | warp | eye order does not matter (*A1*) | the §8.4 blend helper applied to the two eyes in either order, into copies of the same canvas, gives bit-identical results (asserted at the helper level: the engine's own order is fixed right-then-left by §10.1 and is not a setting) |
 | warp | sampling stays inside the opening | with the default precise distance transform and `field_guard_px = 1.5`: for every `p` with `w(p) > 0`, the four pixels of the bilinear footprint of `p − D(p)` have `opening_mask == 1` (§8.2 discrete bound); repeated with a 3×3 chamfer mask and `field_guard_px = 2.5` |
-| warp | the iris actually moves — variant C (*A2*) | **default** fixture (unclipped), vertical and horizontal 10° and 15°: visible centroid moves by `d ± 0.5 px` (there the geometric ideal equals `d`). **Realistic** fixture (lid-clipped), vertical and horizontal 10° and 15°: movement is in the right direction and within **[0.85, 1.25] × the geometric ideal** of §15.1 — the lower bound rejects a background that retains the source iris, the upper bound rejects an implementation that erases so much iris that a sliver drags the centroid. Negative control: the v1.1 background (sampling `roi_src` instead of the plate) scores 0.24, 0.30, 0.76 and 0.82 of ideal on those four cases and must fail every one |
+| warp | **exactly one iris (*A2*, primary)** | in the corrected output, every iris-tone pixel inside the opening lies within the destination disc dilated by 1 px — no remnant at the source position. Threshold-free and the primary discriminator of the A2 defect: the v1.1 background fails it on every clipped case, including the horizontal ones where the centroid is insensitive. Run on the realistic fixture, vertical and horizontal, 10° and 15° |
+| warp | the iris actually moves — variant C (*A2*) | **default** fixture (unclipped), vertical and horizontal 10° and 15°: visible centroid moves by `d ± 0.5 px` (there the geometric ideal equals `d`). **Realistic** fixture (lid-clipped), same angles: movement is in the right direction and within **[0.85, 1.25] × the geometric ideal** of §15.1. Negative control: the v1.1 background (sampling `roi_src` instead of the plate) scores 0.18–0.29 of ideal on the vertical cases and 0.70–0.81 on the horizontal ones, and must fail every one. The band is **calibrated for these two fixtures only** — §8.8 explains why the ratio is anatomy-dependent — so it is a fixture-bound regression check, not a general acceptance criterion, and the structural row above is what actually pins the defect |
 | warp | background carries no iris (*A2*) | the `sclera_plate` contains no iris-tone pixel inside the iris hole (colour test against the renderer's iris tone), and is bit-identical to `roi_src` everywhere outside the hole |
-| warp | exactly one iris (*A2*) | in the corrected output, every iris-tone pixel inside the opening lies within the destination disc dilated by 1 px — no remnant at the source position; fails on the v1.1 background |
 | warp | variant B untouched by A2 (*A2*) | with `iris_layer = False` the output is bit-identical whether or not the plate code path is present: variant B samples `roi_src` |
 | warp | plate safety (*A2*) | the plate writes no pixel outside `opening_mask`, and the §8.2 footprint bound still holds when the field samples the plate |
 | warp | fill fallbacks (*A2*) | a scan-line whose hole reaches the opening edge on one side replicates the other side; a line with no non-hole interior pixel uses the median interior colour; both exercised deterministically |
