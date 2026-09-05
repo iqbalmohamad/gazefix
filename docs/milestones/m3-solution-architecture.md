@@ -671,7 +671,7 @@ compositor component exists (ADR-0002 §4). Everything here runs in phase 3
 | `opening_mask` | `cv2.fillPoly` of the 16-point eyelid polygon (optionally with sub-pixel `shift` bits or a Catmull-Rom-smoothed contour — implementor's choice); values `{0, 1}` | occlusion, distance field, blend region |
 | `distance` | `cv2.distanceTransform(opening_mask, DIST_L2, DIST_MASK_PRECISE)` — the exact Euclidean distance, for each inside pixel, to the nearest **zero pixel**; 0 outside. The precise mask is the default because the §8.2 bound and its test rely on it; a chamfer approximation (3×3/5×5, up to ≈ 4 % over-estimate) is allowed only together with `field_guard_px ≥ 2.5` | warp falloff (§8.2) and blend alpha — **not** containment, which is analytic (§5.3) |
 | `alpha` (blend) | `clip(distance / edge_px, 0, 1) · opening_mask` (default `edge_px` **1.5**, range 1–3), or a `shift`-bit anti-aliased `fillPoly` multiplied by `opening_mask`. A Gaussian blur is **not** an allowed construction (it never reaches exactly 1 near the edge, §15.2). Exactly 0 outside the opening; exactly 1 at every interior pixel with `distance ≥ edge_px` | eye-shaped blend that never writes on lid skin; see §8.4 for why it is *not* a wide feather |
-| `iris_alpha` (variant C) | soft disc at the **destination** iris centre, radius `iris_layer_radius_scale·iris_radius` (default 1.05), 1–1.5 px edge; multiplied by two occlusion factors — the **binary** `opening_mask` at the destination (occlusion by the lid) and `opening_mask` **sampled bilinearly** at the **source** position `p − d`, giving a fractional factor that both anti-aliases the source-coverage edge and matches how `iris_layer` itself is sampled (so lid skin that clipped the iris in the source is never carried into the eye) | iris layer compositing. **Since A1 (§8.7) this mask alone keeps the iris layer off lid skin**: `iris_alpha == 0` wherever `opening_mask == 0` is a mandatory invariant, separately tested (§15.2), because the outer `alpha` multiply no longer wraps the iris layer |
+| `iris_alpha` (variant C) | soft disc at the **destination** iris centre, radius `iris_layer_radius_scale·iris_radius` (default 1.05), 1–1.5 px edge; multiplied by two **binary** occlusion factors — `opening_mask` at the **destination** (occlusion by the lid), and `opening_mask` at the **source** position `p − d`, the latter *conservative* in the sense §8.2 already uses for the background: it is 1 only when **all four bilinear taps** of `p − d` have `opening_mask == 1`, and 0 otherwise. Both factors stay binary deliberately. A fractional source factor would not deliver the guarantee it looks like it delivers: `iris_layer` is itself the bilinear sample at `p − d` (§8.3), so a straddling footprint has already baked lid-skin taps into the sample, and merely attenuating it by the coverage `c` still leaves `c·(1 − c)` — up to **25 %** of the pixel — as skin colour inside the opening. Only excluding straddling footprints keeps "lid skin that clipped the iris in the source is never carried into the eye" literally true | iris layer compositing. **Since A1 (§8.7) this mask alone keeps the iris layer off lid skin**: `iris_alpha == 0` wherever `opening_mask == 0` is a mandatory invariant, separately tested (§15.2), because the outer `alpha` multiply no longer wraps the iris layer. `iris_alpha ∈ [0, 1]` and finite is likewise mandatory: A1 makes it the outermost weight of the composite, so nothing else bounds it |
 
 ### 8.2 Warp field (variant B/C background)
 
@@ -710,7 +710,11 @@ translation, sampled bilinearly (a second small `remap` or an equivalent
 §8.4 (A1; before that amendment it was composited over the background alone).
 Where the iris layer has no valid source (lid-clipped in the source),
 `iris_alpha` falls to 0 and that base shows through, so variant C degrades
-gracefully to B locally.
+gracefully to B locally. That cut-off is sharp by construction (§8.1): a
+partially covered source footprint counts as no valid source. The trade is
+deliberate — a one-pixel transition between moved-iris and warped-background
+content, both of which are eye content, in exchange for never admitting lid
+skin into the eye.
 
 ### 8.4 Compositing into the canvas
 
@@ -798,12 +802,17 @@ fault and is `FAILED` (§10.3).
 ### 8.7 Amendment A1 — compositing order (2026-09-05, PM-approved)
 
 **Scope.** Milestone-local correction of one formula and the wording that
-depends on it. ADR-0002's boundary is untouched — the engine still owns
-masks and compositing, still creates no compositor stage, and still returns
-one complete corrected frame with a metadata-only result — so **no new ADR
-is required**. The M3/M4 scope boundary, the engine contract (§3), the
-geometry and mapping (§5, §6), the policy (§7), the failure semantics (§10)
-and the frame-ownership budget (§11) are unchanged.
+depends on it. Two further edits are in scope because the new order forces
+them, and there are no others: §8.1 states the two `iris_alpha` occlusion
+factors explicitly as **binary**, with the source factor conservative (all
+four bilinear taps inside), because A1 makes `iris_alpha` the sole guarantor
+of a guarantee the outer `alpha` used to provide; and §11 gains one invariant
+row saying so. ADR-0002's boundary is untouched — the engine still owns masks
+and compositing, still creates no compositor stage, and still returns one
+complete corrected frame with a metadata-only result — so **no new ADR is
+required**. The M3/M4 scope boundary, the engine contract (§3), the geometry
+and mapping (§5, §6), the policy (§7), the failure semantics (§10) and the
+frame-ownership *copy budget* (§11) are unchanged.
 
 **Implementation evidence that triggered it.** M3 implementation reported
 that the frozen §8.4 formula and the frozen §15.2 "no ghosting near the lid"
@@ -861,23 +870,35 @@ not a pre-emptive redesign here.
 
 **Required regression coverage** (all in §15.2, marked *A1*):
 
-1. no ghosting near the lid — an opaque iris (`iris_alpha == 1`) in the
-   partial-alpha band equals `frame(p − d)`, with the **superseded formula**
-   as the negative control (the old `edge_px = 4` control is void under A1:
-   a wide feather no longer dilutes an opaque iris);
+1. no ghosting near the lid — an opaque iris (`iris_alpha ≥ 1 − 1e-6`) in
+   the partial-alpha band equals `frame(p − d)`, with the **superseded
+   formula** as the negative control (the old `edge_px = 4` control is void
+   under A1: a wide feather no longer dilutes an opaque iris). The selected
+   pixel set must be asserted non-empty and the control must deviate on at
+   least one of them, so the test cannot pass vacuously;
 2. the outside-the-opening invariant asserted at the mask level
    (`iris_alpha == 0` wherever `opening_mask == 0`), because A1 makes that
    invariant rest on `iris_alpha` alone;
 3. convexity — the three composite weights sum to 1 for representative
-   `(alpha, iris_alpha)`, catching a transcription error directly;
+   `(alpha, iris_alpha)`, catching a transcription error directly, together
+   with its precondition `0 ≤ iris_alpha ≤ 1` and finite (non-negativity of
+   the weights, not just their sum, is what makes the composite convex, and
+   A1 leaves nothing else to bound the outermost weight);
 4. variant B equivalence — with the iris layer off, the output equals the
    pre-A1 formula exactly;
 5. lid-edge aliasing — the opaque disc crossing the lid, bounding the hard
-   step to the contour pixels;
-6. partial source coverage — fractional source factor produces a convex mix
-   with no overshoot and no lid-skin colour inside the opening;
+   step to the contour ring and recording its magnitude as the Q12
+   measurement;
+6. partial source coverage — a straddling source footprint gives
+   `iris_alpha == 0` under §8.1's conservative all-taps rule, so the output
+   is `base` and **no** lid-skin colour appears inside the opening, with a
+   plain bilinear (fractional) source factor as the negative control;
 7. eye-order independence with overlapping ROIs, re-checked under the new
-   order.
+   order, asserted on the §8.4 blend helper (the engine's own order is fixed
+   right-then-left by §10.1);
+8. the sclera-dilution control — `edge_px = 4` measurably dilutes the
+   *background* correction — which is the replacement coverage for the
+   `edge_px = 4` negative control A1 voids in item 1.
 
 ---
 
@@ -1145,7 +1166,7 @@ PRD §29 key criterion:
 | blink realism | on blink/wink/squint/closed frames (stills or clip frames): is the closed eye and its lid untouched, does correction switch off cleanly, and does a one-eye-corrected wink look natural rather than cross-eyed? (feeds Q8: `min_aperture`, `pair_coupling`) |
 | eyelid preservation | lids, lashes, lid line unchanged; iris correctly occluded by the lid? |
 | identity preservation | still the same person; expression unchanged? |
-| artifact visibility | seams, halos, texture smear, moved catchlight, skin bleed? |
+| artifact visibility | seams, halos, texture smear, moved catchlight, skin bleed, or a stair-stepped or hard iris edge where the iris meets the eyelid line (A1, §8.5)? |
 | perceived eye contact | does the corrected image make more eye contact than the original? |
 | **key criterion** (PRD §29) | is the correction **less distracting** than the original lack of eye contact? yes / no |
 
@@ -1275,20 +1296,21 @@ per case rather than as one number.
 | geometry | containment at realistic anatomy | realistic fixture (§15.1): 10° and 15° upward at `s=1` → CORRECTED (the default `iris_margin_fraction` admits the operating range); a forced **upward** displacement of `0.5·half_width` (the clamp value) → `iris would leave the eye` (a horizontal move of the same size stays clear of the corners and is CORRECTED) |
 | geometry | degenerate contour | swap two lid points so the polygon self-intersects while the aperture stays normal → SKIPPED `degenerate contour` on that eye, pair rule → both skipped; collapse the 16 points onto a line → `eye closed` (aperture 0; the other eye may proceed — the accepted reading, §5.3 #2); 468-point result → frame `no iris`; `eyes overlap` on a face shrunk until the polygons' boxes intersect; eye at the image border → `eye at image border` |
 | geometry | negligible displacement | `s` tiny → both eyes `negligible displacement`, frame SKIPPED, `output.frame is frame` |
-| masks | alpha validity (`test_correction_masks`) | `0 ≤ alpha ≤ 1`, finite; `alpha == 0` wherever `opening_mask == 0`; `alpha == 1` (within 1e-6) at every interior pixel with `distance ≥ edge_px`; zero-area polygon rejected |
-| masks | pixels outside the opening unchanged | for CORRECTED output, `frame[alpha == 0] == canvas[alpha == 0]`; repeated with a face small enough that the two ROI boxes overlap, and (*A1*) with the eyes composited in both orders, which must give identical output |
+| masks | alpha validity (`test_correction_masks`) | `0 ≤ alpha ≤ 1`, finite; (*A1*) `0 ≤ iris_alpha ≤ 1`, finite — the precondition the §8.4 convexity claim rests on, since A1 makes `iris_alpha` the outermost weight; `alpha == 0` wherever `opening_mask == 0`; `alpha == 1` (within 1e-6) at every interior pixel with `distance ≥ edge_px`; zero-area polygon rejected |
+| masks | pixels outside the opening unchanged | for CORRECTED output, (*A1*) `frame[opening_mask == 0] == canvas[opening_mask == 0]` — the invariant §11 actually names, and the selector that stays correct under either permitted `alpha` construction; repeated with a face small enough that the two ROI boxes overlap |
+| warp | eye order does not matter (*A1*) | the §8.4 blend helper applied to the two eyes in either order, into copies of the same canvas, gives bit-identical results (asserted at the helper level: the engine's own order is fixed right-then-left by §10.1 and is not a setting) |
 | warp | sampling stays inside the opening | with the default precise distance transform and `field_guard_px = 1.5`: for every `p` with `w(p) > 0`, the four pixels of the bilinear footprint of `p − D(p)` have `opening_mask == 1` (§8.2 discrete bound); repeated with a 3×3 chamfer mask and `field_guard_px = 2.5` |
 | warp | the iris actually moves — variant C | horizontal 10° and 15° on the realistic fixture: centroid of the visible disc moves by `d ± 0.5 px`. Vertical 10° and 15° on the **default** fixture (iris ratio 0.24, disc unclipped before and after): `d ± 0.5 px`. Vertical 15° on the realistic fixture (disc lid-clipped, so the visible-disc centroid cannot move by the full `d`): correct direction and at least `0.6·|d|`, the same form as variant B — the B-vs-C row below is where the two are compared |
 | warp | the iris actually moves — variant B | horizontal 10°/15° and vertical 10°: `d ± 1 px`; vertical 15°: correct direction and at least `0.6·|d|` (the compression near the lid is the designed behaviour, §4.1) |
 | warp | B vs C occlusion | vertical 15° on the realistic fixture: C's centroid displacement exceeds B's, and C keeps iris texture where B compresses |
 | warp | iris layer opaque at centre | at the destination iris centre and its 3×3 neighbourhood, output equals `frame(p − d)` within interpolation tolerance (variant C) |
-| warp | no ghosting near the lid (*A1*) | vertical move bringing the moved iris under the upper lid: at pixels inside the moved disc (`iris_alpha == 1`) that lie in the partial-alpha band along the lid (`0.5 < alpha < 1`), output equals `frame(p − d)` within tolerance — the moved iris is not mixed with the unmoved original. **Negative control: the superseded pre-A1 order** (`alpha·(iris_alpha·iris_layer + (1−iris_alpha)·background) + (1−alpha)·canvas`), computed inline in the test, must violate it. (The old `edge_px = 4` control is void under A1 — a wide feather no longer dilutes an opaque iris; `edge_px` is still exercised by the sclera-dilution check below) |
+| warp | no ghosting near the lid (*A1*) | vertical move bringing the moved iris under the upper lid: at pixels inside the moved disc (`iris_alpha ≥ 1 − 1e-6`; assert the set is **non-empty** so the row cannot pass vacuously) that lie in the partial-alpha band along the lid (`0.5 < alpha < 1`), output equals `frame(p − d)` within tolerance — the moved iris is not mixed with the unmoved original. **Negative control: the superseded pre-A1 order** (`alpha·(iris_alpha·iris_layer + (1−iris_alpha)·background) + (1−alpha)·canvas`), computed inline in the test, must violate it on at least one selected pixel. (The old `edge_px = 4` control is void under A1 — a wide feather no longer dilutes an opaque iris; `edge_px` is still exercised by the sclera-dilution check below) |
 | masks | iris alpha never reaches lid skin (*A1*) | `iris_alpha == 0` at every pixel where `opening_mask == 0`, on both the default and realistic fixtures and for a displacement large enough to push the disc across the contour — the invariant §11 now rests on |
 | warp | composite is convex (*A1*) | for a grid of representative `(alpha, iris_alpha)` pairs including the corners, the three weights `iris_alpha`, `(1−iris_alpha)·alpha`, `(1−iris_alpha)·(1−alpha)` sum to 1 within 1e-6 and the output stays within the range of its three inputs (no overshoot, no uint8 clipping) |
 | warp | variant B is unchanged by A1 (*A1*) | with `iris_layer = False`, the output equals the pre-A1 formula `alpha·background + (1−alpha)·canvas` bit-for-bit |
-| warp | lid-edge aliasing is bounded (*A1*) | opaque disc driven across the upper-lid contour: every pixel whose value changes discontinuously lies on the contour ring (`opening_mask` boundary), the step is confined to that one-pixel ring, and no pixel outside the opening changes; recorded as the measurement §24 Q12 tracks rather than asserted as pretty |
-| warp | partial source coverage (*A1*) | destination pixels whose source `p − d` falls partly outside the opening: the bilinearly sampled source factor is fractional, the output is the convex mix of `iris_layer` and `base` with those weights, and no lid-skin colour appears inside the opening |
-| warp | sclera dilution control | inside the opening, outside the disc, in the partial-alpha band: `edge_px = 4` measurably reduces the background correction against `edge_px = 1.5` — the reason `edge_px` stays small after A1 (§8.4) |
+| warp | lid-edge aliasing is bounded (*A1*) | opaque disc driven across the upper-lid contour: inside the opening, the largest absolute 4-neighbour difference of the output occurs **only** on the `opening_mask` boundary ring — assert no jump of that magnitude appears more than one pixel inside the ring, and that no pixel outside the opening changes. The test **records** the maximum jump (in the renderer's skin-versus-iris contrast units) as the Q12 measurement; it does not assert a beauty threshold, which is the Product Owner's call |
+| warp | partial source coverage (*A1*) | destination pixels whose source footprint `p − d` straddles the source lid contour: `iris_alpha == 0` there by §8.1's conservative all-taps rule, the output equals `base`, and a colour test against the renderer's skin tone finds **no** lid-skin contribution anywhere inside the opening; the cut-off is confined to the source-coverage ring. Negative control: a fractional (plain bilinear) source factor admits up to 25 % skin at a straddling pixel and fails the colour test |
+| warp | sclera dilution control (*A1*) | inside the opening, outside the disc, in the partial-alpha band: `edge_px = 4` measurably reduces the background correction against `edge_px = 1.5` — the reason `edge_px` stays small after A1 (§8.4) |
 | warp | lid-clipped source iris | source iris partly under the upper lid, horizontal move: no lid-skin pixels appear inside the opening (colour test against the renderer's skin tone) |
 | failure | exception fallback, phase 3 | monkeypatch the mask helper to raise → `FAILED "mask generation failed…"`; `cv2.remap` raising → `FAILED "compositing failed…"`; input returned, no exception escapes, `correction_ms` populated |
 | failure | exception fallback, phases 1–2 | a geometry/mapping helper raising → `FAILED "engine exception: …"`, `output.frame is frame` |
