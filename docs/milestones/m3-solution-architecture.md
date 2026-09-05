@@ -639,7 +639,7 @@ compositor component exists (ADR-0002 §4). Everything here runs in phase 3
 | Field | Construction | Purpose |
 | --- | --- | --- |
 | `opening_mask` | `cv2.fillPoly` of the 16-point eyelid polygon (optionally with sub-pixel `shift` bits or a Catmull-Rom-smoothed contour — implementor's choice); values `{0, 1}` | occlusion, distance field, blend region |
-| `distance` | `cv2.distanceTransform` of `opening_mask`: for each inside pixel, the distance in px to the nearest **zero pixel**; 0 outside. Mask size (3×3, 5×5, `DIST_MASK_PRECISE`) is the implementor's; the guard `m` below absorbs the approximation | warp falloff (§8.2) and blend alpha — **not** containment, which is analytic (§5.3) |
+| `distance` | `cv2.distanceTransform(opening_mask, DIST_L2, DIST_MASK_PRECISE)` — the exact Euclidean distance, for each inside pixel, to the nearest **zero pixel**; 0 outside. The precise mask is the default because the §8.2 bound and its test rely on it; a chamfer approximation (3×3/5×5, up to ≈ 4 % over-estimate) is allowed only together with `field_guard_px ≥ 2` | warp falloff (§8.2) and blend alpha — **not** containment, which is analytic (§5.3) |
 | `alpha` (blend) | `clip(distance / edge_px, 0, 1) · opening_mask` (default `edge_px` **1.5**, range 1–3), or a `shift`-bit anti-aliased `fillPoly` multiplied by `opening_mask`. A Gaussian blur is **not** an allowed construction (it never reaches exactly 1 near the edge, §15.2). Exactly 0 outside the opening; exactly 1 at every interior pixel with `distance ≥ edge_px` | eye-shaped blend that never writes on lid skin; see §8.4 for why it is *not* a wide feather |
 | `iris_alpha` (variant C) | soft disc at the **destination** iris centre, radius `iris_layer_radius_scale·iris_radius` (default 1.05), 1–1.5 px edge; multiplied by `opening_mask` at the destination (occlusion by the lid) and by `opening_mask` sampled at the **source** position `p − d` (so lid skin that clipped the iris in the source is never carried into the eye) | iris layer compositing |
 
@@ -648,16 +648,18 @@ compositor component exists (ADR-0002 §4). Everything here runs in phase 3
 For each output pixel `p` in the ROI:
 
 ```text
-D(p) = d · w(p),      w(p) = min(1, max(0, distance(p) − m) / f),      m = 1 px,      f = max(|d|, f_min)
+D(p) = d · w(p),      w(p) = min(1, max(0, distance(p) − m) / f),      m = field_guard_px (1 px with the precise transform),      f = max(|d|, f_min)
 f_min = falloff_fraction · half_width_px        (default falloff_fraction 0.15)
 ```
 
 Because `f ≥ |d|`, `|D(p)| ≤ distance(p) − m` wherever `w > 0`: the sampled
 location `p − D(p)` and its 2×2 bilinear footprint stay inside
-`opening_mask` (the 1 px guard `m` covers the distance transform's
-zero-pixel-centre semantics and the bilinear footprint), so lid skin cannot
-be sampled into the eye. This is a discrete bound on the rasterised mask
-and becomes a test (§15.2); it is not claimed for the continuous polygon.
+`opening_mask` (with the exact Euclidean `distance` of §8.1, the 1 px guard
+`m` covers the transform's zero-pixel-centre semantics and the bilinear
+footprint; an approximate chamfer transform needs `m ≥ 2`), so lid skin
+cannot be sampled into the eye. This is a discrete bound on the rasterised
+mask and becomes a test (§15.2); it is not claimed for the continuous
+polygon.
 Far from the contour (the iris interior and the sclera middle) `w = 1`:
 rigid translation. Within `f + m` of the contour the content
 compresses/stretches smoothly; the boundary ring (`distance ≤ m`) does not
@@ -1124,8 +1126,8 @@ per case rather than as one number.
 | geometry | negligible displacement | `s` tiny → both eyes `negligible displacement`, frame SKIPPED, `output.frame is frame` |
 | masks | alpha validity (`test_correction_masks`) | `0 ≤ alpha ≤ 1`, finite; `alpha == 0` outside the opening polygon; `alpha == 1` (within 1e-6) at every interior pixel with `distance ≥ edge_px`; zero-area polygon rejected |
 | masks | pixels outside the opening unchanged | for CORRECTED output, `frame[alpha == 0] == canvas[alpha == 0]`; repeated with a face small enough that the two ROI boxes overlap |
-| warp | sampling stays inside the opening | for every `p` with `w(p) > 0`, the four pixels of the bilinear footprint of `p − D(p)` have `opening_mask == 1` (§8.2 discrete bound) |
-| warp | the iris actually moves — variant C | horizontal and vertical 10° and 15° on the realistic fixture: centroid of the visible disc moves by `d ± 0.5 px` (the vertical 15° case is lid-clipped; measure on the visible disc) |
+| warp | sampling stays inside the opening | with the default precise distance transform and `field_guard_px = 1`: for every `p` with `w(p) > 0`, the four pixels of the bilinear footprint of `p − D(p)` have `opening_mask == 1` (§8.2 discrete bound); repeated with a 3×3 chamfer mask and `field_guard_px = 2` |
+| warp | the iris actually moves — variant C | horizontal 10° and 15° on the realistic fixture: centroid of the visible disc moves by `d ± 0.5 px`. Vertical 10° and 15° on the **default** fixture (iris ratio 0.24, disc unclipped before and after): `d ± 0.5 px`. Vertical 15° on the realistic fixture (disc lid-clipped, so the visible-disc centroid cannot move by the full `d`): correct direction and at least `0.6·|d|`, the same form as variant B — the B-vs-C row below is where the two are compared |
 | warp | the iris actually moves — variant B | horizontal 10°/15° and vertical 10°: `d ± 1 px`; vertical 15°: correct direction and at least `0.6·|d|` (the compression near the lid is the designed behaviour, §4.1) |
 | warp | B vs C occlusion | vertical 15° on the realistic fixture: C's centroid displacement exceeds B's, and C keeps iris texture where B compresses |
 | warp | iris layer opaque at centre | at the destination iris centre and its 3×3 neighbourhood, output equals `frame(p − d)` within interpolation tolerance (variant C) |
@@ -1325,7 +1327,9 @@ Settings defaults collected (all experimental, `GeometricCorrectionSettings`
 `edge_px`), `min_half_width_px 8`, `min_aperture 0.18`,
 `iris_radius_bounds (0.2, 0.6)`, `min_polygon_area_px 30`,
 `padding_fraction 0.25`, `edge_px 1.5`, `falloff_fraction 0.15`,
-`field_guard_px 1`, `iris_layer True`, `iris_layer_radius_scale 1.05`,
+`distance_transform precise` (`DIST_MASK_PRECISE`; a chamfer mask requires
+`field_guard_px ≥ 2`), `field_guard_px 1`, `iris_layer True`,
+`iris_layer_radius_scale 1.05`,
 `pair_coupling True`, `interpolation linear`, `debug False`;
 `PolicySettings` (runtime-constants tier): `light_factor 0.3`, breakpoints
 `(5, 25, 35)°`, `conf_floor 0.35` (seeded from the estimator's
