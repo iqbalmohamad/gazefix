@@ -1,6 +1,7 @@
 # GazeFix — Current Engineering Assignment
 
-**Active assignment: Milestone 3 — Solution Architecture (design only)**
+**Active assignment: NONE — awaiting the Product Manager's Milestone 3
+implementation assignment**
 
 **M0 status: PASS / CLOSED / FROZEN**
 
@@ -10,18 +11,20 @@
 
 **Overall architecture baseline (`architecture-v1`): APPROVED / FROZEN / CANONICAL**
 
-**M3 implementation: NOT STARTED — not authorized by this file**
+**M3 Solution Architecture (`m3-architecture-v1`): APPROVED / FROZEN / CANONICAL**
+
+**M3 implementation: NOT STARTED — NOT YET AUTHORIZED**
 
 **Updated: 2026-09-05**
 
-The only authorized work is the **Milestone 3 Solution Architecture**: a
-milestone-specific design document derived from the frozen architecture
-baseline, describing how the offline gaze-correction prototype (PRD §24, M3)
-will be built. This assignment produces documentation only. It does **not**
-authorize product code, tests, dependency changes, an M3 implementation
-branch, or any M4 work. Implementation is assigned separately by the Product
-Manager after the SA is reviewed; no implementation work is assigned to Codex
-or to any other engineer by this file.
+There is no authorized engineering work in progress. The Milestone 3
+Solution Architecture has been approved by the Product Manager and frozen;
+Milestone 3 **implementation** has not been assigned, no correction code
+exists, and no implementation branch has been created. Do not begin M3
+implementation, create an M3 implementation branch, or start M4 work on the
+strength of this file or of the approved SA. Wait for a Product Manager
+assignment. No implementation work is assigned to Codex, to Claude, or to
+any other engineer by this file.
 
 ## Frozen repository state
 
@@ -32,9 +35,12 @@ or to any other engineer by this file.
 | Frozen M2 baseline (`milestone-2`) | `81e06118801c23d2337629fc676d6ad8ac13716a` |
 | `main` | `b40d74faef55811d67de258660b6040c7c8dc790` (M0 merge) |
 | Canonical architecture baseline (`architecture-v1`) | `003180d52d39d30a038333541b1b187824714e87` |
+| Reviewed M3 SA content | `28dac348749e956acbeb709e3abb4ff3654451d5` |
+| Canonical M3 Solution Architecture (`m3-architecture-v1`) | this commit; it adds status/admin metadata only on top of the reviewed SA content |
 
-`main`, `milestone-0`, `milestone-1`, `milestone-2` and `architecture-v1`
-are frozen. Do not advance, rewrite, force-push, or merge into any of them.
+`main`, `milestone-0`, `milestone-1`, `milestone-2`, `architecture-v1` and
+`m3-architecture-v1` are frozen. Do not advance, rewrite, force-push, or
+merge into any of them.
 
 Accepted M0 debt (the `PreparedCameraCloser` ambiguous `Thread.start()`
 bootstrap case documented in `docs/architecture.md`) remains accepted and out
@@ -56,21 +62,41 @@ Solution Architecture documents, or through a deliberate architecture
 amendment / new ADR when evidence requires one. The frozen baseline is not
 edited during milestone work.
 
-## Milestone 3 Solution Architecture
+## Milestone 3 Solution Architecture — approved and frozen
 
 | Item | Value |
 | --- | --- |
-| Deliverable | `docs/milestones/m3-solution-architecture.md` |
-| Lineage | `milestone-2` @ `81e0611` → `architecture-v1` @ `003180d` [frozen] → M3 SA |
-| Branch | `claude/m3-solution-architecture`, created from `architecture-v1` |
-| Scope | design of the M3 offline correction prototype: engine contract, geometric technique, eye-region geometry, gaze-to-deformation mapping, policy, masks/blending, failure semantics, frame ownership, offline harness, test strategy, quality gate |
-| Changes allowed | this file; the SA document; a new ADR only if genuinely justified (none was) |
-| Changes forbidden | product code, tests, dependencies, the PRD, frozen architecture documents, ADR-0002/0003, any frozen branch |
-| Outcome | the SA is reviewed by the Product Manager; M3 implementation is a separate, later assignment |
+| Document | `docs/milestones/m3-solution-architecture.md` |
+| Canonical reference | `m3-architecture-v1` (this commit) |
+| Reviewed SA content | `28dac348749e956acbeb709e3abb4ff3654451d5` |
+| Historical review branch | `claude/m3-solution-architecture` (retained) |
+| Review record | PR #7 against `architecture-v1` — closed, **not merged** |
+| Lineage | `milestone-2` @ `81e0611` → `architecture-v1` @ `003180d` [frozen] → M3 SA [frozen] |
+| Approved | 2026-09-05, by the Product Manager |
+| New ADR required | none |
 
-M3 is the PRD's major quality gate. The SA is written so that
-`FAIL / CHANGE APPROACH` is a legitimate M3 outcome; nothing in it assumes
-M3 must pass.
+The approved SA is the design authority for M3 implementation: the engine
+contract, geometric technique, eye-region geometry, gaze-to-deformation
+mapping, correction policy, mask and blending approach, failure behaviour,
+frame ownership, offline harness, test strategy and visual quality gate are
+settled there and are not to be redesigned by the implementor. It changes no
+product code, test, dependency, PRD text, frozen architecture document or
+accepted ADR.
+
+The Product Manager's approval explicitly ratifies the 10–20° operating and
+evaluation range; effective strength ≈ 0.5–0.8 as the main visual-quality
+evaluation range; the `PROCEED / ITERATE / CHANGE APPROACH` gate framework;
+a qualitative Product Owner visual gate with no fabricated aggregate numeric
+pass score; the ~45–50 minute PO evaluation budget; the layered eye-region
+remap as the approved M3 default geometric approach; the default
+pair-correction behaviour as provisional, tunable implementation policy
+rather than architecture law; and the gaze-to-deformation mapping as an
+approved hypothesis to be validated during implementation rather than proof
+of physical accuracy.
+
+M3 remains the PRD's major quality gate. The SA is written so that
+`FAIL / CHANGE APPROACH` is a legitimate M3 outcome; neither the SA nor its
+approval assumes M3 must pass.
 
 ## Historical assignments
 
@@ -81,7 +107,8 @@ file:
 | --- | --- |
 | M2 — Gaze Estimation | `81e06118801c23d2337629fc676d6ad8ac13716a` (this file at frozen M2) |
 | Overall Architecture Pass | `8e80dd32ed121590c9e5c99e55f304b1b6cde151` |
-| No active assignment (post-freeze idle state) | `003180d52d39d30a038333541b1b187824714e87` (this file at `architecture-v1`) |
+| No active assignment (post-architecture-freeze idle state) | `003180d52d39d30a038333541b1b187824714e87` (this file at `architecture-v1`) |
+| M3 — Solution Architecture (design only) | `28dac348749e956acbeb709e3abb4ff3654451d5` (this file at the reviewed SA HEAD) |
 
 ## Authority and roles
 
@@ -93,10 +120,10 @@ editing the PRD or silently changing scope.
 
 - ChatGPT: Product Manager / Technical Lead; scope, acceptance, and milestone
   decisions.
-- Mohammad Iqbal: Product Owner; final product decisions and target-device
-  (Windows/webcam) verification.
-- Claude Code: Solution Architect for this assignment; implementation
-  engineer and self-review when implementation is assigned.
+- Mohammad Iqbal: Product Owner; final product decisions, target-device
+  (Windows/webcam) verification, and the M3 visual quality gate.
+- Claude Code: implementation engineer and self-review when implementation is
+  assigned; Solution Architect when an architecture pass is assigned.
 
 `docs/qa-policy.md` is the repository-level QA policy from M2 onward and
 governs verification depth, independent review, stopping rules, and Product
@@ -104,8 +131,8 @@ Owner interaction.
 
 ## Next step
 
-The Product Manager reviews the M3 Solution Architecture. If approved, the
-PM issues the **Milestone 3 — Offline Gaze Correction Prototype**
-implementation assignment, on a new implementation branch created from the
-approved SA lineage. Neither the implementation nor its branch is authorized
-by this file.
+The Product Manager issues the **Milestone 3 — Offline Gaze Correction
+Prototype** implementation assignment, naming its own implementation branch
+created from the frozen `m3-architecture-v1` reference. Until that
+assignment exists, no implementation work is authorized: this file activates
+nothing.

@@ -1,9 +1,33 @@
 # Milestone 3 — Solution Architecture: Offline Gaze Correction Prototype
 
-**Status:** DRAFT — ready for Product Manager review. Design only; no M3 code
-exists. **Date:** 2026-09-05. **Role:** Solution Architect / Principal
-Engineer. **Revision:** corrected after an eight-lens adversarial review of
-the first draft (50 confirmed findings applied; see the PR description).
+**Status:** **APPROVED / FROZEN** — approved by the Product Manager on
+2026-09-05 and frozen as the canonical M3 Solution Architecture. Design only:
+no M3 code exists, and this document does not authorize M3 implementation
+(the Product Manager issues that assignment separately). Amend only through a
+deliberate, PM-authorized revision of this document or a new ADR — never by
+silent edits during implementation, the rule ADR-0002 and ADR-0003 already
+carry.
+
+| Freeze record | Value |
+| --- | --- |
+| Reviewed SA content | `28dac348749e956acbeb709e3abb4ff3654451d5` (the HEAD the Product Manager reviewed) |
+| Canonical frozen reference | branch `m3-architecture-v1` — this commit, which adds status/admin metadata only, on top of the reviewed content |
+| Review record | PR #7 against `architecture-v1`; closed, not merged |
+| Written / corrected | 2026-09-05, after an eight-lens adversarial review of the first draft (50 confirmed findings applied) |
+| Role | Solution Architect / Principal Engineer |
+
+**Product Manager ratification (2026-09-05).** The approval explicitly
+ratifies: the 10–20° gaze-deviation range as the primary M3
+operating/evaluation range; effective strength ≈ 0.5–0.8 as the main
+visual-quality evaluation range; the `PROCEED / ITERATE / CHANGE APPROACH`
+gate framework (§14.3); a qualitative Product Owner visual gate with **no**
+fabricated aggregate numeric pass score; the ~45–50 minute PO evaluation
+budget (§14.4); the layered eye-region remap (§4.2) as the approved M3
+default geometric approach; the default pair-correction behaviour (§5.6) as
+**provisional, tunable implementation policy — not an immutable architecture
+law**; the gaze-to-deformation mapping (§6) as the approved M3 mapping
+**hypothesis, to be validated during implementation and not treated as proof
+of physical accuracy**; and that **no new M3 ADR is required** (§21).
 
 **Baseline this design descends from:** `architecture-v1` at
 `003180d52d39d30a038333541b1b187824714e87` (frozen, canonical), itself on the
@@ -28,14 +52,14 @@ implementor should not need to redesign anything listed in §22.
 | D1 | M3 implements the production `CorrectionEngine` (ADR-0002) plus an offline CLI harness; nothing else | stable (baseline) | §1, §3 |
 | D2 | M3 consumes the frozen `TrackingResult`/`GazeResult` contracts unchanged; **no compatible metadata extension is required** | stable | §2 |
 | D3 | Engine contract: `correct(frame, tracking, target, strength) -> CorrectionOutput(frame, CorrectionResult)`, never raises, metadata-only result | stable (ADR-0002 made concrete) | §3 |
-| D4 | Technique: **layered eye-region remap** — rigid iris translation over a smoothly stretched sclera, occluded by the fixed eyelid opening, blended through an eye-shaped mask; the field-only variant is the built-in simplification for A/B | provisional (gate-dependent) | §4 |
-| D5 | Gaze→displacement: exact inverse of the frozen M2 eye model, applied as a **relative** iris displacement in each eye's own axis frame; one experimental gain | provisional (constants), stable (method) | §6 |
+| D4 | Technique: **layered eye-region remap** — rigid iris translation over a smoothly stretched sclera, occluded by the fixed eyelid opening, blended through an eye-shaped mask; the field-only variant is the built-in simplification for A/B | PM-ratified M3 default (the gate may still return CHANGE APPROACH) | §4 |
+| D5 | Gaze→displacement: exact inverse of the frozen M2 eye model, applied as a **relative** iris displacement in each eye's own axis frame; one experimental gain | PM-ratified as the M3 mapping **hypothesis**, to be validated in implementation, not proof of physical accuracy; constants provisional | §6 |
 | D6 | Policy: a small pure function in `gazefix/correction/policy.py` (PRD §10 curve × confidence gate), runtime-constants tier; the harness can bypass it | stable (shape), provisional (constants) | §7 |
-| D7 | Eyes are corrected as a **pair by default**: an open eye that cannot be corrected safely skips both; a closed/occluded eye lets the other proceed | provisional (switchable) | §5, §10 |
+| D7 | Eyes are corrected as a **pair by default**: an open eye that cannot be corrected safely skips both; a closed/occluded eye lets the other proceed | PM-ratified as provisional, tunable implementation policy — not architecture law (switchable) | §5, §10 |
 | D8 | Validate-then-commit: the single working copy is allocated only after every eye passes its checks; no partial frame is ever returned | stable | §10, §11 |
 | D9 | Engine keeps no temporal state in M3; `reset()` is a protocol no-op; no continuity-epoch machinery | stable | §20 |
 | D10 | No new runtime dependency | stable | §19 |
-| D11 | Gate verdict is the Product Owner's qualitative judgment on the PRD §28 dimensions applicable to offline stills/clips, over a fixed, budgeted experiment matrix; `CHANGE APPROACH` is a legitimate outcome | stable (process), proposed (thresholds, budget) | §14 |
+| D11 | Gate verdict is the Product Owner's qualitative judgment on the PRD §28 dimensions applicable to offline stills/clips, over a fixed, budgeted experiment matrix; `CHANGE APPROACH` is a legitimate outcome | PM-ratified (framework, qualitative gate, operating range, budget); per-dimension thresholds stay judgment aids, never objective pass scores | §14 |
 
 "Provisional" means: expected to be tuned or replaced by M3 experiment
 evidence *without* changing the engine contract or the frozen baseline.
@@ -613,9 +637,11 @@ m_conf(score):     0 below conf_floor (0.35 = estimator min_confidence), 1 at/ab
 effective          = clamp(requested · m_dev · m_conf, 0, max_effective_strength=1.0)
 ```
 
-How this reads PRD §10's bands (an interpretation for PM ratification, not
-a restatement): 0–5° "very light" → the multiplier ramps from 0.3 to 1;
-5–15° "normal" → 1; 15–25° "stronger" → 1, because the interpolation itself
+How this reads PRD §10's bands — an engineering interpretation carried by
+the approved SA, not a restatement of the PRD and not among the freeze's
+enumerated ratifications; the breakpoints stay tunable from M3 evidence, as
+PRD §10 itself allows ("Exact thresholds may change after testing"):
+0–5° "very light" → the multiplier ramps from 0.3 to 1; 5–15° "normal" → 1; 15–25° "stronger" → 1, because the interpolation itself
 already moves the iris further as the deviation grows (`s·Δ`), so no
 multiplier above 1 is introduced; 25–35° "reduce" → ramp to 0; > 35°
 "disable" → 0. A deadband near 0° (the ±10° error budget makes a 2°
@@ -1016,7 +1042,7 @@ may be attached there as PRD §25 evidence so the PM can see the effect;
 PO-capture renders are never committed and are shown to the PM only at the
 PO's discretion, out of band.
 
-### 14.3 Verdict (proposed structure; thresholds are for PM ratification, not asserted as objective)
+### 14.3 Verdict (framework PM-ratified; the per-dimension thresholds below are judgment aids, never objective pass scores)
 
 Evaluate at the **operating range** — measured or synthetic deviations of
 10–20° at effective strength 0.5–0.8 — across the PO captures with the
@@ -1053,7 +1079,7 @@ verified* **for the correction of frames captured by the target device's
 webcam, processed offline** — not for the live pipeline, which is M4's.
 Anything the PO could not perform is `NOT VERIFIED`.
 
-### 14.4 Product Owner budget (proposed; exceeds qa-policy §9's norm and is listed for PM ratification)
+### 14.4 Product Owner budget (PM-ratified; exceeds qa-policy §9's norm deliberately)
 
 The PO's role is to **capture and score**; the engineer runs the harness
 and prepares every sheet.
@@ -1066,8 +1092,9 @@ and prepares every sheet.
 | total | | **≈ 45–50 min**, in one batched session |
 
 This exceeds the 5–10 minute smoke-test norm of `docs/qa-policy.md` §9
-because M3 is the PRD's major quality gate, and it is flagged here so the PM
-can justify it before execution rather than discover it mid-session.
+because M3 is the PRD's major quality gate; the Product Manager ratified the
+budget on that basis at the freeze, so it is planned work rather than a
+surprise discovered mid-session.
 B-vs-C comparison (`--variant`), `--set` tuning and `pair_coupling`
 demonstrations are **not** part of the gate pass: they are ITERATE-round activities the PM
 authorises, prepared by the engineer as additional sheets. The step-by-step
