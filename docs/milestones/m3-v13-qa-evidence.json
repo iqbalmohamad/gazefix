@@ -1,0 +1,69 @@
+{
+  "reviewed_base": "dc7817715e703d82a8b178bffc41486a383a8372",
+  "tested_hardening_sha": "b48c8ccbeb5e1e9edfc6d654c5ab99596ab20ae2",
+  "deterministic_cases": 96,
+  "matrix": {
+    "fixtures": [
+      "default",
+      "realistic"
+    ],
+    "variants": [
+      "B",
+      "C"
+    ],
+    "distance_transforms": [
+      "precise guard 1.5",
+      "chamfer3 guard 2.5"
+    ],
+    "yaw_pitch_targets": [
+      [
+        10,
+        0
+      ],
+      [
+        60,
+        0
+      ],
+      [
+        0,
+        15
+      ],
+      [
+        10,
+        10
+      ]
+    ],
+    "effective_strengths": [
+      0,
+      0.75,
+      1
+    ]
+  },
+  "input_and_output_sha256_and_metadata_identical": true,
+  "before_manifest_sha256": "330ca0d61f82ca916029e164de07f5db5d7845dc5e1ef51f30a55a10c77f8d8d",
+  "after_manifest_sha256": "330ca0d61f82ca916029e164de07f5db5d7845dc5e1ef51f30a55a10c77f8d8d",
+  "unchanged_engine_and_tolerance_paths": [
+    "gazefix/correction/__init__.py",
+    "gazefix/correction/engine.py",
+    "gazefix/correction/geometric.py",
+    "gazefix/correction/geometry.py",
+    "gazefix/correction/masks.py",
+    "gazefix/correction/models.py",
+    "gazefix/correction/policy.py",
+    "tests/correction_fakes.py",
+    "tests/test_correction_warp.py"
+  ],
+  "verified_frozen_remote_refs": {
+    "main": "b40d74faef55811d67de258660b6040c7c8dc790",
+    "milestone-0": "3b0a2eee8b0fc207875702250955e78173857957",
+    "milestone-1": "097c4d69b9e7c7e8a2772445315ccb51a263dca7",
+    "milestone-2": "81e06118801c23d2337629fc676d6ad8ac13716a",
+    "architecture-v1": "003180d52d39d30a038333541b1b187824714e87",
+    "m3-architecture-v1": "a459e6be36122bf10ce707731d5f847007847e96",
+    "m3-architecture-v1.1": "00eed0e893b73dcd490f69af8df852a0609ccbaa",
+    "m3-architecture-v1.2": "6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93",
+    "m3-architecture-v1.3": "d91d393eb6e3e5f93ee2122bc840f776a55872e5"
+  },
+  "sa_prd_architecture_adrs_qa_unchanged": true,
+  "both_baselines_preserved_as_ancestors": true
+}
