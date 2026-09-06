@@ -3,15 +3,15 @@
 **Active assignment: Milestone 3 — Offline Gaze Correction Prototype
 (implementation)**
 
-**M3 implementation: ACTIVE — against SA v1.2**
+**M3 implementation: ACTIVE — against SA v1.3**
 
 **M0 / M1 / M2 status: PASS / CLOSED / FROZEN**
 
 **Overall architecture baseline (`architecture-v1`): APPROVED / FROZEN / CANONICAL**
 
-**M3 Solution Architecture (`m3-architecture-v1.2`): APPROVED / FROZEN / CANONICAL**
+**M3 Solution Architecture (`m3-architecture-v1.3`): APPROVED / FROZEN / CANONICAL**
 
-**Updated: 2026-09-05**
+**Updated: 2026-09-07**
 
 This file is an assignment pointer. The design is not repeated here: it lives
 in the frozen M3 Solution Architecture and is authoritative there.
@@ -20,32 +20,32 @@ in the frozen M3 Solution Architecture and is authoritative there.
 
 | Item | Value |
 | --- | --- |
-| **Canonical M3 SA** | **`m3-architecture-v1.2` @ `6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93`** |
+| **Canonical M3 SA** | **`m3-architecture-v1.3` @ `d91d393eb6e3e5f93ee2122bc840f776a55872e5`** |
 | SA document | `docs/milestones/m3-solution-architecture.md` (frozen at that SHA) |
 | Preferred implementation branch | `codex/m3-gaze-correction` |
-| Implementation lineage | preserve existing M3 work and incorporate the frozen SA v1.2 above |
+| Implementation lineage | preserve existing M3 work and incorporate the frozen SA v1.3 above |
 
-The existing implementation at `bf6f24c02a36060b901e71debce3547026e07613`
+The existing implementation at `dc7817715e703d82a8b178bffc41486a383a8372`
 on `codex/m3-gaze-correction` is preserved. This pointer update belongs on
 that implementation lineage; no separate assignment branch is created.
-Incorporate the frozen v1.2 baseline without discarding passing work.
+Incorporate the frozen v1.3 baseline without discarding passing work.
 
 ## Superseded implementation baselines — immutable history
 
 | Reference | SHA | Standing |
 | --- | --- | --- |
-| `m3-architecture-v1.2` | `6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93` | **implement against this** |
+| `m3-architecture-v1.3` | `d91d393eb6e3e5f93ee2122bc840f776a55872e5` | **implement against this** |
+| `m3-architecture-v1.2` | `6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93` | superseded for implementation; immutable history |
 | `m3-architecture-v1.1` | `00eed0e893b73dcd490f69af8df852a0609ccbaa` | superseded for implementation; immutable history |
 | `m3-architecture-v1` | `a459e6be36122bf10ce707731d5f847007847e96` | superseded for implementation; immutable history |
 | `codex/m3-assignment-v1.1` | `42fc15b3f54f130d7db7cb4078a91ed529281d1c` | superseded assignment pointer; retained |
 | `codex/m3-assignment` | `06c9c5926fde425c49c3776f5bfd110df18a9538` | superseded assignment pointer; retained |
 
-v1.2 adds **Amendment A2** to v1.1. Implement the specified sclera-background
-representation in variant C so its background does not retain competing
-source-iris texture; variant B stays unchanged. Preserve A1 compositing,
-binary source/destination occlusion, lid safety, ownership and atomic
-fallback. Read SA §8.8 and use its frozen visible-centroid ideal and A2
-regression coverage. No new ADR or dependency is required.
+v1.3 adds **Amendment A3** to v1.2: test-contract tolerances and the
+R-transpose discriminator only. A3.1/A3.2 ratify the shipped centroid bounds;
+do not change them. A3.3 tightens the two rotated-head closed-loop rows to
+±0.25 degrees and requires an R-for-R-transpose mutant to fail. Production
+geometry, A1/A2 compositing, ownership and all architecture boundaries remain.
 
 ## Frozen repository state
 
@@ -59,8 +59,9 @@ regression coverage. No new ADR or dependency is required.
 | `m3-architecture-v1` | `a459e6be36122bf10ce707731d5f847007847e96` |
 | `m3-architecture-v1.1` | `00eed0e893b73dcd490f69af8df852a0609ccbaa` |
 | `m3-architecture-v1.2` | `6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93` |
+| `m3-architecture-v1.3` | `d91d393eb6e3e5f93ee2122bc840f776a55872e5` |
 
-All eight are frozen: do not advance, rewrite, force-push, or merge into any
+All nine are frozen: do not advance, rewrite, force-push, or merge into any
 of them. `claude/m3-solution-architecture` and PR #7 are the retained M3 SA
 review record; `claude/m3-sa-blend-amendment` is the A1 amendment branch.
 Neither is a work branch.
@@ -70,7 +71,7 @@ bootstrap case in `docs/architecture.md`) remains accepted and out of scope.
 
 ## What M3 implements
 
-Build the offline gaze-correction prototype **exactly as frozen SA v1.2
+Build the offline gaze-correction prototype **exactly as frozen SA v1.3
 specifies**: the `gazefix/correction/` package (engine protocol, metadata-only
 result contract, geometric engine, eye-region geometry, mask/blend library,
 correction policy), the offline harness CLI and its `scripts/` wrapper, the
@@ -98,7 +99,7 @@ remain immutable.
    constraints, milestone gates.
 2. `docs/architecture.md` and the accepted ADRs (`docs/decisions/`) — frozen
    architecture.
-3. `docs/milestones/m3-solution-architecture.md` **at SA v1.2** — the M3
+3. `docs/milestones/m3-solution-architecture.md` **at SA v1.3** — the M3
    design to implement.
 4. `docs/qa-policy.md` — verification depth, stopping rules, Product Owner
    interaction budget.
@@ -126,11 +127,28 @@ remain immutable.
 - Codex — M3 implementation engineer for this assignment, with self-review and
   automated tests per `docs/qa-policy.md`.
 
-## Next step
+## Active post-QA scope (2026-09-07)
 
-Resume on `codex/m3-gaze-correction`: implement A2, run focused tests, fix
-ordinary implementation issues autonomously, complete the M3 test matrix,
-run the full regression suite per QA policy, and prepare the complete offline
-visual-evaluation batch. Stop when M3 is ready for PO evaluation or a genuine
-architecture/product blocker remains. Do not report PASS before the PO gate.
-Do not begin M4.
+Close confirmed QA findings only on the existing implementation branch:
+
+- QA-M3-002: tighten the rotated-head closed-loop rows per A3.3 and prove
+  that an R-for-R-transpose mutant fails; do not change production geometry
+  unless a real defect is reproduced.
+- QA-M3-003: engine-level behavioral anchors for clamp state and magnitude,
+  independent displacement recomputation, and target-versus-gaze centroid direction.
+- QA-M3-004: engine-output A1 regression and default-linear source/lid-skin tracer.
+- QA-M3-005: engine-level chamfer3 coverage with the accepted guard and safety
+  assertions; change product behavior only if a defect is reproduced.
+- QA-M3-007: count each tracking-error frame once, irrespective of sweep size;
+  preserve exit semantics and every experiment record.
+- QA-M3-006: informational only; no product change required.
+
+Do not redesign the correction algorithm or discard passing work. After
+changes run targeted tests, the full focused M3 suite, full regression and the
+real-model M3 test. Verify unchanged correction pixels on deterministic inputs
+and verify all frozen refs untouched. Report the final SHA, changed files,
+closed findings and verification at their true level.
+
+Stop at **M3 QA HARDENING COMPLETE — READY FOR TARGETED RE-REVIEW** or
+**M3 QA HARDENING BLOCKED**. Do not claim M3 PASS. Stop before the PO visual
+gate; no M4 or later-milestone work.
