@@ -1,23 +1,27 @@
 # Milestone 3 — Solution Architecture: Offline Gaze Correction Prototype
 
-**Status:** **APPROVED / FROZEN — amended (A1, A2)** — approved by the Product
-Manager on 2026-09-05, frozen as the canonical M3 Solution Architecture, and
-amended twice since, narrowly, under PM approval: **A1** corrects the §8.4
-compositing order (§8.7); **A2** stops the variant-C background from
-retaining a competing source iris (§8.8). Design only:
-no M3 code exists, and this document does not authorize M3 implementation
-(the Product Manager issues that assignment separately). Amend only through a
-deliberate, PM-authorized revision of this document or a new ADR — never by
-silent edits during implementation, the rule ADR-0002 and ADR-0003 already
-carry.
+**Status:** **APPROVED / FROZEN — amended (A1, A2, A3)** — approved by the
+Product Manager on 2026-09-05, frozen as the canonical M3 Solution
+Architecture, and amended three times since, narrowly, under PM approval:
+**A1** corrects the §8.4 compositing order (§8.7); **A2** stops the variant-C
+background from retaining a competing source iris (§8.8); **A3** ratifies two
+raster-measured centroid tolerances and repairs the `Rᵀ` discriminator in the
+§15.2 test matrix (§15.3). A1 and A2 amended the design; **A3 amends only the
+test contract and the rationale behind it — no product behaviour, algorithm,
+constant, contract, dependency or M3/M4 boundary moves with it.** Design
+only: this document does not itself authorize M3 implementation (the Product
+Manager issues that assignment separately), and no M3 code existed when it
+was first frozen. Amend only through a deliberate, PM-authorized revision of
+this document or a new ADR — never by silent edits during implementation, the
+rule ADR-0002 and ADR-0003 already carry.
 
 | Freeze record | Value |
 | --- | --- |
 | Reviewed SA content | `28dac348749e956acbeb709e3abb4ff3654451d5` (the HEAD the Product Manager reviewed) |
 | Original frozen reference | branch `m3-architecture-v1` @ `a459e6be36122bf10ce707731d5f847007847e96` — unchanged and still immutable; superseded as the implementation baseline by A1 |
-| **Canonical frozen reference** | branch **`m3-architecture-v1.2`** — this commit: `m3-architecture-v1` plus Amendments A1 (§8.7) and A2 (§8.8), and nothing else |
-| Superseded canonical | `m3-architecture-v1.1` @ `00eed0e893b73dcd490f69af8df852a0609ccbaa` — unchanged and still immutable |
-| Amendments | **A1** (2026-09-05, PM-approved): §8.4 compositing order — §8.7. **A2** (2026-09-05, PM-approved): the variant-C background becomes a sclera plate that carries no iris — §8.8. Each record holds its evidence, the before/after, the rationale and the required regression coverage |
+| **Canonical frozen reference** | branch **`m3-architecture-v1.3`** — this commit: `m3-architecture-v1` plus Amendments A1 (§8.7), A2 (§8.8) and A3 (§15.3), and nothing else |
+| Superseded canonical | `m3-architecture-v1.1` @ `00eed0e893b73dcd490f69af8df852a0609ccbaa` and `m3-architecture-v1.2` @ `6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93` — both unchanged and still immutable |
+| Amendments | **A1** (2026-09-05, PM-approved): §8.4 compositing order — §8.7. **A2** (2026-09-05, PM-approved): the variant-C background becomes a sclera plate that carries no iris — §8.8. **A3** (2026-09-06, PM-approved): two §15.2 centroid tolerances are restated on their measured raster basis and the §15.2 `Rᵀ` discriminator is repaired — §15.3; test contract and rationale only. Each record holds its evidence, the before/after, the rationale and the required regression coverage |
 | Review record | PR #7 against `architecture-v1`; closed, not merged |
 | Written / corrected | 2026-09-05, after an eight-lens adversarial review of the first draft (50 confirmed findings applied) |
 | Role | Solution Architect / Principal Engineer |
@@ -1020,8 +1024,12 @@ tolerance.
 
 **What the tolerance is and is not.** Simulation puts a correct
 implementation within **0.02–0.47 px** of the geometric ideal on every row of
-both fixtures, so §15.2 asserts a single absolute tolerance (± 0.75 px)
-around the ideal rather than a ratio. The residual is systematic and
+both fixtures, so §15.2 asserts an absolute tolerance around the ideal
+rather than a ratio: **± 0.75 px**, which implementation measurement later
+widened to **± 1.0 px on the realistic fixture's two vertical rows alone**
+(Amendment A3, §15.3 — the simulation behind the 0.02–0.47 px figure modelled
+neither `fillPoly` rasterisation nor A1's conservative all-four-tap source
+cutoff, and the real raster reaches 0.8253–0.8732 px there). The residual is systematic and
 one-signed: A1's conservative source-coverage rule drops the trailing
 crescent, so the achieved centroid sits slightly *beyond* the ideal (Q14).
 The tolerance is calibrated for the two named fixtures and asserted only
@@ -1061,8 +1069,10 @@ the ideal — §24 Q14.
    iris-tone pixel lies within the destination disc dilated by 1 px. This is
    the threshold-free assertion that pins the defect on every clipped case;
 3. visible-centroid movement within ± 0.75 px of the geometric ideal on both
-   fixtures, with the v1.1 background as the negative control — quantitative
-   support for item 2, fixture-bound (see above);
+   fixtures — ± 1.0 px on the realistic fixture's two vertical rows (A3,
+   §15.3) — with the v1.1 background as the negative control, which the
+   widened bound still rejects on every row; quantitative support for item 2,
+   fixture-bound (see above);
 4. variant B is untouched by A2 — its output is bit-identical with the plate
    code path present;
 5. the plate never writes outside the opening, and the §8.2 lid-safety bound
@@ -1465,7 +1475,7 @@ per case rather than as one number.
 | contract | `CorrectionResult` semantics (`test_correction_models`) | frozen; `compositing_ms ≤ correction_ms`; messages from the §10.3 vocabulary; `eyes` has exactly two entries (right, left) once per-eye evaluation ran; `strength` echoes valid input and is 0.0 on `invalid strength` |
 | contract | repeatability | the same frame and result twice → bitwise identical outputs and equal results |
 | mapping | closed-loop, frontal head (`test_correction_geometry`) | scene at eye yaw 15°, target 0, `s=1`: shift the scene's iris landmarks by the engine's `d`, re-run the estimator (smoothing 0) → recovered eye yaw within ~1° of 0; likewise pitch; `s=0.5` → half |
-| mapping | closed-loop **under head rotation** (the `Rᵀ` discriminator) | `gaze_scene(head_yaw_deg=20)` and separately `head_pitch_deg=20`, eyes fixating the camera, target = camera-frame yaw +10° (resp. pitch +10°), `s=1`: shift the iris landmarks by `d`, re-estimate → recovered camera-frame gaze within ~1.5° of the target. Using `R` instead of `Rᵀ` rotates the head-frame Δ by ~40° and fails by several degrees. (A Δ≈0 sanity case may be kept with a tolerance derived from the estimator's documented ~1.3° fixating-subject residual — ≈ 1 px at half-width 45 — and is *not* the transpose test) |
+| mapping | closed-loop **under head rotation** (the `Rᵀ` discriminator; tolerance *A3*) | `gaze_scene(head_yaw_deg=20)` and separately `head_pitch_deg=20`, eyes fixating the camera, target = camera-frame yaw +10° (resp. pitch +10°), `s=1`: shift the iris landmarks by `d`, re-estimate → recovered camera-frame gaze within **± 0.25°** of the target. The tight bound is what makes this row discriminate, and it is affordable because the closed loop is near-exact: it measures a *difference*, in which the estimator's own fixating-subject bias cancels, so a correct implementation lands within **0.00003°** (measured, both rows, both eyes). Using `R` in place of `Rᵀ` rotates the head-frame Δ by ~40°, but Δ is small at these angles, so the recovered gaze misses by **0.594°** (yaw row) and **0.677°** (pitch row) — several *tenths* of a degree, not the "several degrees" the pre-implementation text claimed. ± 0.25° therefore rejects the mutant with a 2.4× margin while leaving four orders of magnitude of headroom over the genuine residual; the superseded ~1.5° bound admitted the mutant on both rows and did not discriminate at all (§15.3). Equivalent alternative, if a future estimator change raises the genuine residual: keep ~1.5° and move the two rows to `head_yaw_deg=30` / `head_pitch_deg=30` with target ±15°, where the `R` error grows to 1.779° / 2.473°. (A Δ≈0 sanity case may be kept with a tolerance derived from the estimator's documented ~1.3° fixating-subject residual — ≈ 1 px at half-width 45 — and is *not* the transpose test, and does **not** take the ± 0.25° bound) |
 | mapping | sign conventions | looking subject's-left (image right) → `dx < 0`; looking down → `dy < 0` (image up); frontal head |
 | mapping | eye-size scaling | same scene at `pixels_per_mm` 2 and 4 → `|d|` doubles |
 | mapping | clamp | absurd target (`s` forced, 60° away): the geometry helper returns `|d| == max_fraction·half_width` with `clamped=True` (asserted on the helper's return value, since a containment skip that follows would zero `displacement_px` on the result) |
@@ -1480,12 +1490,12 @@ per case rather than as one number.
 | warp | eye order does not matter (*A1*) | the §8.4 blend helper applied to the two eyes in either order, into copies of the same canvas, gives bit-identical results (asserted at the helper level: the engine's own order is fixed right-then-left by §10.1 and is not a setting) |
 | warp | sampling stays inside the opening | with the default precise distance transform and `field_guard_px = 1.5`: for every `p` with `w(p) > 0`, the four pixels of the bilinear footprint of `p − D(p)` have `opening_mask == 1` (§8.2 discrete bound); repeated with a 3×3 chamfer mask and `field_guard_px = 2.5` |
 | warp | **exactly one iris (*A2*, primary)** | in the corrected output, every **non-sclera tone** (iris, pupil or catchlight) inside the opening lies within the destination disc dilated by 1 px — no remnant at the source position, and a moved pupil or catchlight cannot slip through an iris-tone-only test. The one permitted exception is §8.5's lid-ramp remnant: pixels with `0 < alpha < 1` may retain at most `(1 − alpha)` of the original, asserted as a bound rather than waived. Threshold-free and the primary discriminator of the A2 defect: the v1.1 background fails it on every clipped case, including the horizontal ones where the centroid is insensitive. Realistic fixture, vertical and horizontal, 10° and 15° |
-| warp | the iris actually moves — variant C (*A2*) | both fixtures, vertical and horizontal, 10° and 15°: the visible-iris centroid moves in the right direction and within **± 0.75 px of `visible_centroid_ideal`** (§15.1). One rule for every row, because the ideal already absorbs lid clipping — on the unclipped default fixture it is ≈ `d`, on the realistic fixture's vertical rows it is roughly half of it. Measured deviation of a correct implementation is 0.02–0.47 px, one-signed (A1's source rule drops the trailing crescent, Q14). Negative control: the v1.1 background (sampling `roi_src` instead of the plate) misses the ideal by 2.1–3.6 px on the realistic fixture and must fail every row. Fixture-bound by construction (§8.8), so this is a regression check, not a general acceptance criterion; the structural row above is what pins the defect |
+| warp | the iris actually moves — variant C (*A2*; tolerances *A3*) | both fixtures, vertical and horizontal, 10° and 15°: the visible-iris centroid moves in the right direction and within **± 0.75 px of `visible_centroid_ideal`** (§15.1) — **except the realistic fixture's two vertical rows (10° and 15°), which assert ± 1.0 px** (A3, §15.3). The ideal already absorbs lid clipping, so one rule very nearly covers every row — on the unclipped default fixture it is ≈ `d`, on the realistic fixture's vertical rows it is roughly half of it. Measured deviation of a correct implementation: **0.0486–0.4069 px on the six ± 0.75 px rows**, and **0.8732 px (vertical 10°) / 0.8253 px (vertical 15°)** on the two relaxed ones, where `fillPoly` rasterisation and A1's all-four-tap source cutoff — neither modelled in the pre-implementation simulation that produced the 0.02–0.47 px figure — dominate the residual. The residual stays one-signed and lies *beyond* the ideal (A1's source rule drops the trailing crescent, Q14), so the wider bound cannot hide under-movement, which is the failure direction that matters. Negative control: the v1.1 background (sampling `roi_src` instead of the plate) misses the ideal by **1.12–3.35 px** on the realistic fixture and must fail every row — rejected by 1.04 px and 2.35 px on the two relaxed vertical rows, and by 0.37 px on the tightest row of all (horizontal 10°: control 1.1243 px against ± 0.75). Fixture-bound by construction (§8.8), so this is a regression check, not a general acceptance criterion; the structural row above is what pins the defect |
 | warp | background carries no iris (*A2*) | the `sclera_plate` contains **no non-sclera tone** inside the iris hole — iris, pupil and catchlight are all distinct flat tones in the §15.1 renderer, so the test keys on "not the sclera tone" rather than on the iris tone alone — and is bit-identical to `roi_src` everywhere outside the hole |
 | warp | variant B untouched by A2 (*A2*) | with `iris_layer = False` the output equals `alpha·remap(roi_src) + (1 − alpha)·canvas` computed inline in the test, bit-for-bit, and the plate builder is never invoked (assert with a spy) — variant B samples the raw source, as before A2 |
 | warp | plate safety (*A2*) | the plate writes no pixel outside `opening_mask`, and the §8.2 footprint bound still holds when the field samples the plate |
 | warp | fill fallbacks (*A2*) | on the realistic fixture with a horizontally deviated gaze, a scan-line whose hole reaches the opening edge on one side replicates the other side, and a line near the lens apex with no non-hole interior pixel uses the median interior colour; a synthetic eye whose iris fills the whole opening yields **no** sclera anywhere and must return `FAILED (mask generation failed: …)` with the input frame, never an invented colour. All three exercised deterministically |
-| warp | the iris actually moves — variant B | default fixture, horizontal 10°/15° and vertical 10°: `d ± 1 px`. Realistic fixture, vertical 15°: correct direction only — B compresses the iris against the lid by design (§4.1) and reaches ≈ 0.66 px against a geometric ideal of 4.77, so no centroid floor is asserted for it; the frozen `0.6·|d|` floor on this row is withdrawn as unreachable and the reason is recorded in §8.8 |
+| warp | the iris actually moves — variant B (tolerance *A3*) | default fixture, horizontal 10°/15°: `d ± 1 px` (measured 0.2735 px and 0.7354 px). Default fixture, vertical 10°: **`d ± 1.5 px`** (A3, §15.3) — B moves 4.7911 px against a 6.2513 px command, an error of **1.4603 px**, because compressing the iris against the lid is B's *designed* weakness (§4.1), not a defect; B's field is frozen unchanged by A2 and A3 alike, so this row records B's behaviour rather than tuning it. Realistic fixture, vertical 15°: correct direction only — B compresses the iris against the lid by design (§4.1) and reaches ≈ 0.66 px against a geometric ideal of 4.77, so no centroid floor is asserted for it; the frozen `0.6·|d|` floor on this row is withdrawn as unreachable and the reason is recorded in §8.8 |
 | warp | B vs C occlusion | vertical 15° on the realistic fixture: C's visible-centroid displacement exceeds B's by a clear margin, and C keeps iris texture where B compresses |
 | warp | iris layer opaque at centre | at the destination iris centre and its 3×3 neighbourhood, output equals `frame(p − d)` within interpolation tolerance (variant C) |
 | warp | no ghosting near the lid (*A1*) | vertical move bringing the moved iris under the upper lid: at pixels inside the moved disc (`iris_alpha ≥ 1 − 1e-6`; assert the set is **non-empty** so the row cannot pass vacuously) that lie in the partial-alpha band along the lid (`0.5 < alpha < 1`), output equals `frame(p − d)` within tolerance — the moved iris is not mixed with the unmoved original. **Negative control: the superseded pre-A1 order** (`alpha·(iris_alpha·iris_layer + (1−iris_alpha)·background) + (1−alpha)·canvas`), computed inline in the test, must violate it on at least one selected pixel. (The old `edge_px = 4` control is void under A1 — a wide feather no longer dilutes an opaque iris; `edge_px` is still exercised by the sclera-dilution check below) |
@@ -1509,6 +1519,102 @@ per case rather than as one number.
 Determinism: engine math is pure NumPy/OpenCV with no randomness; tests
 avoid asserting exact pixel values except through the centroid/unchanged-
 region properties above. One full-suite run before handoff (QA policy §6).
+
+### 15.3 Amendment A3 — three §15.2 tolerances restated on measured evidence (2026-09-06, PM-approved)
+
+**Scope.** This amendment touches the **test contract and its rationale only**.
+No product behaviour, algorithm, formula, constant, default, contract, ADR,
+dependency or M3/M4 boundary changes with it; A1 and A2 are untouched; the
+analytic `visible_centroid_ideal` of §15.1 is untouched; and the
+threshold-free **"exactly one iris"** row remains the primary discriminator of
+the A2 defect. Three numbers in §15.2 move, and nothing else.
+
+**Why an amendment was needed.** Two of the tolerances in §15.2 were derived
+from a pre-implementation geometric simulation, and one rationale was derived
+from an unchecked estimate. Implementation measurement — reproduced
+independently during M3 implementation QA — showed all three were wrong in a
+way that mattered: two were unachievably tight for reasons the simulation
+could not see, and one was so loose that the row it governed did not test what
+it was written to test. Leaving them unamended would have frozen a canonical
+test contract the repository could not run, which is precisely the failure
+mode A1 and A2 exist to prevent.
+
+**Evidence.** All figures below are measured on the §15.1 fixtures through the
+shipped engine and reproduced independently by the reviewer. Errors are
+against `visible_centroid_ideal` for variant C and against the commanded `d`
+for variant B, and the larger of the two eyes is reported. The rejected
+variant is the v1.1 raw-source background for the centroid rows and the `R`
+substitution for the transpose rows.
+
+| Case | Frozen bound | Measured, correct implementation | Variant that must be rejected | Ratified bound |
+| --- | --- | --- | --- | --- |
+| C, realistic, horizontal 10° / 15° | ± 0.75 px | 0.3805 / 0.4069 px | 1.1243 / 2.0913 px | ± 0.75 px (**unchanged**) |
+| C, realistic, **vertical 10° / 15°** | ± 0.75 px | **0.8732 / 0.8253 px** | 2.0392 / 3.3534 px | **± 1.0 px** |
+| C, default, all four rows | ± 0.75 px | 0.0486–0.3012 px | — | ± 0.75 px (**unchanged**) |
+| B, default, horizontal 10° / 15° | `d` ± 1 px | 0.2735 / 0.7354 px | — | `d` ± 1 px (**unchanged**) |
+| B, default, **vertical 10°** | `d` ± 1 px | **1.4603 px** | — | **`d` ± 1.5 px** |
+| `Rᵀ` closed loop, head 20° / target 10° | ~1.5° | 0.00003° | `R` mutant: 0.594° / 0.677° | **± 0.25°** |
+| `Rᵀ` closed loop, head 30° / target 15° | *(not asserted)* | 0.00003° | `R` mutant: 1.779° / 2.473° | *(recorded alternative)* |
+
+**A3.1 — variant C, realistic fixture, vertical rows: ± 0.75 px → ± 1.0 px.**
+The simulation that produced the 0.02–0.47 px expectation modelled the
+geometry but not the raster: it did not model `fillPoly` polygon
+rasterisation, and it did not model A1's conservative all-four-tap source
+cutoff, which removes the trailing crescent of an upward-moved iris (Q14). On
+the clipped realistic anatomy those two effects dominate the residual and push
+the two vertical rows to 0.8253–0.8732 px. The bound is therefore restated on
+its real raster basis. This is not a weakening for three reasons, each checked
+rather than asserted: the residual is **one-signed and lies beyond the ideal**,
+so the wider bound admits only *over*-movement in the crescent-drop direction
+and cannot hide the under-movement a real defect produces; the v1.1 negative
+control still **fails both relaxed rows by 1.04 px and 2.35 px**; and the
+structural "exactly one iris" row, which needs no threshold at all, is
+unchanged. All six other C rows keep ± 0.75 px and clear it by at least
+0.34 px.
+
+**A3.2 — variant B, default fixture, vertical 10°: `d` ± 1 px → `d` ± 1.5 px.**
+Variant B is the field-only baseline. It compresses the iris against the lid
+instead of translating it, which §4.1 names as B's designed weakness and the
+whole reason variant C exists; on this row it moves 4.7911 px against a
+6.2513 px command. The frozen `d` ± 1 px bound implicitly required B to behave
+like C. The bound is restated to record B's actual designed behaviour.
+**B's warp field is frozen and was not tuned to meet it** — A2 left B
+untouched and A3 leaves B untouched; the row is a regression check on B, and
+the meaningful quality comparison remains the C-versus-B row.
+
+**A3.3 — the `Rᵀ` discriminator: ~1.5° → ± 0.25°.** The frozen row asserted a
+~1.5° tolerance and justified it with the claim that using `R` in place of
+`Rᵀ` "fails by several degrees". The first half of the reasoning is right —
+the substitution does rotate the head-frame Δ by ~40° at a 20° head angle —
+but the conclusion does not follow, because Δ itself is small at these angles.
+Measured, the `R` mutant misses by 0.594° (yaw row) and 0.677° (pitch row):
+several *tenths* of a degree, comfortably inside ~1.5°. The row designated as
+*the* transpose discriminator therefore admitted the very mutant it existed to
+catch, which mutation testing during M3 QA confirmed by running the `R`
+variant against the full suite with every test still passing. The bound
+becomes ± 0.25°. It is affordable because the closed loop measures a
+*difference*, in which the estimator's ~1.3° fixating-subject bias cancels:
+the genuine residual is 0.00003°, four orders of magnitude below the new
+bound, while the mutant is rejected with a 2.4× margin. The alternative the
+evidence also supports — keeping ~1.5° and moving the rows to head 30° /
+target 15°, where the mutant errors grow to 1.779° / 2.473° — is recorded in
+the row as the fallback should a future estimator change raise the genuine
+residual. The separate Δ≈0 sanity case keeps its own looser tolerance and is
+explicitly excluded from the ± 0.25° bound.
+
+**Required regression coverage** (in §15.2, marked *A3*):
+
+1. the three tolerances above, asserted per row exactly as tabulated — the
+   relaxations are **row-scoped**, and the eight rows not named here keep their
+   frozen bounds;
+2. the v1.1 background negative control continues to fail **every** realistic
+   variant-C row under the widened bound, including the two relaxed vertical
+   rows;
+3. the `Rᵀ` rows genuinely discriminate: substituting `R` for `Rᵀ` must fail
+   them. A mutation check is the honest way to keep this true, and is what
+   caught the original defect;
+4. nothing in A3 relaxes the structural "exactly one iris" row, the plate-safety
+   rows, the A1 no-ghosting row, or any contract, failure or boundary row.
 
 ---
 
@@ -1672,7 +1778,7 @@ Four items are flagged to the PM as *observations*, not amendments:
 | harness inputs/outputs/report contents, no camera, unmirror, video justification and limits, injectable factory | §12 |
 | debug artifacts recomputed by the harness, `CorrectionDebug` as the only dev carrier | §13, §16 |
 | gate matrix, scoring sheet, verdicts, PO budget | §14 |
-| test matrix and fixture strategy | §15 |
+| test matrix and fixture strategy, including the A3 tolerances and the `Rᵀ` discriminator bound | §15, §15.3 |
 | module layout and import rules | §18 |
 
 Left to the implementor (ordinary engineering): helper and field names
