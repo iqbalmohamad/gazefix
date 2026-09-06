@@ -219,7 +219,7 @@ def repository_provenance():
             return subprocess.check_output(["git","-C",str(root),*args],text=True,
                 stderr=subprocess.DEVNULL,timeout=5).strip()
         return {"head":git("rev-parse","HEAD"),"tracked_changes":bool(git("status","--porcelain","--untracked-files=no")),
-                "m3_sa":"m3-architecture-v1.2 @ 6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93"}
+                "m3_sa":"m3-architecture-v1.3 @ d91d393eb6e3e5f93ee2122bc840f776a55872e5"}
     except (OSError,subprocess.SubprocessError):
         return {"head":None,"tracked_changes":None}
 
@@ -319,6 +319,8 @@ def main(argv=None, tracker_factory=None):
                 if size: frame=image_canvas(frame,*size,args.face_scale)
                 frame.setflags(write=False)
                 tr=analyse_frame(tracker,estimator,stabilizer,frame,index+1,max(index+1,int(index*1000/fps)+1),app)
+                # Tracking runs once per input frame, independent of sweep size.
+                if tr.status.value=="error": failures+=1
                 for n,(strength,yaw,pitch) in enumerate(itertools.product(*sweeps)):
                     target=direction_from_angles(yaw,pitch)
                     decision=resolve_effective_strength(strength,tr.gaze,target,settings["policy"])
@@ -336,7 +338,6 @@ def main(argv=None, tracker_factory=None):
                            "target":{"yaw":yaw,"pitch":pitch},"timings":_percentiles(repeats)}
                     if output.result.status is CorrectionStatus.FAILED:
                         failures+=1; print(f"frame {index}: {output.result.message}",file=sys.stderr)
-                    if tr.status.value=="error": failures+=1
                     label=f"s={strength:g} effective={decision.effective_strength:.3f} yaw={yaw:g} pitch={pitch:g} {output.result.status.value}"
                     sheet=comparison(frame,output.frame,tr,label)
                     images={"corrected":output.frame,"side_by_side":sheet}

@@ -114,3 +114,33 @@ def test_analysis_quality_rule():
     estimator=GeometricGazeEstimator(GazeSettings(smoothing=0))
     tr=analyse_frame(tracker,estimator,LandmarkStabilizer(0),frame,1,1,replace(AppSettings(),tracking_min_eye_width_px=100))
     assert tr.status.value=="low_quality" and "right eye" in tr.message
+
+
+@pytest.mark.parametrize("sweep,expected_records", [([],1),
+    (["--sweep-strength",".25,.5,.75","--sweep-target-yaw","0,10"],6)])
+def test_tracking_error_count_is_per_frame(source,tmp_path,sweep,expected_records):
+    class BrokenTracker(FakeTracker):
+        calls=0
+        def detect(self,frame,ts):
+            self.calls+=1
+            raise RuntimeError("tracking failure for this frame")
+    tracker=BrokenTracker()
+    assert main(args(source,tmp_path)+sweep+["--repeat","3"],tracker_factory=lambda _:tracker)==1
+    report=json.loads((tmp_path/"run"/"report.json").read_text())
+    records=[json.loads(line) for line in (tmp_path/"run"/"frames.jsonl").read_text().splitlines()]
+    assert tracker.calls==1 and tracker.closed and report["frame_count"]==1
+    assert report["failures"]==1
+    assert len(report["experiments"])==len(records)==expected_records
+    assert all(e["tracking"]["status"]=="error" and e["correction"]["status"]=="skipped" for e in records)
+
+
+def test_engine_error_count_stays_per_experiment(source,tmp_path,monkeypatch):
+    from gazefix.correction.geometric import GeometricCorrectionEngine
+    def fail(*args): raise RuntimeError("engine failure")
+    monkeypatch.setattr(GeometricCorrectionEngine,"correct",fail)
+    assert main(args(source,tmp_path)+["--sweep-strength",".25,.5,.75","--repeat","3"],
+                tracker_factory=lambda _:FakeTracker())==1
+    report=json.loads((tmp_path/"run"/"report.json").read_text())
+    assert report["frame_count"]==1 and report["failures"]==3
+    assert len(report["experiments"])==3
+    assert all(e["correction"]["status"]=="failed" for e in report["experiments"])

@@ -1,8 +1,10 @@
-# Offline gaze correction (M3, SA v1.2)
+# Offline gaze correction (M3, SA v1.3)
 
-The A1/A2 implementation is ready for Product Owner visual evaluation.
-See `milestones/m3-v12-implementation-report.md` for engineering evidence and
-`milestones/m3-po-checklist.md` for the single capture-and-score session.
+Post-QA hardening targets the confirmed findings on SA v1.3; see
+`milestones/m3-v13-qa-hardening-report.md` for verification and targeted
+re-review status. The earlier A1/A2 evidence remains in
+`milestones/m3-v12-implementation-report.md`. Stop before the PO visual gate
+until the targeted re-review is complete.
 No M3 PASS or M4 readiness is implied by an individual frame's CORRECTED status.
 
 ## Boundary and ownership
@@ -68,7 +70,7 @@ destination iris plus a one-pixel fringe. The only permitted original remnant
 is the bounded `(1-alpha)` contribution in the partial-alpha lid ring.
 Independent supersampled geometric centroids account for occlusion; actual
 raster-specific tolerances and their measured basis are recorded in the
-implementation report under the user's implementation/tuning authority.
+implementation report and ratified without change by SA v1.3 A3.1/A3.2.
 The old raw-background variant C fails both structural and centroid controls.
 
 The cubic background experiment falls back to linear sampling wherever its
@@ -152,6 +154,9 @@ directories. No capture, upload or automatic quality verdict is performed.
 Exit codes: 0 means artifacts were written without an engine/tracking error
 (expected safe skips are permitted); 1 means an input/backend/rendering/I/O
 failure; 2 means invalid arguments. Exit 0 is not a milestone verdict.
+Tracking errors are counted once per analyzed frame, independent of sweep
+size; each sweep experiment still retains its own record. Engine failures
+remain counted per experiment.
 
 ## Verification and measurement boundaries
 

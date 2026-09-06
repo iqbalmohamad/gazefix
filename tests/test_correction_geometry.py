@@ -25,8 +25,24 @@ def test_closed_loop(head_yaw, head_pitch, eye_yaw, eye_pitch, target_yaw, targe
         iris[:, :2] += d / (tr.geometry.width, tr.geometry.height)
         updates[side + "_eye"] = replace(eye, iris=iris)
     recovered = GeometricGazeEstimator(GazeSettings(smoothing=0)).estimate(replace(tr, **updates))
-    assert recovered.yaw_deg == pytest.approx(tr.gaze.yaw_deg + strength*(target_yaw-tr.gaze.yaw_deg), abs=1.5)
-    assert recovered.pitch_deg == pytest.approx(tr.gaze.pitch_deg + strength*(target_pitch-tr.gaze.pitch_deg), abs=1.5)
+    # A3.3 applies only to the two nonzero rotated-head target rows.
+    tolerance = .25 if head_yaw or head_pitch else 1.5
+    assert recovered.yaw_deg == pytest.approx(tr.gaze.yaw_deg + strength*(target_yaw-tr.gaze.yaw_deg), abs=tolerance)
+    assert recovered.pitch_deg == pytest.approx(tr.gaze.pitch_deg + strength*(target_pitch-tr.gaze.pitch_deg), abs=tolerance)
+
+
+@pytest.mark.parametrize("case", [(20, 0, -20, 0, 10, 0, 1), (0, 20, 0, 20, 0, 10, 1)])
+def test_rotated_closed_loop_rejects_r_for_transpose(monkeypatch, case):
+    original = geo.head_change
+    def mutant(tracking, target, strength, min_cos):
+        # With pose angles unchanged, supplying R.T to the real function
+        # changes only its R.T @ delta into R @ delta. Cosine factors stay fixed.
+        mutated_pose = replace(tracking.pose, rotation=tracking.pose.rotation.T)
+        return original(replace(tracking, pose=mutated_pose), target, strength, min_cos)
+    test_closed_loop(*case)
+    monkeypatch.setattr(geo, "head_change", mutant)
+    with pytest.raises(AssertionError):
+        test_closed_loop(*case)
 
 
 def test_sign_scaling_clamp_and_no_pose():

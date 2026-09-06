@@ -92,7 +92,8 @@ def test_nonfinite_or_empty_mask_falls_back(monkeypatch,empty):
 
 
 @pytest.mark.parametrize("layered",[False,True])
-def test_cubic_experiment_keeps_lid_skin_out(layered):
+@pytest.mark.parametrize("interpolation",["linear","cubic"])
+def test_interpolation_keeps_lid_skin_out(layered,interpolation):
     tr=correction_scene(realistic=True);frame=render_eyes(tr)
     union=np.zeros(frame.shape[:2],np.uint8)
     for side in ("right","left"):
@@ -100,7 +101,7 @@ def test_cubic_experiment_keeps_lid_skin_out(layered):
         cv2.fillPoly(union,[np.rint(g.opening*256).astype(np.int32)],1,shift=8)
     # Blue tracer appears exclusively in skin, irrespective of sclera texture.
     frame[...,0]=np.where(union,0,255)
-    out=Engine(Settings(iris_layer=layered,interpolation="cubic")).correct(frame,tr,direction_from_angles(10,10),1)
+    out=Engine(Settings(iris_layer=layered,interpolation=interpolation)).correct(frame,tr,direction_from_angles(10,10),1)
     assert out.result.status.value=="corrected"
     assert not out.frame[...,0][union==1].any()
     assert np.array_equal(out.frame[union==0],frame[union==0])
