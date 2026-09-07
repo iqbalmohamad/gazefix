@@ -1,89 +1,64 @@
 # GazeFix — Current Engineering Assignment
 
-**Active assignment: LivePortrait feasibility reproduction (model-feasibility
-spike, first candidate)**
+**Active assignment: Repository recovery complete — next authorized activity is
+independent COMMERCIAL-FIRST MODEL FEASIBILITY RESEARCH**
 
-**Spike SA: `model-feasibility-architecture-v1` @ `d66df8971086f5e0343ad24233aca6afaf505d16` — APPROVED / FROZEN / CANONICAL**
+**LivePortrait: `REJECTED — COMMERCIAL/PROVENANCE GATE FAILED`** (2026-09-07).
+Record: `docs/milestones/liveportrait-retirement.md`.
 
-**Candidate: LivePortrait image retargeting via its official horizontal /
-vertical eye-gaze controls (`update_delta_new_eyeball_direction`).**
+**No model implementation is authorized. No replacement candidate has
+Candidate Admission. M4 remains BLOCKED.**
 
-**Timebox: maximum two engineering days.**
+**M0 / M1 / M2: PASS / CLOSED / FROZEN**
 
-**M3 status: `CHANGE APPROACH` — NOT PASS** (`docs/milestones/m3-evaluation.md`).
+**M3: `CHANGE APPROACH` — NOT PASS** (`docs/milestones/m3-evaluation.md`).
+`m3-geometric-baseline @ f3831b54728a4747c38c064351ec9f48419a2efb` remains
+frozen as the reference geometric implementation.
 
-**M4: NOT AUTHORIZED.** No real-time integration work of any kind.
-
-**Product integration: NOT AUTHORIZED.** No `CorrectionEngine` implementation
-for LivePortrait, no change under `gazefix/`, no product dependency.
-
-**M0 / M1 / M2 status: PASS / CLOSED / FROZEN**
-
-**Overall architecture baseline (`architecture-v1`): APPROVED / FROZEN / CANONICAL** — unchanged by the spike (`NO OVERALL ARCHITECTURE CHANGE REQUIRED`).
-
-**M3 Solution Architecture (`m3-architecture-v1.3`): APPROVED / FROZEN / CANONICAL** — the design record of the frozen geometric baseline.
+**Overall architecture baseline (`architecture-v1`): APPROVED / FROZEN / CANONICAL** — unchanged.
 
 **Updated: 2026-09-07**
 
-This file is an assignment pointer. The design is not repeated here: it lives
-in the frozen spike SA and is authoritative there.
+## LivePortrait is retired
 
-## The decision this assignment records
+LivePortrait is rejected for the current development cycle. It is **not** a
+production candidate, a feasibility candidate, a benchmark, a visual teacher,
+a quality oracle, a fallback, a backup model, or a comparison target.
 
-The model-feasibility spike brief (`docs/milestones/model-feasibility-spike.md`)
-asked for scouting, screening and comparison of model-based candidates. That
-research phase is complete: independent ChatGPT and Kimi research was
-synthesized and cross-verified, and the **Product Manager decided
-`REPRODUCE CANDIDATE NOW`** with LivePortrait as the first candidate. The PM
-knowingly deferred the brief's criterion 3 (research-only or unspecified
-licence terms are disqualifying): the reproduction answers the *quality*
-question first, and the spike SA §17 names the licensable-engine and
-teacher/reference paths a positive answer would open. LivePortrait as shipped
-**fails criterion 3 for production** (spike SA §6) and nothing in this
-assignment implies commercial clearance.
+Do not clone it, download its weights, execute it, reproduce it, port its
+algorithm, copy its preprocessing, implement its gaze controls, add its
+dependencies, add a `LivePortraitCorrectionEngine`, or use its outputs as a
+benchmark.
 
-## Reproduction objective
+**`model-feasibility-architecture-v1` @ `d66df8971086f5e0343ad24233aca6afaf505d16`
+is superseded as implementation authority.** It and every other LivePortrait
+document and commit remain **immutable historical audit evidence** and are
+neither modified nor deleted. They carry no forward authority.
 
-Answer, with QA-verifiable evidence for a blind Product Owner comparison:
+**No LivePortrait implementation is authorized.**
 
-> Can a pretrained learned portrait renderer produce corrected eyes that are
-> materially more natural and less distracting than GazeFix's frozen
-> geometric baseline?
+## What is authorized next
 
-Reproduce LivePortrait **unmodified**, on **CPU only**, at the pinned code and
-model revisions, driving only its official eye-gaze controls; validate that
-the gaze-direction path is the one exercised and eye-open-ratio retargeting is
-not; calibrate a six-value mapping on the fixed calibration set; render the
-held-out Product Owner captures **once** with the frozen mapping; regenerate
-the geometric baseline deterministically from `m3-geometric-baseline`; and
-hand over the evidence package and report the spike SA §12 and §20 define.
+Independent **commercial-first model feasibility research**, and nothing else.
+It is the next activity after this repository recovery; this pointer does not
+itself start it, and the Product Manager issues that assignment separately.
 
-## Baseline and branch
+**Research does not authorize implementation.** A research result — however
+positive — does not select a candidate, does not create design authority, and
+does not permit code.
 
-| Item | Value |
-| --- | --- |
-| **Spike SA** | **`docs/milestones/model-feasibility-architecture.md` at `model-feasibility-architecture-v1` @ `d66df8971086f5e0343ad24233aca6afaf505d16`** |
-| Geometric baseline to compare against | branch `m3-geometric-baseline` @ `f3831b54728a4747c38c064351ec9f48419a2efb`, as a separate detached worktree |
-| **Spike work branch** | **`codex/liveportrait-spike`**, created from `d66df8971086f5e0343ad24233aca6afaf505d16` — the only branch that receives spike commits |
-| Upstream code | `https://github.com/KlingAIResearch/LivePortrait` @ `9b294b3d0536135442ea73cb01e6cb3ca7029dd3` (`KlingTeam/LivePortrait` redirects there) |
-| Upstream model | Hugging Face `KlingTeam/LivePortrait` @ `6d116d1066c3539da1cea3189da91c46cb505584`, human weights only |
-| Where spike code lives | `spike/liveportrait/` (committed adapters, pins, plan, manifests); the upstream clone, weights and spike venv are git-ignored inside it |
-| Where renders live | `experiments/liveportrait/<run-id>/` — git-ignored; no Product Owner pixel is ever committed |
-| Deliverable | the evidence package (spike SA §12) and `docs/milestones/model-feasibility-report.md` (spike SA §20) |
+## Rules for any future model selection
 
-## Gates after the reproduction
-
-1. **Independent QA gate** (spike SA §13) — before the Product Owner sees
-   anything. Risk level **HIGH**, proposed by the SA under QA policy §3; the
-   PM confirms or changes it here. Until the PM records otherwise, treat it
-   as HIGH. Reviewer: commissioned by the PM, or none — in which case Codex
-   runs the §13 list and reports each item at its true verification level.
-2. **Blind Product Owner comparison** (spike SA §14) — prepared, batched,
-   PM-authorized; the PM reads the verdict. Engineering never scores visual
-   quality.
-3. **Spike closure** — the PM records `MODEL FEASIBILITY SPIKE COMPLETE` with
-   one recommendation, or `MODEL FEASIBILITY SPIKE BLOCKED`, in
-   `docs/milestones/model-feasibility-evaluation.md`.
+- **No replacement model has Candidate Admission.** None is selected.
+- Model selection may occur **only through a new Candidate Admission Gate**.
+- **Commercial `UNKNOWN` = `FAIL`.** Unresolved rights, licensing or
+  provenance for the complete paid offline Windows stack fails the gate;
+  an open question is not something to resolve later.
+- **No Solution Architecture exists for any replacement candidate.** One may
+  be written only after a candidate passes Candidate Admission, and only on a
+  PM-authorized assignment.
+- **No model implementation is authorized** at any point before both of the
+  above have happened.
 
 ## Frozen repository state
 
@@ -99,14 +74,12 @@ hand over the evidence package and report the spike SA §12 and §20 define.
 | `m3-architecture-v1.2` | `6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93` |
 | `m3-architecture-v1.3` | `d91d393eb6e3e5f93ee2122bc840f776a55872e5` |
 | `m3-geometric-baseline` | `f3831b54728a4747c38c064351ec9f48419a2efb` |
-| `model-feasibility-architecture-v1` | `d66df8971086f5e0343ad24233aca6afaf505d16` |
+| `model-feasibility-architecture-v1` | `d66df8971086f5e0343ad24233aca6afaf505d16` — **historical evidence only, superseded as authority** |
 
 All eleven are frozen: do not advance, rewrite, force-push, or merge into any
-of them. `claude/m3-solution-architecture` and PR #7 are the retained M3 SA
-review record; `claude/m3-sa-blend-amendment`,
-`claude/m3-sa-source-iris-amendment` and `claude/m3-sa-tolerance-amendment`
-are the A1/A2/A3 amendment branches; `claude/model-feasibility-architecture`
-is the spike SA review record. None is a work branch.
+of them. The `claude/*` architecture and amendment branches, and
+`claude/model-feasibility-architecture`, are retained review records, not work
+branches.
 
 Accepted M0 debt (the `PreparedCameraCloser` ambiguous `Thread.start()`
 bootstrap case in `docs/architecture.md`) remains accepted and out of scope.
@@ -115,52 +88,40 @@ bootstrap case in `docs/architecture.md`) remains accepted and out of scope.
 
 1. `01-GazeFix-Product-Requirements-Document-v1.1.md` — product scope,
    constraints, milestone gates; §16 (no training from scratch), §27
-   (dependency and licensing policy) and M9 govern this spike.
+   (dependency and licensing policy) and M9 govern model work.
 2. `docs/architecture.md` and the accepted ADRs (`docs/decisions/`) — frozen
-   architecture, including the provider-neutral correction boundary.
-3. **`docs/milestones/model-feasibility-architecture.md` at
-   `model-feasibility-architecture-v1`** — the spike design to execute.
-4. `docs/milestones/model-feasibility-spike.md` — the brief the SA narrows.
-5. `docs/milestones/m3-evaluation.md` — the gate result that motivates it.
-6. `docs/qa-policy.md` — verification depth, stopping rules, Product Owner
+   architecture, including the provider-neutral correction boundary, which
+   remains unchanged.
+3. `docs/milestones/liveportrait-retirement.md` — the retirement record.
+4. `docs/milestones/m3-evaluation.md` — the M3 gate result.
+5. `docs/qa-policy.md` — verification depth, stopping rules, Product Owner
    interaction budget.
+
+`docs/milestones/model-feasibility-architecture.md` and
+`docs/milestones/model-feasibility-spike.md` are historical records. Neither
+is a source of truth for current work.
 
 ## Boundaries
 
-- **Execute the frozen spike SA exactly.** Spike SA §19 lists what is fixed
-  and what is left to the implementor. Do not redesign upstream, the
-  isolation layout, the pins, the mapping rule, the sets, the evidence or the
-  gates.
-- **No upstream modification.** LivePortrait source is never edited, forked
-  or patched; only the instrumentation the SA permits (§8.3).
-- **No product change.** Nothing under `gazefix/`, `scripts/`, `tests/`,
-  `pyproject.toml` or the constraints file changes; the spike venv never
-  installs `gazefix`; `spike/` never imports it.
-- **No neural engine, no integration, no M4.** No `CorrectionEngine`
-  implementation for LivePortrait, no pipeline wiring, no real-time work,
-  no ONNX/OpenVINO conversion, no training or fine-tuning.
-- **CPU only.** No CUDA; the pinned CPU-only runtimes; the SA's flags.
-- **No cherry-picking.** Calibration on the fixed calibration set only;
-  held-out captures rendered once with the frozen, pushed, PM-acknowledged
-  mapping; every output kept and reported, failures included.
-- **Stop conditions are the SA's §15.** On any of them, stop with the
-  report and return to the PM. Do not move to ST-ED or any other candidate.
-- **Frozen documents and refs are immutable.** No webcam captures committed.
-- **No automatic milestone transition.** A positive result does not
-  authorize implementation; the PM issues the next assignment.
+- **No model implementation**, for LivePortrait or any other candidate.
+- **No Solution Architecture** for any replacement candidate.
+- **No M4 work**: no live-webcam correction, no staged-processor or pipeline
+  integration, no `ProcessedFrame`/`ProcessorOutput` changes, no correction
+  metrics in `PipelineMetrics`, no continuity-epoch implementation.
+- **No new runtime dependency**, no model file, no download or execution of
+  any model.
+- **No change to product code** (`gazefix/`, `scripts/`, `tests/`,
+  `pyproject.toml`, `constraints-windows-py312.txt`).
+- **No change to any frozen reference or frozen document**, including the
+  superseded LivePortrait Solution Architecture.
+- **No webcam captures committed.**
+- **No automatic milestone transition.** The Product Manager issues each
+  assignment.
 
 ## Roles
 
 - ChatGPT — Product Manager / Technical Lead: scope, acceptance, gate
-  decisions, risk level, reviewer commissioning, plan acknowledgement, the
-  verdict reading and the spike closure.
-- Mohammad Iqbal — Product Owner: the blind visual comparison.
-- **Codex — LivePortrait reproduction engineer** for this assignment, with
-  self-review and the evidence discipline of the spike SA.
-
-## Stop condition
-
-Stop at **`SPIKE EVIDENCE PACKAGE READY FOR QA`** with the evidence package
-and the report, or at **`SPIKE BLOCKED — <§15 condition>`** with the report.
-Do not declare the brief complete, do not select a production approach, do
-not begin an implementation milestone, and do not revisit the M3 verdict.
+  decisions, Candidate Admission, and the assignment that starts research.
+- Mohammad Iqbal — Product Owner: visual quality judgment when a gate calls
+  for it.
+- Codex / Claude — engineering, on a PM-issued assignment only.
