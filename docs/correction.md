@@ -1,10 +1,21 @@
 # Offline gaze correction (M3, SA v1.3)
 
-Post-QA hardening targets the confirmed findings on SA v1.3; see
-`milestones/m3-v13-qa-hardening-report.md` for verification and targeted
-re-review status. The earlier A1/A2 evidence remains in
-`milestones/m3-v12-implementation-report.md`. Stop before the PO visual gate
-until the targeted re-review is complete.
+**This is the frozen geometric baseline, not the production candidate.** The
+M3 Product Owner visual gate returned **`CHANGE APPROACH`** on 2026-09-07
+(`milestones/m3-evaluation.md`): the implementation is correct against its
+frozen design and passed independent engineering QA, but its visual result did
+not meet the product-quality bar. **M3 is not `PASS` and M4 is not
+authorized.** The code is retained as the reproducible baseline, the
+fallback/reference implementation, the proof that the `CorrectionEngine`
+contract is implementable, and the benchmark for the active model-feasibility
+spike (`milestones/model-feasibility-spike.md`). Do not continue tuning it as
+the primary production candidate.
+
+The exact evaluated implementation is preserved on branch
+`m3-geometric-baseline` @ `f3831b54728a4747c38c064351ec9f48419a2efb`.
+Engineering evidence: `milestones/m3-v13-qa-hardening-report.md` for the
+post-QA hardening, `milestones/m3-v12-implementation-report.md` for the
+earlier A1/A2 work.
 No M3 PASS or M4 readiness is implied by an individual frame's CORRECTED status.
 
 ## Boundary and ownership

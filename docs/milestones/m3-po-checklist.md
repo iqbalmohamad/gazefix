@@ -1,6 +1,10 @@
 # M3 Product Owner visual gate — SA v1.2
 
-Status: **NOT EVALUATED**. Engineering readiness is separate from the M3
+Status: **EVALUATED 2026-09-07 — verdict `CHANGE APPROACH`.** The gate record
+is `m3-evaluation.md`; that document, not this one, is the result. The session
+run was a quick two-still gate rather than the full eleven-experiment matrix
+below, which is recorded in the gate record. This checklist is retained as the
+procedure definition. Engineering readiness is separate from the M3
 quality decision. Budget: one 45–50 minute session (capture ≈10 minutes,
 score ≈35–40 minutes). No live GazeFix integration is part of this test.
 
