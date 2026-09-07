@@ -11,3 +11,6 @@ dist/
 .vscode/
 
 experiments/
+
+# Model-feasibility spike: upstream clone and weights are local only
+spike/liveportrait/upstream/
