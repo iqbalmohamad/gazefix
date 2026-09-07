@@ -131,6 +131,14 @@ test asserts no filter flag can appear in it.
 
 Both source and derived SHA-256, and the exact command, are recorded.
 
+Both this step and the geometric step were measured to be byte-reproducible:
+running each twice on identical input produced identical output hashes
+(`manifests/tooling-verification.json`). The offline correction path contains
+no RNG, no threading, and derives frame timestamps from the frame index rather
+than the wall clock, so its pixel output is deterministic by construction.
+Container bytes additionally depend on the local encoder build, so a different
+platform should re-measure rather than assume.
+
 ## 4. Frozen Maxine configuration (before any held-out output is seen)
 
 **Profile `nvidia-client-defaults`.** NVIDIA's own published Eye Contact client

@@ -284,6 +284,17 @@ about visual quality.
   SHA-256 identical to the derived manifest's, so the hash chain is intact.
 - `maxine`: **NOT VERIFIED**.
 
+**Reproducibility, measured.** Both deterministic stages were run twice on
+identical input and produced byte-identical output: the derived input
+(`ffmpeg`, frozen profile) and the geometric `corrected.mp4` and its first
+frame. So the SHA-256 recorded for a derived input or a geometric output is a
+real audit token, not merely a record of one particular file. The offline
+correction path contains no RNG, no threading, and derives frame timestamps
+from the frame index rather than the wall clock, so pixel output is
+deterministic by construction; container bytes additionally depend on the local
+encoder build, so a different platform should re-measure rather than assume.
+Report timings are wall-clock dependent and are metadata only.
+
 ### Integrity and secret scanning
 
 `run.py verify` passed all four checks on the runtime-verified workspace: frozen

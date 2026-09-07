@@ -14,6 +14,36 @@
     "status": "VERIFIED"
   },
   "purpose": "Runtime verification of the Phase 1A tooling wiring, per docs/qa-policy.md verification levels. This is an engineering check of the harness, NOT evaluation evidence and NOT a visual result. The clip used is a synthetic canvas built from the repository's licensed tests/assets/astronaut_face.png fixture, the same fixture scripts/correction_batch.py uses in 'fixture' mode. It is not Product Owner footage, it never entered a Product Owner package, and it establishes nothing about visual quality.",
+  "reproducibility": {
+    "caveat": "Measured on this Linux container with its OpenCV and ffmpeg builds. The offline correction path contains no RNG, no threading and derives frame timestamps from the frame index rather than the wall clock, so pixel output is deterministic by construction; container bytes additionally depend on the local encoder build, so a different platform should re-measure rather than assume. Report timings and the default run name are wall-clock dependent and are metadata only.",
+    "detail": "Both deterministic stages were run twice on identical input and produced byte-identical output, so the SHA-256 recorded for a derived input and for a geometric output is a meaningful audit token rather than only a record of one particular file.",
+    "measured_utc_date": "2026-09-07",
+    "measurements": [
+      {
+        "identical": true,
+        "runs": 2,
+        "sha256": "3b0f75ca665533ad65a157415d964a9610ca9d1545aa8110b77306d62b364f54",
+        "stage": "prepare (ffmpeg libx264, frozen profile)"
+      },
+      {
+        "identical": true,
+        "runs": 2,
+        "sha256": "558a25412f17d3f88e6162c4577f59dde2c74641ad183f53c60c83ff3207dc4b",
+        "stage": "geometric (frozen M3 harness, corrected.mp4)"
+      },
+      {
+        "identical": true,
+        "runs": 2,
+        "sha256": "17533ba667405938376aefef665fed2f9594e3205fbbc1cf415ea6268be1175a",
+        "stage": "geometric (frozen M3 harness, corrected.png first frame)"
+      }
+    ],
+    "not_reproducible_by_design": [
+      "per-frame timing percentiles in the harness report",
+      "the harness default run name, which embeds a timestamp (this tooling always passes an explicit --name)"
+    ],
+    "status": "VERIFIED"
+  },
   "steps": [
     {
       "detail": "discovered the clip, tagged its scenario, and reported the seven uncovered scenarios as NOT AVAILABLE IN EXISTING SOURCE MATERIAL",
