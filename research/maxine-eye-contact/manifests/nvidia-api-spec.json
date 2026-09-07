@@ -1,0 +1,359 @@
+{
+  "spec_kind": "phase1a-nvidia-api-spec",
+  "spec_version": 1,
+  "notice": "RESEARCH/EVALUATION ONLY - NOT AUTHORIZED FOR GAZEFIX PRODUCTION",
+  "inspected_utc_date": "2026-09-07",
+  "inspected_from": "GazeFix Phase 1A engineering session (remote container)",
+  "service": {
+    "product": "NVIDIA Maxine Eye Contact NIM",
+    "hosted_offering": "NVCF preview / Try API",
+    "transport": "gRPC over TLS",
+    "target": "grpc.nvcf.nvidia.com:443",
+    "function_id": "15c6f1a0-3843-4cde-b5bc-803a4966fbb6",
+    "proto_package": "nvidia.maxine.eyecontact.v1",
+    "grpc_service": "MaxineEyeContactService",
+    "grpc_method": "RedirectGaze",
+    "grpc_method_kind": "bidirectional streaming",
+    "request_message": "RedirectGazeRequest",
+    "response_message": "RedirectGazeResponse",
+    "request_oneof": [
+      "config (RedirectGazeConfig)",
+      "video_file_data (bytes)"
+    ],
+    "response_oneof": [
+      "config (RedirectGazeConfig)",
+      "video_file_data (bytes)",
+      "keepalive (google.protobuf.Empty)"
+    ],
+    "chunk_size_bytes": 65536,
+    "config_semantics": "A config message may be sent first; the server echoes it back to confirm. If no config is sent, the server applies its own default values. A config sent mid-stream is ignored. One video file per invocation.",
+    "function_id_note": "15c6f1a0-3843-4cde-b5bc-803a4966fbb6 is the value printed in NVIDIA's eye-contact client README, which was fetched and read first-hand in this session. A separate UUID (7d09dd81-81ea-42ce-9909-843bdc07ec8d) was surfaced by web search against docs.nvidia.com but that page could not be fetched, and the search summaries themselves disagreed on whether it was NVIDIA's hosted function or a placeholder for a self-deployed one. The function id is therefore treated as a value to CONFIRM at execution time, not a settled constant; eval/maxine.py reads it from this spec so it can be corrected without touching code."
+  },
+  "authentication": {
+    "mechanism": "gRPC call metadata",
+    "metadata": [
+      {
+        "key": "authorization",
+        "value_form": "Bearer <NGC API key>"
+      },
+      {
+        "key": "function-id",
+        "value_form": "<NVCF function id>"
+      }
+    ],
+    "credential_kind": "NGC / NVIDIA API key",
+    "environment_variable_used_by_this_package": "NVIDIA_API_KEY",
+    "note": "The environment variable name is this package's own choice; NVIDIA's sample client takes the key as a --api-key argument. GazeFix never places the key on a command line that could be captured in a process list or a log: see eval/maxine.py."
+  },
+  "input_requirements": {
+    "container": "MP4",
+    "video_codec": "H.264",
+    "audio": "optional",
+    "variable_frame_rate": "NOT SUPPORTED",
+    "streaming_flag": "--streaming is required when the MP4 has its moov atom before mdat (a 'streamable'/faststart file) and must be omitted otherwise; NVIDIA's client validates this and errors on a mismatch",
+    "hosted_size_limit": "NOT VERIFIED FROM PRIMARY SOURCE IN THIS ENVIRONMENT",
+    "hosted_duration_limit": "NOT VERIFIED FROM PRIMARY SOURCE IN THIS ENVIRONMENT"
+  },
+  "parameters": {
+    "note": "Defaults below are the values NVIDIA's own client sends when no parameter flag is given. The frozen Phase 1A profile passes NO parameter flag, so every value below is the applied value.",
+    "behaviour": [
+      {
+        "name": "temporal",
+        "default": 4294967295,
+        "range": [
+          0,
+          4294967295
+        ],
+        "source": "proto + constants.py"
+      },
+      {
+        "name": "detect_closure",
+        "default": 0,
+        "range": [
+          0,
+          1
+        ],
+        "source": "proto + constants.py"
+      },
+      {
+        "name": "eye_size_sensitivity",
+        "default": 3,
+        "range": [
+          2,
+          6
+        ],
+        "source": "proto + constants.py"
+      },
+      {
+        "name": "enable_lookaway",
+        "default": 0,
+        "range": [
+          0,
+          1
+        ],
+        "source": "proto + constants.py"
+      },
+      {
+        "name": "lookaway_max_offset",
+        "default": 5,
+        "range": [
+          1,
+          10
+        ],
+        "source": "proto + constants.py"
+      },
+      {
+        "name": "lookaway_interval_min",
+        "default": 3,
+        "proto_documented_default": 100,
+        "range": [
+          1,
+          600
+        ],
+        "source": "constants.py sends 3; proto and README document 100",
+        "discrepancy": "NVIDIA's client default (3) disagrees with the proto/README documented default (100). Inert here because enable_lookaway defaults to 0."
+      },
+      {
+        "name": "lookaway_interval_range",
+        "default": 8,
+        "proto_documented_default": 250,
+        "range": [
+          1,
+          600
+        ],
+        "source": "constants.py sends 8; proto and README document 250",
+        "discrepancy": "NVIDIA's client default (8) disagrees with the proto/README documented default (250). Inert here because enable_lookaway defaults to 0."
+      },
+      {
+        "name": "gaze_pitch_threshold_low",
+        "default": 20.0,
+        "range": [
+          10.0,
+          35.0
+        ],
+        "source": "proto + constants.py"
+      },
+      {
+        "name": "gaze_pitch_threshold_high",
+        "default": 30.0,
+        "range": [
+          10.0,
+          35.0
+        ],
+        "source": "proto + constants.py"
+      },
+      {
+        "name": "gaze_yaw_threshold_low",
+        "default": 20.0,
+        "range": [
+          10.0,
+          35.0
+        ],
+        "source": "proto + constants.py"
+      },
+      {
+        "name": "gaze_yaw_threshold_high",
+        "default": 30.0,
+        "range": [
+          10.0,
+          35.0
+        ],
+        "source": "proto + constants.py"
+      },
+      {
+        "name": "head_pitch_threshold_low",
+        "default": 15.0,
+        "range": [
+          10.0,
+          35.0
+        ],
+        "source": "proto + constants.py"
+      },
+      {
+        "name": "head_pitch_threshold_high",
+        "default": 25.0,
+        "range": [
+          10.0,
+          35.0
+        ],
+        "source": "constants.py and README say 25.0; the proto comment says 15.0",
+        "discrepancy": "proto comment disagrees with client default"
+      },
+      {
+        "name": "head_yaw_threshold_low",
+        "default": 25.0,
+        "range": [
+          10.0,
+          35.0
+        ],
+        "source": "constants.py and README say 25.0; the proto comment says 15.0",
+        "discrepancy": "proto comment disagrees with client default"
+      },
+      {
+        "name": "head_yaw_threshold_high",
+        "default": 30.0,
+        "range": [
+          10.0,
+          35.0
+        ],
+        "source": "constants.py and README say 30.0; the proto comment says 15.0",
+        "discrepancy": "proto comment disagrees with client default"
+      }
+    ],
+    "encoding": [
+      {
+        "name": "lossless",
+        "default": false,
+        "source": "config.py store_true"
+      },
+      {
+        "name": "bitrate",
+        "default": null,
+        "applied": "server auto-selects from input resolution",
+        "source": "config.py default None"
+      },
+      {
+        "name": "idr_interval",
+        "default": 8,
+        "source": "constants.py DEFAULT_IDR_INTERVAL"
+      },
+      {
+        "name": "custom_encoding_params",
+        "default": null,
+        "source": "config.py default None"
+      }
+    ]
+  },
+  "client": {
+    "repository": "https://github.com/NVIDIA-Maxine/nim-clients",
+    "subdirectory": "eye-contact",
+    "licence": "MIT (SPDX-License-Identifier: MIT in the client sources)",
+    "python_requirement": "Python 3.10 or above",
+    "dependencies": [
+      "grpcio==1.67.1",
+      "grpcio-tools==1.67.1",
+      "tqdm==4.67.1"
+    ],
+    "proto_path": "eye-contact/protos/proto/nvidia/maxine/eyecontact/v1/eyecontact.proto",
+    "generated_interfaces_dir": "eye-contact/interfaces",
+    "entry_point": "eye-contact/scripts/eye-contact.py"
+  },
+  "known_client_defect": {
+    "summary": "NVIDIA's sample client catches every exception inside process_request and only prints it, so a failed inference can leave a truncated or empty output file while the process still exits 0.",
+    "evidence": "eye-contact/scripts/eye-contact.py, process_request(): 'except Exception as e: print(f\"An error occurred: {e}\")'",
+    "gazefix_mitigation": "eval/maxine.py treats a run as successful only when the process exits 0, the output file exists and is non-empty, no 'An error occurred' line appears on stdout/stderr, and (where ffprobe is available) the output probes as a decodable video stream."
+  },
+  "primary_sources": [
+    {
+      "url": "https://github.com/NVIDIA-Maxine/nim-clients",
+      "kind": "NVIDIA-owned GitHub organisation, official sample clients",
+      "retrieved_utc_date": "2026-09-07"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/NVIDIA-Maxine/nim-clients/master/README.md",
+      "sha256": "a2dd8f9f1eb684af321f711f78737b14aa6bfc5269effc39404a7cdd32176a49",
+      "bytes": 4535,
+      "retrieved_utc_date": "2026-09-07",
+      "note": "repository root README (NIM catalogue)"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/NVIDIA-Maxine/nim-clients/master/eye-contact/README.md",
+      "sha256": "9af5b5825c460d891fe23c91d14921eb4ea0d0126dd8619efbca86275611a5fb",
+      "bytes": 9921,
+      "retrieved_utc_date": "2026-09-07",
+      "note": "eye-contact client README: usage, preview-mode invocation and every parameter default"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/NVIDIA-Maxine/nim-clients/master/eye-contact/scripts/eye-contact.py",
+      "sha256": "5b441de487a9854e9f9222c0fb3ccbf1941e6efe72079c1017c7321b0aca87ef",
+      "bytes": 8704,
+      "retrieved_utc_date": "2026-09-07"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/NVIDIA-Maxine/nim-clients/master/eye-contact/scripts/config.py",
+      "sha256": "dc93d39ab798aadd23e1bc81bfa73d1a3d44b407f5249e125b9cb27532929fd0",
+      "bytes": 21224,
+      "retrieved_utc_date": "2026-09-07"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/NVIDIA-Maxine/nim-clients/master/eye-contact/scripts/constants.py",
+      "sha256": "91604b71d84affdd19bed707b2444478176a7aaafd74a54a8e836dfac240acf1",
+      "bytes": 2707,
+      "retrieved_utc_date": "2026-09-07"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/NVIDIA-Maxine/nim-clients/master/eye-contact/protos/proto/nvidia/maxine/eyecontact/v1/eyecontact.proto",
+      "sha256": "61d473238ec09ff88355809ac47ba692bbb4b4949458bee0a73e1d68d6f32aa7",
+      "bytes": 6888,
+      "retrieved_utc_date": "2026-09-07"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/NVIDIA-Maxine/nim-clients/master/utils/utils.py",
+      "sha256": "081f737fa488db0fcc153c782f453638a70badcaccb128bbb19445ce9ef25f5d",
+      "bytes": 10264,
+      "retrieved_utc_date": "2026-09-07"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/NVIDIA-Maxine/nim-clients/master/eye-contact/requirements.txt",
+      "sha256": "d817213a1393e48968423f9d35fe28bc8bfa10a869ac0d5498c5ab2a7ef46ede",
+      "bytes": 50,
+      "retrieved_utc_date": "2026-09-07"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/NVIDIA-Maxine/nim-clients/master/eye-contact/protos/linux/compile_protos.sh",
+      "sha256": "1a19feac65326e6b4a145976b3a8991521d3e3592af93b779447e9164554e1d2",
+      "bytes": 2660,
+      "retrieved_utc_date": "2026-09-07"
+    }
+  ],
+  "unreachable_from_this_environment": {
+    "reason": "The organisation egress policy of this engineering container denies CONNECT to every nvidia.com host (gateway answered 403).",
+    "hosts_denied": [
+      "build.nvidia.com:443",
+      "docs.nvidia.com:443",
+      "developer.nvidia.com:443",
+      "integrate.api.nvidia.com:443",
+      "ai.api.nvidia.com:443",
+      "api.nvcf.nvidia.com:443",
+      "www.nvidia.com:443"
+    ],
+    "consequence": "docs.nvidia.com and build.nvidia.com pages could NOT be read first-hand here. Everything recorded above comes from NVIDIA's own published client sources on NVIDIA's GitHub organisation, which were reachable and were read in full.",
+    "must_confirm_before_execution": [
+      "https://docs.nvidia.com/nim/maxine/eye-contact/latest/index.html",
+      "https://docs.nvidia.com/nim/maxine/eye-contact/latest/basic-inference.html",
+      "https://docs.nvidia.com/nim/maxine/eye-contact/latest/support-matrix.html",
+      "https://build.nvidia.com/nvidia/eyecontact/api",
+      "NVIDIA API trial terms of service and data-handling statement governing the hosted preview endpoint"
+    ]
+  },
+  "trial_boundary": {
+    "statement": "Use of the hosted NVCF preview endpoint under NVIDIA's evaluation terms establishes NO production entitlement, NO redistribution right, NO commercial GazeFix deployment right, NO production pricing, and NO accepted privacy architecture.",
+    "verification_status": "NOT VERIFIED - the NVIDIA terms pages are unreachable from this environment and must be read and recorded before the first hosted request."
+  },
+  "hosted_availability": {
+    "status": "NOT VERIFIED",
+    "summary": "Whether the build.nvidia.com hosted preview endpoint for eyecontact is still callable today could NOT be established from this environment. The evidence is genuinely mixed and must be resolved first-hand before the first request.",
+    "evidence_for_available": [
+      {
+        "source": "https://raw.githubusercontent.com/NVIDIA-Maxine/nim-clients/master/eye-contact/README.md",
+        "retrieved_utc_date": "2026-09-07",
+        "verification": "FIRST-HAND - fetched and read in full in this session",
+        "detail": "NVIDIA's actively maintained client (SPDX headers dated 2025-2026) still documents 'Usage for Preview API request' with --preview-mode, --target grpc.nvcf.nvidia.com:443 and a concrete --function-id, and points at https://build.nvidia.com/nvidia/eyecontact/api as the Try API. Grep across every fetched NVIDIA client source (README, eye-contact README, eye-contact.py, config.py, constants.py, utils.py, eyecontact.proto) found NO deprecation, end-of-life, sunset or retirement language."
+      }
+    ],
+    "evidence_against_available": [
+      {
+        "source": "https://build.nvidia.com/nvidia/eyecontact/modelcard",
+        "verification": "SECOND-HAND - web-search index summary only; the page itself is unreachable from this environment",
+        "detail": "Three independently worded searches consistently reported the eyecontact model card carrying 'This API will be deprecated on 07/27/2026' and 'will no longer be supported after 07/27/2026', with advice to transition to another model. 07/27/2026 is approximately six weeks BEFORE today (2026-09-07), so if accurate and still in force the hosted preview API is already past its stated support end.",
+        "caveats": [
+          "The page was never retrieved, so exact wording, scope and current force are unconfirmed.",
+          "build.nvidia.com uses this deprecation banner generically (an identically shaped notice was surfaced for an unrelated model), so attribution to eyecontact specifically is not proven.",
+          "A stated deprecation date is not proof the endpoint stopped responding, and NVIDIA may have moved the date."
+        ]
+      }
+    ],
+    "why_unresolved_here": "Every nvidia.com host is denied by this container's organisation egress policy (gateway answered 403 to CONNECT), so no NVIDIA-hosted page could be read and no request could be attempted.",
+    "required_gate": "Phase 1A execution MUST begin by confirming, first-hand, that the hosted preview endpoint accepts a request today. If it does not, the correct engineering status is 'MAXINE FEASIBILITY BLOCKED - HOSTED API UNAVAILABLE' and the path stops there. It must NOT be replaced with a self-hosted NIM deployment or another provider."
+  }
+}

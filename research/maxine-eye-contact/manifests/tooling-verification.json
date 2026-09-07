@@ -1,0 +1,83 @@
+{
+  "environment": {
+    "ffmpeg": "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers",
+    "ffprobe": "ffprobe version 6.1.1-3ubuntu5 Copyright (c) 2007-2023 the FFmpeg developers",
+    "note": "ffmpeg, opencv, mediapipe and PySide6 were installed into this container only to exercise the tooling and the product suite. pyproject.toml was not modified.",
+    "python": "3.11.15"
+  },
+  "manifest_kind": "phase1a-tooling-verification",
+  "notice": "RESEARCH/EVALUATION ONLY - NOT AUTHORIZED FOR GAZEFIX PRODUCTION",
+  "product_regression": {
+    "command": "QT_QPA_PLATFORM=offscreen python -m pytest tests -q",
+    "detail": "the frozen product suite is unaffected. The 15 skips are the opt-in real-model tests (GAZEFIX_REAL_MODEL_TESTS unset).",
+    "result": "786 passed, 15 skipped, 0 failed",
+    "status": "VERIFIED"
+  },
+  "purpose": "Runtime verification of the Phase 1A tooling wiring, per docs/qa-policy.md verification levels. This is an engineering check of the harness, NOT evaluation evidence and NOT a visual result. The clip used is a synthetic canvas built from the repository's licensed tests/assets/astronaut_face.png fixture, the same fixture scripts/correction_batch.py uses in 'fixture' mode. It is not Product Owner footage, it never entered a Product Owner package, and it establishes nothing about visual quality.",
+  "steps": [
+    {
+      "detail": "discovered the clip, tagged its scenario, and reported the seven uncovered scenarios as NOT AVAILABLE IN EXISTING SOURCE MATERIAL",
+      "status": "VERIFIED",
+      "step": "plan"
+    },
+    {
+      "detail": "ran with --strict-probe; ffprobe measured the real media",
+      "manifest_sha256": "58ce80fbc82c3f70d34d6cedb7a04c12b880df09b49f1de6783165a8ed632adf",
+      "media": {
+        "codec": "mpeg4",
+        "duration_s": 3.0,
+        "fps_avg": 30.0,
+        "height": 720,
+        "width": 1280
+      },
+      "source_sha256": "d5d81347e9f97ee120c9044f0adcf72f744116704eebab4b2777da35e8d984ce",
+      "status": "VERIFIED",
+      "step": "freeze"
+    },
+    {
+      "derived_bytes": 229548,
+      "derived_sha256": "3b0f75ca665533ad65a157415d964a9610ca9d1545aa8110b77306d62b364f54",
+      "detail": "ffmpeg produced the shared derived input under the frozen profile",
+      "profile_id": "p1a-mp4-h264-cfr-faststart-crf18",
+      "status": "VERIFIED",
+      "step": "prepare"
+    },
+    {
+      "applied_strength": 0.7,
+      "applied_variant": "layered",
+      "corrected_sha256": "558a25412f17d3f88e6162c4577f59dde2c74641ad183f53c60c83ff3207dc4b",
+      "detail": "the frozen M3 harness ran end to end through this tooling",
+      "engine_failures": 0,
+      "frames_decoded": 90,
+      "harness_recorded_source_sha256": "3b0f75ca665533ad65a157415d964a9610ca9d1545aa8110b77306d62b364f54",
+      "harness_repository_head": "95678777642d29912d0806a81f02dc4b11ea884b",
+      "hash_chain_intact": true,
+      "returncode": 0,
+      "status": "VERIFIED",
+      "step": "geometric"
+    },
+    {
+      "detail": "not executed. No Product Owner footage, no NVIDIA credential, and every nvidia.com host is denied by this container's egress policy. Request construction, credential handling and failure detection are covered by tests with a mocked transport; the remote call itself is unverified.",
+      "status": "NOT VERIFIED",
+      "step": "maxine"
+    },
+    {
+      "detail": "built a blind package from the real ORIGINAL and GEOMETRIC outputs; the missing MAXINE condition was reported, not hidden",
+      "presented_geometric_is_not_side_by_side_or_debug": true,
+      "presented_geometric_is_the_clean_corrected_video": true,
+      "presented_original_matches_the_derived_input": true,
+      "status": "VERIFIED",
+      "step": "package"
+    },
+    {
+      "detail": "all four integrity checks passed: frozen sources unchanged, frozen references unchanged, no method leak in the blind package, no credential-shaped content in any artifact",
+      "status": "VERIFIED",
+      "step": "verify"
+    }
+  ],
+  "tooling_tests": {
+    "command": "python -m pytest research/maxine-eye-contact/tests -q",
+    "status": "VERIFIED"
+  },
+  "verified_utc_date": "2026-09-07"
+}
