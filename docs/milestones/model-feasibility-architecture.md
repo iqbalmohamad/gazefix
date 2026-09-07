@@ -2,8 +2,10 @@
 
 **Status:** **APPROVED / FROZEN** as `model-feasibility-architecture-v1` after a
 focused adversarial review (eight lenses, two refuters per finding, one
-completeness critic; 43 findings and 8 gaps confirmed at MEDIUM or LOW, no
-BLOCKER; every one applied or explicitly dispositioned below). Design only.
+completeness critic: 43 lens findings confirmed at 6 MEDIUM / 37 LOW and 8
+completeness gaps at 1 HIGH / 6 MEDIUM / 1 LOW, no BLOCKER; a four-way
+verification pass on the revision; every item applied, or listed with its
+reason in §21). Design only.
 This document does not authorize integration of any model into GazeFix, does
 not begin M4, and does not select a production correction architecture. It
 authorizes one bounded, offline, CPU-only feasibility reproduction and
@@ -16,7 +18,9 @@ Owner can trust it.
 | Baseline it compares against | branch `m3-geometric-baseline` @ `f3831b54728a4747c38c064351ec9f48419a2efb` — immutable |
 | Governing assignment | `docs/milestones/model-feasibility-spike.md` (spike brief, activated 2026-09-07) |
 | M3 gate it responds to | `docs/milestones/m3-evaluation.md` — `CHANGE APPROACH`; M3 is not `PASS`; M4 is not authorized |
-| Research decision it implements | `REPRODUCE CANDIDATE NOW` — LivePortrait image retargeting via its official horizontal/vertical eye-gaze controls. The decision was made by the Product Manager on the synthesis of independent ChatGPT and Kimi research and communicated in the SA assignment of 2026-09-07; no separate research document exists in the repository, so this freeze record and `Current Assignment.md` are its record |
+| Research decision it implements | `REPRODUCE CANDIDATE NOW` — LivePortrait image retargeting via its official horizontal/vertical eye-gaze controls. The Product Manager made the decision on the synthesis of independent ChatGPT and Kimi research and communicated it in the SA assignment of 2026-09-07, outside the repository. **This freeze record is the repository's record of that decision.** The commit that follows this freeze rewrites `Current Assignment.md` to restate it and to point Codex at this SA, the single branch `codex/liveportrait-spike`, the code-producing `spike/` deliverable and the two-day timebox; until that commit lands, the pointer file still carries the broader scouting brief |
+| QA risk level for §13 | **HIGH, proposed by this SA** under QA policy §3 (model and licence uncertainty); the PM confirms or changes it in the assignment pointer, which records the confirmed level. Codex treats the level as HIGH until the pointer says otherwise |
+| Independent reviewer for §13 | commissioned by the PM in the assignment pointer, or none — in which case the engineer runs the §13 list and reports each item at its true verification level |
 | Brief criterion 3, knowingly deferred | The brief calls research-only or unspecified licence terms disqualifying. The PM proceeds anyway because the spike answers the *quality* question first and §17 names the licensable-engine and teacher/reference paths that a positive answer would open. LivePortrait as shipped **fails criterion 3 for production** (§6) |
 | Written / reviewed | 2026-09-07, Solution Architect / Principal ML Architect |
 | Role of this document | invariants, boundaries, provenance, comparison methodology, stopping rules — not pixel-level implementation |
@@ -42,14 +46,14 @@ does **not** make LivePortrait the production engine.
 | D4 | Two virtual environments, two worktrees: the spike venv (Python 3.10, CPU torch) never installs `gazefix`; the geometric baseline is regenerated from a worktree of `m3-geometric-baseline` in the project's own Windows venv; data crosses between them as files only | Different Python versions and dependency sets; and forcing data exchange through files makes the mapping auditable | §4, §11 |
 | D5 | Every external artifact is pinned by revision **and** by SHA-256, cross-checked against the publisher's own hash where one exists, then sealed in a committed manifest; the adapter refuses to run if the clone, the weight files or the environment do not match the pins | No floating `main`, no `latest`, no unpinned wheel, no hidden download | §5 |
 | D6 | Licensing is recorded as separate lines — LivePortrait code (MIT, verified), LivePortrait weights (model-card terms recorded at reproduction), InsightFace `buffalo_l` models (non-commercial research only, verified from LivePortrait's own LICENSE) — and the spike is declared **research / internal evaluation only** | PRD §27 requires model licensing separately from code licensing and forbids treating a research-only model as production-ready without flagging it | §6 |
-| D7 | CPU only: the torch stack is routed by the upstream's own `flag_force_cpu` with `flag_use_half_precision=False`; the ONNX sessions land on CPU because the pinned CPU-only ONNX Runtime has no CUDA provider (§2, §7.2). No CUDA, no ONNX/OpenVINO conversion, no `torch.compile` | Both flags are official configuration fields; the provider fallback is documented upstream behaviour of the pinned wheel; anything else is upstream redesign and a stop condition | §5, §7 |
+| D7 | CPU only: the torch stack is routed by the upstream's own `flag_force_cpu` with `flag_use_half_precision=False`; the ONNX sessions land on CPU because the pinned CPU-only ONNX Runtime has no CUDA provider (§2, §7 step 2). No CUDA, no ONNX/OpenVINO conversion, no `torch.compile` | Both flags are official configuration fields; the provider fallback is documented upstream behaviour of the pinned wheel; anything else is upstream redesign and a stop condition | §5, §7 |
 | D8 | Only `eyeball_direction_x` and `eyeball_direction_y` may be non-neutral; every other retargeting control is held at its neutral value and the eye-open/lip-open ratio retargeting is provably **not invoked** | Isolates the gaze-direction manipulation the research selected from the eye-open-ratio retargeting it must not be confused with | §8 |
 | D9 | The upstream vertical control's built-in lid ("blink") coupling is used **as published** and recorded per run, not removed | Removing it is an upstream modification (D2); the PO judges eyelid preservation knowing it is there | §2, §8 |
 | D10 | **Commanded-correction parity** with the baseline: for every image, LivePortrait attempts the same angular correction the frozen geometric baseline applied to that image (same source gaze from M2, same optical-axis target, same effective strength from the baseline's own policy record); calibration determines only the unit conversion from degrees to LivePortrait slider units — one gain, one sign and one clamp per axis — by a fit rule fixed in §9.3 | Fairness: both methods are asked to do the same thing; calibration cannot become per-image tuning because it has exactly six frozen values and a stated fit rule | §9, §11 |
 | D11 | Calibration set = the public-domain astronaut fixture (sign and monotonicity evidence only) plus the two Product Owner stills `lens-glasses` and `screen-glasses` (gain fitting), fixed here at freeze; `lens-no-glasses` and `horizontal-no-glasses` are held-out anchors because the M3 gate scored exactly those two, and all four in-range stills stay held-out | Comparability with the M3 scores; the in-range held-out set is preserved; separation is enforceable because the plan is committed and pushed with PM acknowledgement before held-out renders | §9, §10 |
-| D12 | Held-out images are rendered exactly once with the frozen mapping in the plan's seed order; every output is kept and reported, failures included; no re-renders, no parameter changes, no manual retouching | The no-cherry-picking guarantee is structural, not a promise | §9, §12 |
+| D12 | Held-out images are rendered exactly once with the frozen mapping in the plan's stratified seed order; every output is kept and reported, failures included; no re-renders, no parameter changes, no manual retouching | Completeness, the frozen pushed mapping, the recomputable controls and the reproducibility check are structural guarantees; the absence of a pre-freeze peek at held-out renders under the ignored `experiments/` tree is attested by the phase log against the PM's acknowledgement, not structurally provable | §9, §12 |
 | D13 | The baseline comparison uses **deterministic regeneration** from `m3-geometric-baseline` with the exact invocations of §11; pairing is by SHA-256 of the baseline run's written `original.png`, which is the file LivePortrait receives. Engine determinism is VERIFIED on synthetic fixtures (96/96 in M3 QA); end-to-end harness determinism on real captures is NOT VERIFIED and is established by the spike (each paired stem regenerated twice, both hashes recorded) | The same bytes go to both methods, and the assumption behind regeneration is measured rather than asserted | §11 |
-| D14 | Independent QA verifies the evidence package before the Product Owner sees anything; the PO comparison is label- and position-blind, randomized per image, on the same dimensions used for M3, plus one pairwise primary question; the PM reads the verdict | Engineering does not score visual quality; QA policy §9 budgets PO time, so the session is prepared, batched and authorized in advance | §13, §14 |
+| D14 | The §13 evidence gate — run by the PM-commissioned reviewer, or by the engineer at its true verification level if none is commissioned — precedes the PO session; the PO comparison is label- and position-blind, randomized per image, on the same dimensions used for M3, plus one pairwise primary question; the PM reads the verdict | Engineering does not score visual quality; QA policy §1/§3 reserve commissioning and the risk level to the PM; QA policy §9 budgets PO time, so the session is prepared, batched and authorized in advance | §13, §14 |
 | D15 | Maximum **two engineering days**; the stop conditions in §15 end the spike early with a report, never with a redesign | This is a feasibility spike, not a porting project | §15, §16 |
 
 ## 2. Verified facts about the candidate
@@ -268,13 +272,18 @@ flagged.
 
 ## 7. Phase A — CPU-only official reproduction gate
 
-The spike does not proceed past this phase until it passes. Nothing here
-involves GazeFix.
+The spike does not proceed past this phase until it passes. Steps 1–3
+involve no GazeFix code; steps 4–5 use the product venv only to read M2 as
+§8.2 defines, so the baseline worktree and product venv are set up in step 1
+as well.
 
 1. Clone the pinned revision; create the spike venv and install the pinned
    environment; download the pinned human weights with the recorded command;
    cross-check and seal the hashes (§5); verify the InsightFace pack
-   pre-check (§5) before any upstream import.
+   pre-check (§5) before any upstream import. Create the detached baseline
+   worktree (§4.1) and regenerate the astronaut fixture's baseline record
+   (§11), whose written `original.png` — the canvased 1280×720 fixture — is
+   the input for steps 4–5.
    - **1b.** Fetch the model repository's `README.md` and any `LICENSE*` at
      the pinned revision with a recorded command; record their SHA-256 and
      the licence terms verbatim (§6). If the recorded terms exclude
@@ -286,19 +295,26 @@ involves GazeFix.
    input. What must hold: official code, official inputs, official flags, no
    edits. **The ONNX-provider `UserWarning` described in §2 is expected on
    this run and is not a §15.2 stop.**
-3. Record: wall time, peak memory if obtainable, output produced,
-   `torch.cuda.is_available()` `False` throughout, and the provider actually
-   used by each ONNX session (§8.3).
-4. Run the programmatic retargeting driver (§8) on an upstream example
-   source image with **all controls neutral**, three times. Identity
-   criterion, pre-declared in `plan.json` with these defaults: in-mask PSNR
-   (`mask_ori > 0`) between output and input ≥ 30 dB, and the M2 reading of
-   the output (§8.2) within 1.0° of the input's on each axis. The three
-   neutral renders also establish the **M2 noise floor** (largest pairwise
-   difference of their M2 readings) used by §8.2.
+3. Record, for that CLI subprocess: wall time, peak memory if obtainable,
+   the output produced, its captured stdout and stderr including the
+   expected ONNX-provider `UserWarning`, and — from the same venv —
+   `onnxruntime.get_available_providers()` (no CUDA) and
+   `torch.cuda.is_available()` (`False`). Per-session providers and thread
+   counts cannot be observed inside an unmodified subprocess; they are
+   recorded from step 4 onward through §8.3.
+4. Run the programmatic retargeting driver (§8) on the fixture input of
+   step 1 with **all controls neutral**, three times (its SHA-256 in the
+   Phase A manifest). Identity criterion, pre-declared in `plan.json` with
+   these defaults: in-mask PSNR (`mask_ori > 0`) between output and input
+   ≥ 30 dB, and the M2 reading (§8.2) of the output within 1.0° of the
+   input's on each axis. The **M2 noise floor** is `max(floor_min,
+   max over the three renders and both axes of |M2(output) − M2(input)|)`
+   with `floor_min = 0.5°` pre-declared; it is the reference for every
+   direction test. (The three renders are expected to be byte-identical;
+   their mutual agreement is a determinism check, not the floor.)
 5. Run the same with `eyeball_direction_x = +20` and separately `−20`; the
    two outputs must move the M2 yaw reading in opposite directions, each by
-   more than three times the noise floor.
+   more than `floor_factor × floor` with `floor_factor = 3` pre-declared.
 
 **Pass:** all steps complete on CPU with no CUDA, no ONNX/OpenVINO
 conversion, no upstream edit. **Stop (§15):** any step requires editing
@@ -321,8 +337,11 @@ copy of upstream's one-line `partial_fields`, then
 therefore the official `0.15`, and the live `inference_cfg`, `crop_cfg` and
 `args` objects are recorded in the manifest after construction.
 
-Per image, in this order: `init_retargeting_image(2.5, …, image)` and then
-`execute_image_retargeting(...)` with:
+Per image, in this order: `init_retargeting_image(2.5, …, path)` and then
+`execute_image_retargeting(...)`, where `path` is the **string path** of the
+paired `original.png` for both calls — never an in-memory array, which the
+first call rejects — so the bytes hashed as the pairing key are exactly the
+bytes upstream decodes. The remaining arguments:
 
 | Control | Value | Why |
 | --- | --- | --- |
@@ -352,7 +371,7 @@ is void.
    §9.2 must move the M2 reading monotonically in the expected direction:
    Spearman rank correlation between control value and M2 delta ≥ 0.9 with
    the expected sign, on each axis, and the endpoint-to-endpoint M2
-   difference greater than three times the §7 noise floor. "M2 reading"
+   difference greater than `floor_factor × floor` from §7. "M2 reading"
    means the fused camera-relative `yaw_deg` / `pitch_deg` that GazeFix's
    frozen estimator reports when the baseline harness analyses the rendered
    output at strength 0 in the product venv (analysis only, no correction;
@@ -396,7 +415,7 @@ actually used rather than what was available.
 | Set | Members | Codex may |
 | --- | --- | --- |
 | Calibration | `tests/assets/astronaut_face.png` canvased to 1280×720 by the harness (`--canvas 1280x720`, default face scale) — used for sign and monotonicity evidence only, not gain fitting, because its upscaled 107 px face gives low-resolution M2 readings; plus the Product Owner stills **`lens-glasses`** and **`screen-glasses`**, used for gain fitting. Fixed here at freeze | render freely, inspect, iterate within the grid |
-| Held-out | `horizontal-no-glasses`, `horizontal-glasses`, `notes-no-glasses`, `notes-glasses`, `lens-no-glasses`, `screen-no-glasses`, and the clip frames of §10 — in the seed order written to `plan.json` | render **once** each with the frozen mapping; inspect only after all are rendered; never re-render, retouch or change a control |
+| Held-out | `horizontal-no-glasses`, `horizontal-glasses`, `notes-no-glasses`, `notes-glasses`, `lens-no-glasses`, `screen-no-glasses`, and the clip frames of §10 — in the **stratified seed order** written to `plan.json`: the in-range paired stems first, then everything else, seed order within each stratum (§10, §16) | render **once** each with the frozen mapping; inspect only after all are rendered; never re-render, retouch or change a control |
 
 If a calibration still fails detection it is recorded and the remaining
 members are used; the fixture alone suffices for signs and monotonicity, and
@@ -410,10 +429,10 @@ Single-axis sweeps on each calibration image, controls otherwise neutral:
 - vertical: `y ∈ {−30, −20, −10, 0, 10, 20, 30}`, `x = 0`;
 - four combined points `(±10, ±15)`.
 
-These are well inside the official ranges (±30, ±63). Calibration may
-**narrow** the usable range to a grid value (a clamp) where artifacts
-appear, naming the image and grid point as evidence; it may not extend the
-range or add off-grid points.
+These are well inside the official ranges (±30, ±63). The clamps default to
+the grid endpoints, `Xmax = 20` and `Ymax = 30`. Calibration may **narrow**
+them to a smaller grid value where artifacts appear, naming the image and
+grid point as evidence; it may not extend the range or add off-grid points.
 
 ### 9.3 The frozen mapping and its fit rule
 
@@ -432,21 +451,27 @@ with exactly six frozen values. The **fit rule**: on each gain-fitting
 calibration image and axis, the §9.2 sweep gives the M2 response (delta of
 the fused `yaw_deg` or `pitch_deg` between rendered output and original)
 against the control value; a least-squares line through those points gives
-that image's slope in degrees per slider unit; `gx` (resp. `gy`) is the
-reciprocal of the median slope across the gain-fitting images, `sx`
-(resp. `sy`) is the sign that makes the response move toward the commanded
-direction, and `Xmax`, `Ymax` are grid values. The per-image slopes and
-residuals are written to `plan.json` beside the six values. One
+that image's **signed** slope in degrees per slider unit. With `m` the
+median of those signed slopes across the gain-fitting images: `gx = 1/|m|`,
+`sx = sign(m)` (resp. `gy`, `sy`), so that `sx·gx·Δyaw` moves the response
+in the commanded direction; `Xmax`, `Ymax` are grid values (§9.2). The
+signed per-image slopes, `m`, and the residuals are written to `plan.json`
+beside the six values, so QA can recompute all six from the sweep data. One
 verification render of each calibration image at its own mapped `(x, y)`
 is permitted and recorded. The gain is a unit conversion measured on
 controlled perturbations; it does not look at held-out images and does not
 look at the baseline's output.
 
 The plan freeze is a commit on `codex/liveportrait-spike`, **pushed to
-origin and acknowledged by the PM before any held-out render**; every
-held-out manifest records that commit's SHA, the branch HEAD at render
-time, and the plan's SHA-256, so QA verifies ancestry against origin rather
-than trusting a local file.
+origin and acknowledged by the PM before any held-out render**. The
+acknowledgement artifact is `spike/liveportrait/evidence/plan-freeze.json`:
+the pushed commit SHA, the plan's SHA-256, and the PM's acknowledgement
+quoted verbatim with its timestamp. Every held-out manifest records that
+commit's SHA, the branch HEAD at render time and the plan's SHA-256, and the
+phase log carries `plan pushed` and `PM acknowledged` entries, so QA checks
+origin ancestry **and** that every held-out render timestamp follows the
+acknowledgement. The wait for the acknowledgement is outside the two-day
+count (§16).
 
 If no gain reproduces the commanded direction on the calibration set, that
 is a §15.4 stop with evidence, not a reason to invent per-image values.
@@ -466,7 +491,7 @@ Use the existing M3 captures wherever suitable; never fabricate coverage.
 | Condition required | Source in the existing M3 capture set | If missing |
 | --- | --- | --- |
 | horizontal gaze offset | `horizontal-no-glasses`, `horizontal-glasses` | record gap |
-| vertical gaze offset | `notes-no-glasses`, `notes-glasses` (down), `screen-*` (small) | record gap |
+| vertical gaze offset | `notes-no-glasses`, `notes-glasses` (down), `screen-no-glasses` (small) | record gap |
 | moderate offset in range | any held-out still whose baseline `policy.deviation_deg` is ≥ 10° (values above 20° are noted, not excluded) | record which stills fall outside |
 | direct / null case | `lens-no-glasses` (held-out), `lens-glasses` (calibration) | — |
 | modest head pose | one or two frames from `minor-rotation.mp4` | record gap |
@@ -481,24 +506,33 @@ Rules:
   indices chosen and recorded in `plan.json` before calibration; each
   extracted PNG's SHA-256 is recorded and the frame is then treated like any
   other still, with `--unmirror` applied by the harness (§11).
-- **Eligibility for the paired comparison**: the baseline record shows both
-  eyes `CORRECTED`. This conditions the paired set on the baseline's own
-  success and is stated as a known bias: the geometric class fails
-  structurally exactly where it skips. Therefore a second, unpaired class
-  exists — **baseline-declined**: every held-out stem the baseline skipped
-  whose policy record still has `effective_strength > 0` is rendered once
-  with the frozen mapping and shown to the PO as original-versus-LivePortrait
-  on the key criterion only, reported separately, never counted in the
-  pairwise majority. A near-blink frame is paired only if both apertures in
-  the baseline record are at least 0.18; otherwise it is baseline-declined.
+- **Three classes, fixed in `plan.json` from the baseline records before
+  any held-out render.** *Paired*: the baseline record shows frame status
+  `CORRECTED` with **both** eyes `CORRECTED`. *Baseline-declined*: the
+  policy record has `effective_strength > 0` but at least one eye is not
+  `CORRECTED` (a frame-level skip, or the pair rule's one-eye outcome); such
+  a stem is rendered once with the frozen mapping and shown to the PO as
+  original-versus-LivePortrait on the key criterion only, reported
+  separately and never counted in the pairwise majority. *Excluded*:
+  `effective_strength == 0` — neither method is asked to do anything.
+  Pairing conditions the comparison on the baseline's own success and is
+  stated as a known bias: the geometric class fails structurally exactly
+  where it skips, and the baseline-declined answers are the evidence about
+  that region. A near-blink frame is paired only if
+  `experiments[0].eye_geometry.<side>.aperture` is at least 0.18 for both
+  eyes in the baseline record (the engine's own `min_aperture` gate);
+  otherwise it is baseline-declined.
+- **In range** means the baseline's `policy.deviation_deg ≥ 10°` (above 20°
+  noted, not excluded). The §14 majorities and the floor below are defined
+  on **one set: in-range paired stems**, fixed in `plan.json`, so the
+  denominator is never chosen after unblinding.
 - **Realistic arithmetic**: the existing set yields at most ten held-out
-  images (six stills plus up to four clip frames), of which the four
-  `horizontal-*` / `notes-*` stills are the candidates for the operating
-  range. The in-range/out-of-range partition is fixed in `plan.json` from
-  the baseline records before any held-out render, so the §14 denominator
-  is never chosen after unblinding. Fewer than **four** in-range held-out
-  images makes the outcome `INCONCLUSIVE` before the PO session (§14), and
-  fewer than **six** eligible held-out images in total is a §15.5 stop.
+  images (six stills plus up to four clip frames); only the four
+  `horizontal-*` / `notes-*` stills can be in range, so the floor below has
+  one image of slack at best. Fewer than **three** in-range paired stems
+  makes the outcome `INCONCLUSIVE` before the PO session (§14); fewer than
+  **six** held-out stems in the paired and baseline-declined classes
+  together is a §15.5 stop.
 - **Mirroring**: `plan.json` records the `unmirror` value and its source —
   the M3 gate batch's `report.json["arguments"]["unmirror"]` (reading a flag
   is not reusing a render) or the PO's answer relayed by the PM — before
@@ -511,15 +545,21 @@ Rules:
 
 **Deterministic regeneration is authoritative.** Existing local M3 renders
 are not reused. All invocations run from the root of the
-`m3-geometric-baseline` worktree in the product's Windows venv, with the
-argument list recorded verbatim per stem in the spike manifest and checked
-by QA against `report.json["arguments"]`:
+`m3-geometric-baseline` worktree in the product's Windows venv; `--inputs`,
+`--image` and `--out` take **absolute paths** into the primary checkout's
+ignored `experiments/` tree (a fresh worktree has none), and the argument
+list is recorded verbatim per stem in the spike manifest. QA compares it,
+modulo those absolute paths, against `batch.json["experiments"][stem]
+["arguments"]` for batch stems and against the parsed keys of
+`report.json["arguments"]` (`image`, `strength`, `debug`, `unmirror`,
+`canvas`, `variant`) for every stem. `--unmirror` applies to PO captures —
+stills and extracted clip frames — and **never** to the astronaut fixture:
 
 | Input class | Invocation |
 | --- | --- |
 | the eight PO stills (and the three clips, whose runs are not used for pairing) | `python -m scripts.correction_batch po --inputs experiments/inputs [--unmirror]` — the M3 gate's PO mode: default variant C, default settings, policy on, requested strength `.7`, optical-axis target, no smoothing, `--debug`. The batch requires all eleven named files to be present |
 | an extracted clip frame | `python -m gazefix.correction.harness --image <frame.png> --strength .7 --debug [--unmirror] --out <batch-root> --name <stem>` — the image-mode run, not the clip run, is the paired baseline |
-| the astronaut fixture | the same, with `--image tests/assets/astronaut_face.png --canvas 1280x720` |
+| the astronaut fixture | the same, with `--image tests/assets/astronaut_face.png --canvas 1280x720` and without `--unmirror` |
 | M2 reading of any rendered output (§8.2) | `python -m gazefix.correction.harness --image <render.png> --strength 0 --debug --out <spike-run> --name <stem>-<method>` — strength 0 analyses and returns the frame unchanged |
 
 Each paired stem is regenerated **twice**; both `corrected.png` hashes are
@@ -532,8 +572,9 @@ regeneration provenance `repository.head` (must be `f3831b5…`) and
 `source.sha256` (the raw capture file, provenance only) and
 `source.unmirror`; and from `experiments[0]`: `gaze.yaw_deg`,
 `gaze.pitch_deg`, `policy.effective_strength`, `policy.deviation_deg`,
-`correction.status`, `correction.message`, and per eye
-`correction.eyes[i].status`, `.reason`, `.clamped`, `.displacement_px`.
+`correction.status`, `correction.message`, per eye
+`correction.eyes[i].status`, `.reason`, `.clamped`, `.displacement_px`, and
+`eye_geometry.<side>.aperture` (present because every run uses `--debug`).
 
 **Pairing key**: the SHA-256 of the baseline run's written `original.png`,
 computed by `manifest.py` when the spike copies that file and recomputed by
@@ -556,7 +597,7 @@ Per evaluated image, under `experiments/liveportrait/<run-id>/<stem>/`:
 | `liveportrait.png` | the LivePortrait paste-back output at native size (SHA-256 recorded) |
 | `three_way.png` | QA sheet: original / geometric / LivePortrait side by side at native scale, in that fixed order, labelled by method — **never shown to the PO** |
 | `po_sheet.png` | PO sheet: original in the fixed first position, then the two corrected results in the two result positions in **A, B order, where the position draw is per image** (§14); labels are the letters only; no method names, file names, control values or crop boundaries visible |
-| `eyes_3x.png` | the same three panels as `po_sheet.png`, eye region enlarged 3× with nearest-neighbour or a recorded filter, identical crop box for all three |
+| `eyes_3x.png` | the same three panels as `po_sheet.png`, eye region enlarged 3× with nearest-neighbour or a recorded filter, identical crop box for all three; the crop box and filter are recorded per stem in the manifest so QA can re-derive the sheet |
 | `crop_meta.json` | upstream crop box, `M_c2o`, source landmark count, crop scale 2.5, `det_thresh`, `dsize`, `vx_ratio`, `vy_ratio`, `flag_do_rot`, post-load image size, stitching and paste-back flags |
 | `timing.json` | per-stage timing from the §8.3 wrappers, paste-back as remainder, total offline wall time; the baseline's own stage timings from its report |
 
@@ -582,13 +623,17 @@ Otherwise the max absolute difference and in-mask PSNR are recorded against
 a tolerance pre-declared in `plan.json`; exceeding it is the §15.6 stop.
 
 **What the design lets independent QA prove:** no cherry-picking (the
-held-out manifests contain every stem of the frozen seed-ordered list up to
-the recorded truncation index, exactly once, `FAILED` included); separation
-(every held-out manifest names a plan-freeze commit that is an ancestor on
-origin and predates the render, with matching plan hash); correct upstream
-model (commit, clean tree, publisher-checked hashes, pack pre-check); correct
-baseline pairing (pairing-key equality per stem, baseline provenance,
-`unmirror` equal to the plan); reproducibility (the check above).
+held-out manifests contain every stem of the frozen stratified list up to
+the recorded truncation index, exactly once, `FAILED` included); no
+per-image tuning (for every held-out and baseline-declined stem, `(x, y)`
+recomputed from the manifest's `(Δyaw, Δpitch)` and the plan's six values,
+clamps included, equals the recorded controls); separation (every held-out
+manifest names a plan-freeze commit that is an ancestor on origin, carries
+its plan hash, and has a render timestamp after the PM's acknowledgement in
+`plan-freeze.json`); correct upstream model (commit, clean tree,
+publisher-checked hashes, pack pre-check); correct baseline pairing
+(pairing-key equality per stem, baseline provenance, `unmirror` equal to the
+plan for PO captures); reproducibility (the check above).
 
 ## 13. Independent QA gate — before the Product Owner sees anything
 
@@ -612,17 +657,24 @@ recertification; it verifies, in this order, and stops when done:
    providers and threads;
 3. control isolation (§8): spy counts zero, ratio equality, neutral
    controls, flags `True`, construction path, `blink` recorded;
-4. separation and completeness (§9, §12): plan-freeze commit ancestry on
-   origin; plan hash in every held-out manifest; held-out count equals the
-   truncation rule; no re-render; `FAILED` cases present;
-5. pairing (§11): pairing-key equality per stem; both baseline regeneration
-   hashes; `repository.head` and `tracked_changes`; `unmirror` equal to the
-   plan; argument lists equal to §11;
+4. separation, completeness and no tuning (§9, §12): plan-freeze commit
+   ancestry on origin and render timestamps after the acknowledgement in
+   `plan-freeze.json`; plan hash in every held-out manifest; held-out count
+   equals the truncation rule; no re-render; `FAILED` cases present; the six
+   mapping values recomputed from the recorded sweep slopes; `(x, y)`
+   recomputed per stem from `(Δyaw, Δpitch)` and the six values, clamps
+   included, equal to the recorded controls;
+5. pairing and parity (§11, §12): pairing-key equality per stem; both
+   baseline regeneration hashes; `repository.head` and `tracked_changes`;
+   `unmirror` equal to the plan for PO captures; argument lists equal to §11
+   modulo absolute paths; the achieved-delta ratio and both clamp states
+   present per stem and recomputable from the recorded M2 readings;
 6. reproducibility (§12): the one re-render;
-7. sheet integrity: each `three_way.png`, `po_sheet.png` and `eyes_3x.png`
-   decodes back to the three recorded images with no post-processing; QA
-   records the per-stem letter → output-hash map it derives while decoding,
-   for the post-session check of §14.
+7. sheet integrity: each `three_way.png` and `po_sheet.png` decodes back to
+   the three recorded images with no post-processing, and each `eyes_3x.png`
+   equals the recorded crop box of those images enlarged with the recorded
+   filter; QA records the per-stem letter → output-hash map it derives while
+   decoding, for the post-session check of §14.
 
 QA does not score visual quality and does not debug the candidate (QA
 policy §7). Outcome vocabulary: `SPIKE EVIDENCE VERIFIED — READY FOR PO
@@ -681,12 +733,18 @@ batched session (QA policy §9); the PM authorizes its length before it runs.
   non-regression guard; lid motion from the coupled term is scored under
   eyelid preservation like any other effect. **`NOT MATERIALLY MORE
   NATURAL`** if the pairwise or key-criterion majority goes to the geometric
-  result or to "neither". **`INCONCLUSIVE`** if fewer than four in-range
-  images exist, or the answers split without a clear majority either way;
-  the record then states what is missing and what it would cost.
+  result or to "neither". **`INCONCLUSIVE`** if fewer than three in-range
+  paired stems exist (§10), or the answers split without a clear majority
+  either way; the record then states what is missing and what it would cost.
 - **After unblinding**, the results are recorded per image with the method
-  revealed, alongside the manifest hashes and the PM's reading, in
-  `docs/milestones/model-feasibility-evaluation.md`.
+  revealed — beside each image's achieved-delta ratio, LivePortrait's clamp
+  state per axis and the baseline's per-eye `clamped`, so the PM can see an
+  under- or over-correction next to the PO's answers — alongside the
+  manifest hashes and the PM's reading, in
+  `docs/milestones/model-feasibility-evaluation.md`. The PM closes the spike
+  there with **`MODEL FEASIBILITY SPIKE COMPLETE`** and the single
+  recommendation the brief asks for, or with **`MODEL FEASIBILITY SPIKE
+  BLOCKED`** on a §15 stop.
 
 ## 15. Success, stop and escalation criteria
 
@@ -729,11 +787,16 @@ up to one day; held-out renders, sheets, manifests and the report the
 remainder. The Product Owner session and independent QA are outside the
 timebox. CPU render time is part of the budget: if per-image time on the
 target machine makes the full held-out list infeasible, render a **prefix**
-of the seed-ordered list frozen in `plan.json`, recording the truncation
-index and the measured per-image time — the in-range minimum of §10 and the
-six-image minimum of §15.5 still apply, and the §12 completeness proof
-counts against the recorded index. Calibration and evidence steps are never
-skipped to save time; if even the minima are infeasible, stop (§15.7).
+of the stratified list frozen in `plan.json` — in-range paired stems come
+first, so a prefix can never omit one while an out-of-range stem is
+rendered — recording the truncation index and the measured per-image time;
+the three-stem minimum of §10 and the six-stem minimum of §15.5 still apply,
+and the §12 completeness proof counts against the recorded index.
+Calibration and evidence steps are never skipped to save time; if even the
+minima are infeasible, stop (§15.7). Waiting for the PM's plan
+acknowledgement is outside the count; rework after `SPIKE EVIDENCE CHANGES
+REQUIRED` is outside the count too but is logged as its own phase and needs
+the PM's authorization if it exceeds half a day.
 
 ## 17. Future architecture implications — documented, not implemented
 
@@ -742,8 +805,11 @@ unblinded record:
 
 **`NOT MATERIALLY MORE NATURAL`:** engineering records the evidence; the
 **PM** decides whether LivePortrait is rejected as a candidate and whether
-to reproduce ST-ED next under a new, equally bounded spike SA. The geometric
-baseline remains the reference. Nothing in the architecture changes.
+to reproduce ST-ED next under a new, equally bounded spike SA. The verdict
+is measured on stems the baseline itself corrected, so the PM reads the
+baseline-declined answers before treating the geometric baseline as adequate
+where it skips. The geometric baseline remains the reference. Nothing in
+the architecture changes.
 
 **`INCONCLUSIVE`:** engineering records what is missing (in-range coverage,
 detections, a split result) and what it would cost to resolve; the PM
@@ -791,8 +857,8 @@ refusal-to-run rule (§5); the licensing statements and the screening
 verdict (§6); the CPU flags, the no-conversion rule and the Phase A
 criteria (§7); the construction path, the neutral-control contract, the
 four evidence items and the instrumentation limits (§8); the sets, grid,
-six-value mapping, fit rule, plan-freeze rule and post-freeze prohibitions
-(§9); the eligibility rules, the baseline-declined class, the arithmetic
+six-value mapping, fit rule, plan-freeze and acknowledgement rule and
+post-freeze prohibitions (§9); the eligibility rules, the baseline-declined class, the arithmetic
 minima and the pairing bytes (§10–§11); the artifact and manifest contents
 (§12); the QA gate order and the PO design including the position rule and
 verdict vocabulary (§13–§14); the stop list, the timebox and the prefix
@@ -810,10 +876,12 @@ phase that uses them.
 `docs/milestones/model-feasibility-report.md`, written by Codex at handoff,
 satisfies the brief's per-candidate deliverable and the stop vocabulary:
 
-1. **Status line**, exactly one of `MODEL FEASIBILITY SPIKE COMPLETE —
-   READY FOR QA` (evidence package produced) or `MODEL FEASIBILITY SPIKE
-   BLOCKED` (with the §15 condition that fired). The product verdict is
-   not in this report; it is the PM's reading in §14.
+1. **Status line**, exactly one of `SPIKE EVIDENCE PACKAGE READY FOR QA`
+   (evidence package produced; the §13 gate and the §14 session follow) or
+   `SPIKE BLOCKED — <§15 condition>`. The brief's terminal words belong to
+   the PM: `MODEL FEASIBILITY SPIKE COMPLETE` is declared in
+   `model-feasibility-evaluation.md` after §14, `MODEL FEASIBILITY SPIKE
+   BLOCKED` on a stop. The product verdict is not in this report.
 2. **Candidate record**: source and weights availability with links and
    revisions; the code licence and the recorded weight licence verbatim
    with source; the exercised InsightFace models; hardware and runtime
@@ -829,4 +897,19 @@ satisfies the brief's per-candidate deliverable and the stop vocabulary:
    metadata; stated as offline measurements, never as a real-time claim.
 5. **Phase log** against the two-day timebox.
 6. **Evidence pointers**: run ids, manifest paths, the sealed-key hash.
-7. **Gaps**: what could not be verified and what it would cost.
+7. **Screening verdict and engineering recommendation**: the brief's
+   criterion-3 verdict with its specific blocker (§6, restated on the
+   recorded weight terms), and Codex's engineering recommendation on
+   reproducibility and cost — never a visual-quality judgment.
+8. **Gaps**: what could not be verified and what it would cost.
+
+## 21. Review dispositions — fixes not taken, and why
+
+| Proposed by the review | Disposition |
+| --- | --- |
+| Reach the cropper's real CPU branch through a spike-local subclass passing `Cropper(crop_cfg, flag_force_cpu=True)` | **Not taken.** D2 forbids reproducing upstream constructors; the pinned CPU-only runtime's provider fallback is documented upstream behaviour, is recorded per session (§8.3), and is declared not a stop (§7 step 2, §15.2) |
+| Gate the §14 verdict on an achieved-delta ratio band (e.g. 0.7–1.3) | **Not taken.** The brief defines "materially more natural" perceptually and the PM-ratified M3 rule forbids objective pass scores; the ratio and clamp states are recorded, verified by QA and placed beside the PO's answers for the PM (§12–§14) |
+| Lower the in-range floor to three versus keeping four | **Taken at three** (§10, §14): only four stills can be in range, so four had no slack; three keeps one |
+| Fetch the model card through the weights download by dropping upstream's `--exclude` | **Not taken** as written; the card is fetched by a separate recorded command (§7 step 1b) so the weights download stays exactly the upstream form plus `--revision` and the human-only `--include` |
+| Commit fixture renders as the one visual example | **Conditional** (§4.3): only if the recorded weight terms permit redistribution of outputs |
+| Name a PM-authored empty commit as the plan acknowledgement | **Not taken**; the PM's reply is quoted with its timestamp in `plan-freeze.json` and checked against the phase log (§9.3, §13 step 4), which needs no PM git action |
