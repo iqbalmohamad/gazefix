@@ -127,7 +127,7 @@ producing it by modifying `gazefix/`.
 
 | Purpose | Reference | Rule |
 | --- | --- | --- |
-| Spike work | branch **`codex/liveportrait-spike`**, created from the freeze commit of this SA | the only branch that receives spike commits |
+| Spike work | branch **`codex/liveportrait-spike`**, created from the **assignment-pointer commit that follows the freeze** (it cites the frozen SHA and carries the PM's risk-level and reviewer decisions), so the branch never carries the superseded scouting brief | the only branch that receives spike commits |
 | Frozen baseline | `m3-geometric-baseline` @ `f3831b5…`, checked out as a **separate worktree**, detached at that SHA | never checked out into the spike branch's tree; never modified; every regeneration runs from this worktree's root in the product venv |
 | This SA | `model-feasibility-architecture-v1` | frozen; amend only through a PM-authorized revision |
 | All previously frozen refs | `main`, `milestone-0/1/2`, `architecture-v1`, `m3-architecture-v1/.1/.2/.3`, `m3-geometric-baseline` | untouched, verified before and after the spike |
@@ -156,6 +156,9 @@ spike/liveportrait/                     committed — the only home of spike cod
                                         metadata — never Product Owner pixels
     <run-id>/po-key.json                the unsealed randomization key, committed only
                                         after the PO session (§14)
+    plan-freeze.json                    pushed plan commit, plan hash, PM acknowledgement (§9.3)
+    model-card-licence.md               the weight-licence text recorded verbatim (§5, §7)
+    fixture/                            fixture renders, only under the §4.3 condition
   .venv/                                GIT-IGNORED (matched by the existing `.venv/` rule)
   upstream/                             GIT-IGNORED: clone of the pinned revision, unmodified
     pretrained_weights/                 GIT-IGNORED: the pinned weights, upstream layout
@@ -174,7 +177,7 @@ paths under `spike/` and `experiments/` must be ASCII.
 
 | Committed | Ignored, local only |
 | --- | --- |
-| adapters, pins, plan, run manifests, the unsealed PO key after the session, README | upstream clone, weights, the spike venv and any wheel cache, every Product Owner capture and every render or sheet derived from one, the sealed key until the session is scored |
+| adapters, pins, plan, run manifests, `plan-freeze.json`, `model-card-licence.md`, the unsealed PO key after the session, fixture renders under the condition below, README | upstream clone, weights, the spike venv and any wheel cache, every Product Owner capture and every render or sheet derived from one, the sealed key until the session is scored |
 
 Renders of the public-domain astronaut fixture stay under `experiments/`
 by default; they may be committed under `spike/liveportrait/evidence/fixture/`
@@ -272,10 +275,10 @@ flagged.
 
 ## 7. Phase A — CPU-only official reproduction gate
 
-The spike does not proceed past this phase until it passes. Steps 1–3
-involve no GazeFix code; steps 4–5 use the product venv only to read M2 as
-§8.2 defines, so the baseline worktree and product venv are set up in step 1
-as well.
+The spike does not proceed past this phase until it passes. Steps 2–3
+involve no GazeFix code; step 1 uses the product venv only to regenerate the
+fixture's baseline record, and steps 4–5 only to read M2 as §8.2 defines, so
+the baseline worktree and product venv are set up in step 1 as well.
 
 1. Clone the pinned revision; create the spike venv and install the pinned
    environment; download the pinned human weights with the recorded command;
@@ -362,8 +365,10 @@ must have both sides divisible by 16 and no side above 1280 (true of 1280×720)
 so that both upstream loads see identical arrays; the post-load size is
 recorded. The driver catches any exception per image into
 `FAILED: <exception text>` and continues the batch; an output whose size
-differs from the input's is recorded as `FAILED: size mismatch` and the pair
-is void.
+differs from the input's is recorded as `FAILED: size mismatch` and follows
+the §14 rule for `FAILED` renders. "Void" is reserved for a pairing-key
+mismatch (§11): an evidence defect, removed from every count and reported
+to QA.
 
 ### 8.2 Required evidence, per run
 
@@ -415,7 +420,7 @@ actually used rather than what was available.
 | Set | Members | Codex may |
 | --- | --- | --- |
 | Calibration | `tests/assets/astronaut_face.png` canvased to 1280×720 by the harness (`--canvas 1280x720`, default face scale) — used for sign and monotonicity evidence only, not gain fitting, because its upscaled 107 px face gives low-resolution M2 readings; plus the Product Owner stills **`lens-glasses`** and **`screen-glasses`**, used for gain fitting. Fixed here at freeze | render freely, inspect, iterate within the grid |
-| Held-out | `horizontal-no-glasses`, `horizontal-glasses`, `notes-no-glasses`, `notes-glasses`, `lens-no-glasses`, `screen-no-glasses`, and the clip frames of §10 — in the **stratified seed order** written to `plan.json`: the in-range paired stems first, then everything else, seed order within each stratum (§10, §16) | render **once** each with the frozen mapping; inspect only after all are rendered; never re-render, retouch or change a control |
+| Held-out | `horizontal-no-glasses`, `horizontal-glasses`, `notes-no-glasses`, `notes-glasses`, `lens-no-glasses`, `screen-no-glasses`, and the clip frames of §10 — in the **stratified seed order** written to `plan.json`: the in-range paired **stills** first, then everything else, seed order within each stratum (§10, §16) | render **once** each with the frozen mapping; inspect only after all are rendered; never re-render, retouch or change a control |
 
 If a calibration still fails detection it is recorded and the remaining
 members are used; the fixture alone suffices for signs and monotonicity, and
@@ -524,19 +529,24 @@ Rules:
   otherwise it is baseline-declined.
 - **In range** means the baseline's `policy.deviation_deg ≥ 10°` (above 20°
   noted, not excluded). The §14 majorities and the floor below are defined
-  on **one set: in-range paired stems**, fixed in `plan.json`, so the
-  denominator is never chosen after unblinding.
+  on **one set: in-range paired stills**, fixed in `plan.json`, so the
+  denominator is never chosen after unblinding. Clip frames are never
+  counted, whatever their deviation: they are blind no-harm and stress
+  checks. *Excluded* stems are omitted from the stratified list and from the
+  PO session and are listed in the report with the baseline's reason.
 - **Realistic arithmetic**: the existing set yields at most ten held-out
   images (six stills plus up to four clip frames); only the four
   `horizontal-*` / `notes-*` stills can be in range, so the floor below has
   one image of slack at best. Fewer than **three** in-range paired stems
   makes the outcome `INCONCLUSIVE` before the PO session (§14); fewer than
   **six** held-out stems in the paired and baseline-declined classes
-  together is a §15.5 stop.
+  together is a §15.5 stop. Baseline-declined stems are held-out stems and
+  are subject to every held-out check of §12–§13.
 - **Mirroring**: `plan.json` records the `unmirror` value and its source —
   the M3 gate batch's `report.json["arguments"]["unmirror"]` (reading a flag
   is not reusing a render) or the PO's answer relayed by the PM — before
-  regeneration; every regenerated `report.json` must carry the same value.
+  regeneration; every regenerated `report.json` of a PO capture must carry
+  the same value (the fixture's is `false` by rule, §11).
   LivePortrait then receives the baseline run's `original.png` — the exact
   bytes the baseline corrected — so orientation, size and content are
   identical on both sides (D13).
@@ -549,8 +559,10 @@ are not reused. All invocations run from the root of the
 `--image` and `--out` take **absolute paths** into the primary checkout's
 ignored `experiments/` tree (a fresh worktree has none), and the argument
 list is recorded verbatim per stem in the spike manifest. QA compares it,
-modulo those absolute paths, against `batch.json["experiments"][stem]
-["arguments"]` for batch stems and against the parsed keys of
+modulo those absolute paths, against the `arguments` field of the
+`batch.json["experiments"]` entry whose `experiment` equals the stem (that
+list excludes the `--out`, `--name` and `--label` the batch runner appends)
+for batch stems, and against the parsed keys of
 `report.json["arguments"]` (`image`, `strength`, `debug`, `unmirror`,
 `canvas`, `variant`) for every stem. `--unmirror` applies to PO captures —
 stills and extracted clip frames — and **never** to the astronaut fixture:
@@ -608,10 +620,13 @@ upstream commit and clean-tree output; model file names and hashes; the
 InsightFace pre-check result and the exercised model list; environment and
 machine capture (§5); per-session ONNX providers, thread settings and the
 captured warning; the timestamped phase log (setup start, Phase A/B/C start
-and end, handoff); per image: stem, pairing-key hash, raw-capture hash and
+and end, `plan pushed`, `PM acknowledged`, handoff, and any `rework` phase);
+per image: stem, pairing-key hash, raw-capture hash and
 `unmirror`, batch directory and `report.json` hash, baseline provenance and
-the §11 fields, output hashes (both baseline regenerations), control values
-`(x, y)`, clamp engagement per axis, derived `blink`, source ratios and the
+the §11 fields, output hashes (both baseline regenerations), the complete
+argument vector passed to `execute_image_retargeting`, control values
+`(x, y)`, clamp engagement per axis, derived `blink`, the `eyes_3x` crop box
+and filter, source ratios and the
 zero spy counts, commanded correction `(Δyaw, Δpitch)`, M2 readings of the
 original and both outputs and the achieved-delta ratio
 LivePortrait/baseline (reported, not a gate), timings, in-range flag, and
@@ -638,9 +653,11 @@ plan for PO captures); reproducibility (the check above).
 ## 13. Independent QA gate — before the Product Owner sees anything
 
 Proposed risk level **HIGH** under QA policy §3 (model and licence
-uncertainty) — the PM confirms the level and commissions the reviewer at
-freeze; if none is commissioned, the engineer runs this list and reports
-each item at its true verification level before the PO session. The gate
+uncertainty) — the PM confirms or changes the level and commissions the
+reviewer in the assignment pointer, in the commit that follows the freeze;
+HIGH applies until then. If no reviewer is commissioned, the engineer runs
+this list and reports each item at its true verification level before the
+PO session. The gate
 runs on the machine that holds `experiments/`, the spike venv and the
 product venv; items that need artifacts unavailable to the reviewer are
 reported `NOT VERIFIED`, not skipped silently. It is targeted, not a
@@ -658,8 +675,9 @@ recertification; it verifies, in this order, and stops when done:
 3. control isolation (§8): spy counts zero, ratio equality, neutral
    controls, flags `True`, construction path, `blink` recorded;
 4. separation, completeness and no tuning (§9, §12): plan-freeze commit
-   ancestry on origin and render timestamps after the acknowledgement in
-   `plan-freeze.json`; plan hash in every held-out manifest; held-out count
+   ancestry on origin; the phase log's `PM acknowledged` timestamp equal to
+   the one quoted in `plan-freeze.json` and every held-out render timestamp
+   later than it; plan hash in every held-out manifest; held-out count
    equals the truncation rule; no re-render; `FAILED` cases present; the six
    mapping values recomputed from the recorded sweep slopes; `(x, y)`
    recomputed per stem from `(Δyaw, Δpitch)` and the six values, clamps
@@ -700,7 +718,8 @@ batched session (QA policy §9); the PM authorizes its length before it runs.
   not method recognition.
 - **FAILED held-out stems** are shown with a blank result panel in the
   failed method's position; they count in every denominator as not chosen
-  and as key-criterion "no" for the failed method.
+  and as key-criterion "no" for the failed method. **Void pairs** (§11
+  pairing-key mismatch) are excluded from every denominator and reported.
 - **Baseline-declined stems** (§10) are shown as original-versus-LivePortrait
   on the key criterion only, after the paired set, and reported separately.
 - **Dimensions**, per result: eye realism, iris realism, eyelid
@@ -765,8 +784,9 @@ was established and what blocked — if any of these occurs:
    §8.2 criteria, or no gain reproduces the commanded direction on the
    calibration set;
 5. the existing Product Owner captures are fundamentally incompatible: the
-   upstream cropper detects no face on most stills, or fewer than six
-   eligible held-out images exist;
+   upstream cropper detects no face on four or more of the eight stills, or
+   fewer than six held-out stems exist in the paired and baseline-declined
+   classes together (§10);
 6. the §12 reproducibility check exceeds the pre-declared tolerance;
 7. the two-engineering-day timebox would be exceeded to complete Phase C
    even after the §16 prefix reduction;
@@ -847,7 +867,7 @@ with a milestone SA of its own.
 | Whether upstream's "WIP" CPU path runs the still-image retargeting cleanly on the provider-fallback path | Codex — Phase A decides | Phase A |
 | End-to-end harness determinism on real captures | Codex measures (§11 double regeneration) | Phase C |
 | Whether the coupled lid term of the vertical control is acceptable | PO judges, PM reads | §14 |
-| Risk level and reviewer commissioning for §13 | PM | at freeze |
+| Risk level and reviewer commissioning for §13 | PM | in the assignment pointer, in the commit after the freeze; HIGH until then |
 
 ## 19. Handoff — what Codex must not redesign
 
@@ -867,8 +887,8 @@ rule (§15–§16); the report of §20.
 Left to the implementor: script structure and naming inside `spike/`; sheet
 layout beyond the rules given; how spies, hashing and the phase log are
 implemented; the frame indices from the two clips (recorded in the plan);
-the narrowing clamps (grid values, with evidence); and the thresholds of §7
-and §12 within the rule that they are declared in `plan.json` before the
+the narrowing clamps (grid values, with evidence); and the thresholds of §7,
+§8.2 and §12 within the rule that they are declared in `plan.json` before the
 phase that uses them.
 
 ## 20. Engineering report — the deliverable
