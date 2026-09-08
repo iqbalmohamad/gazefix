@@ -282,7 +282,19 @@ about visual quality.
   exit 0, 90 frames decoded, 0 engine failures, at the frozen settings
   (`--strength .7`, variant `layered`), and its `report.json` recorded a source
   SHA-256 identical to the derived manifest's, so the hash chain is intact.
-- `maxine`: **NOT VERIFIED**.
+- `maxine`: **PARTIALLY VERIFIED** (2026-09-08). Exercised against NVIDIA's
+  *real* client and *real* compiled protos — `nim-clients` cloned, `grpcio
+  1.67.1` installed, `compile_protos.sh` run — with a real gRPC channel attempt
+  to `grpc.nvcf.nvidia.com:443`. The connection was refused by the container's
+  egress proxy (`grpc_status:14`, proxy 403), so a *successful* NVIDIA response
+  is still unverified. Everything up to and including failure handling is
+  verified.
+
+  **The decisive result.** NVIDIA's client returned exit code **0** after a
+  total connection failure, having written nothing. A wrapper trusting the exit
+  code would have recorded three successful runs with no output. The wrapper
+  caught all three as `FAILED` with `no output file was written`. This is the
+  known client defect, reproduced and correctly handled rather than assumed.
 
 **Reproducibility, measured.** Both deterministic stages were run twice on
 identical input and produced byte-identical output: the derived input
@@ -312,6 +324,31 @@ allowlist marker, and a test proves the exemption is per line.
 3. `ffprobe` embeds an ASLR memory address in its error text, which made a
    manifest's SHA-256 differ between two freezes of the same input — destroying
    the freeze token's whole purpose. Diagnostics are now normalised.
+
+### Setup findings from the 2026-09-08 session
+
+- **Client layout.** NVIDIA's client does `sys.path.append("../../")` from its
+  `scripts/` directory to import `utils.utils`, so `utils/` must stay at the
+  clone root beside `eye-contact/`. The clone is now used as-is; the earlier
+  copy-based instructions were fragile and are gone.
+- **Dependency conflict.** NVIDIA's `grpcio-tools==1.67.1` pulls `protobuf
+  5.29.6`, which pip flags as incompatible with `mediapipe 0.10.21`
+  (`protobuf<5,>=4.25.3`). Measured after the upgrade, the frozen harness still
+  ran 90 frames with 0 failures and produced a byte-identical `corrected.mp4`,
+  so on this Linux build the conflict is metadata-level rather than a runtime
+  break. The runbook still puts NVIDIA's client in a separate virtual
+  environment: one platform and one mediapipe build is not a guarantee, and the
+  GazeFix environment must stay as the frozen baseline expects.
+- **Paths with spaces.** The Product Owner's footage lives under
+  `C:\Users\Mohammad Iqbal\Downloads\PO_M3`. `plan`, `freeze
+  --strict-probe`, `prepare`, `geometric`, `maxine`, `package` and `verify` were
+  all run with a space in both the inputs path and the workspace path, across
+  three clips, through the ffmpeg and harness subprocess boundaries. All
+  succeeded.
+- **Credential handling, re-checked under a real run.** With a credential in the
+  environment, the recorded command contains no `--api-key`, the returned record
+  and the written manifest contain no credential-shaped content, and `verify`
+  passed its secret scan.
 
 ## Scope audit
 

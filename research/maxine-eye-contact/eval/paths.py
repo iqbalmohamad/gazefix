@@ -66,12 +66,23 @@ class Workspace:
         return self.package / "answer-key" / "answer-key.json"
 
     @property
-    def client(self):
+    def client_repo(self):
+        """Root of NVIDIA's cloned nim-clients repository.
+
+        The clone is used as-is rather than copied apart: NVIDIA's client does
+        ``sys.path.append("../../")`` from its ``scripts/`` directory to import
+        ``utils.utils``, so ``utils/`` must stay at the repository root
+        alongside ``eye-contact/``.
+        """
         return self.root / "nvidia-client"
 
     @property
+    def client(self):
+        return self.client_repo / "eye-contact"
+
+    @property
     def launcher(self):
-        return self.root / "nvidia-client" / "_gazefix_launcher.py"
+        return self.root / "_gazefix_launcher.py"
 
     @property
     def preflight(self):

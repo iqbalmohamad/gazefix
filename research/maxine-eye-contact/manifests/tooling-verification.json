@@ -44,6 +44,28 @@
     ],
     "status": "VERIFIED"
   },
+  "setup_findings_2026_09_08": {
+    "client_layout": {
+      "consequence": "The clone is now used as-is. Workspace.client points at <workspace>/nvidia-client/eye-contact inside the clone, rather than copying eye-contact out and copying utils in, which was fragile and unnecessary.",
+      "finding": "NVIDIA's client does sys.path.append('../../') from its scripts/ directory to import utils.utils, so utils/ must remain at the clone root beside eye-contact/.",
+      "verified": true
+    },
+    "dependency_conflict": {
+      "advice": "Install NVIDIA's client requirements into a SEPARATE virtual environment anyway. The conflict is real at the metadata level, the measurement above is one platform and one mediapipe build, and the GazeFix environment must stay exactly as the frozen baseline expects.",
+      "finding": "NVIDIA's grpcio-tools==1.67.1 pulls protobuf 5.29.6, which pip flags as incompatible with mediapipe 0.10.21 (protobuf<5,>=4.25.3).",
+      "measured": "After the upgrade, the frozen geometric harness still ran 90 frames with 0 failures and produced a BYTE-IDENTICAL corrected.mp4 (sha256 558a2541...), so on this Linux build the conflict is metadata-level, not a runtime break."
+    },
+    "paths_with_spaces": {
+      "finding": "The Product Owner's footage lives under a path containing a space (C:\\Users\\Mohammad Iqbal\\Downloads\\PO_M3).",
+      "verified": "plan, freeze --strict-probe, prepare, geometric and package were all run end to end with a space in BOTH the inputs path and the workspace path, across three clips, including through the ffmpeg and harness subprocess boundaries. All succeeded."
+    },
+    "recommended_seed": {
+      "checked_for": "three clips P1A-01..03",
+      "note": "passes the weak-blind check; any seed may be used provided it is recorded before scoring",
+      "pinned_conditions": [],
+      "seed": "po-m3-2026-09-08"
+    }
+  },
   "steps": [
     {
       "detail": "discovered the clip, tagged its scenario, and reported the seven uncovered scenarios as NOT AVAILABLE IN EXISTING SOURCE MATERIAL",
@@ -87,8 +109,21 @@
       "step": "geometric"
     },
     {
-      "detail": "not executed. No Product Owner footage, no NVIDIA credential, and every nvidia.com host is denied by this container's egress policy. Request construction, credential handling and failure detection are covered by tests with a mocked transport; the remote call itself is unverified.",
-      "status": "NOT VERIFIED",
+      "detail": "The remote call was exercised against NVIDIA's REAL client and REAL compiled protos (nim-clients cloned, grpcio 1.67.1 installed, compile_protos.sh run), with a real gRPC channel attempt to grpc.nvcf.nvidia.com:443. The connection was refused by this container's egress proxy, so a SUCCESSFUL NVIDIA response remains unverified. Everything up to and including failure handling is verified.",
+      "measured_2026_09_08": {
+        "credential_present_in_returned_record": false,
+        "grpc_error": "grpc_status:14 failed to connect to all addresses; HTTP proxy returned response code 403",
+        "nvidia_client_returncode": 0,
+        "nvidia_client_wrote_output": false,
+        "significance": "This is the decisive check of the known NVIDIA client defect: the client exited 0 after a total connection failure, writing nothing. A wrapper trusting the exit code would have recorded a successful run with no output. The wrapper caught it.",
+        "streaming_mode_selected": true,
+        "wrapper_failures": [
+          "no output file was written",
+          "NVIDIA client reported a swallowed error on its output"
+        ],
+        "wrapper_verdict_success": false
+      },
+      "status": "PARTIALLY VERIFIED",
       "step": "maxine"
     },
     {

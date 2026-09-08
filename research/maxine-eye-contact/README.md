@@ -13,6 +13,8 @@ one question:
 
 `protocol.md` is the frozen experimental design and the authority on *why* each
 step is shaped the way it is. This file is *how to run it*.
+`RUNBOOK-windows.md` is the copy-paste version for the Product Owner's
+machine against the three existing M3 clips.
 
 ## Status of this package
 
@@ -76,26 +78,43 @@ an equivalent build.
 
 ### 3. NVIDIA's client
 
-Fetch NVIDIA's own Eye Contact client into the run workspace and compile its
-protos. GazeFix wraps this client rather than reimplementing the protocol, so
-the request sent is by construction the request NVIDIA defines.
+Clone NVIDIA's own client into the workspace and compile its protos. GazeFix
+wraps this client rather than reimplementing the protocol, so the request sent
+is by construction the request NVIDIA defines.
+
+**Keep the clone intact.** NVIDIA's client does `sys.path.append("../../")`
+from its `scripts/` directory to import `utils.utils`, so `utils/` must stay at
+the clone root beside `eye-contact/`. Do not copy `eye-contact` out on its own.
 
 ```powershell
 git clone https://github.com/NVIDIA-Maxine/nim-clients.git `
-  experiments/maxine-phase1a/nvidia-client-repo
-Copy-Item -Recurse experiments/maxine-phase1a/nvidia-client-repo/eye-contact `
-  experiments/maxine-phase1a/nvidia-client
-Copy-Item -Recurse experiments/maxine-phase1a/nvidia-client-repo/utils `
-  experiments/maxine-phase1a/nvidia-client/utils
+  experiments\maxine-phase1a\nvidia-client
 
-cd experiments/maxine-phase1a/nvidia-client
-pip install -r requirements.txt          # grpcio, grpcio-tools, tqdm
-cd protos/windows; ./compile_protos.bat  # or protos/linux/compile_protos.sh
+# a SEPARATE environment - see the warning below
+py -3.11 -m venv .venv-maxine
+.venv-maxine\Scripts\python -m pip install -r `
+  experiments\maxine-phase1a\nvidia-client\eye-contact\requirements.txt
+
+cd experiments\maxine-phase1a\nvidia-client\eye-contact\protos\windows
+..\..\..\..\..\..\.venv-maxine\Scripts\python -m grpc_tools.protoc `
+  -I=..\proto\nvidia\maxine\eyecontact\v1 `
+  --python_out=..\..\interfaces --pyi_out=..\..\interfaces `
+  --grpc_python_out=..\..\interfaces `
+  ..\proto\nvidia\maxine\eyecontact\v1\eyecontact.proto
 ```
 
-Install NVIDIA's client dependencies into a **separate** virtual environment,
-not the GazeFix product environment. They are evaluation tooling, not product
-dependencies, and `pyproject.toml` must stay unchanged.
+(`compile_protos.bat` does the same thing if it resolves your interpreter
+correctly; the explicit call above avoids depending on which `python` is first
+on `PATH`.)
+
+> **Use a separate virtual environment.** NVIDIA's `grpcio-tools==1.67.1` pulls
+> `protobuf 5.29.6`, which pip flags as incompatible with `mediapipe 0.10.21`
+> (`protobuf<5,>=4.25.3`). Measured on Linux, the frozen harness still produced
+> a byte-identical `corrected.mp4` afterwards, so the conflict is metadata-level
+> there — but that is one platform and one build, and the GazeFix environment
+> must stay exactly as the frozen baseline expects. Run the `geometric` step
+> with the GazeFix environment and the `maxine` step with `--python
+> .venv-maxine\Scripts\python`.
 
 ### 4. Credential
 
