@@ -1,6 +1,16 @@
 # GazeFix — Current Engineering Assignment
 
-**Active assignment: NVIDIA Maxine Eye Contact hosted-cloud visual feasibility — Phase 1A**
+**Active assignment: Windows virtual-camera / conferencing integration feasibility — desk research only**
+
+**`MAXINE PHASE 1A VISUAL GATE: PASS`** — Product Owner verdict supplied by
+the Product Manager's 2026-09-08 authorization. The governance record and its
+evidence limits are in `docs/milestones/virtual-camera-integration-feasibility.md`.
+
+**Maxine Phase 1B realtime/streaming feasibility requires separate future PM
+authorization; neither its research nor implementation is authorized here.**
+
+**The original PRD remains authoritative and unchanged. The primary roadmap
+remains paused at the M3 -> M4 boundary. M8 has not begun.**
 
 **Candidate Admission: FAIL — NO COMMERCIALLY ADMISSIBLE PRETRAINED PATH FOUND**
 The previous commercial-first local/offline pretrained Candidate Admission
@@ -22,78 +32,61 @@ the frozen reference geometric implementation.
 
 **Updated: 2026-09-08.**
 
-## PM authorization and sole Phase 1A question
+## PM authorization and bounded research question
 
-The Product Manager has authorized
-**`NVIDIA MAXINE EYE CONTACT HOSTED CLOUD VISUAL FEASIBILITY — PHASE 1A`**.
+The Product Manager has authorized one additional parallel track:
+**`WINDOWS VIRTUAL-CAMERA / CONFERENCING INTEGRATION FEASIBILITY RESEARCH`**.
 
-Cloud inference is permitted **for this bounded research feasibility
-evaluation only**, using NVIDIA's official hosted Maxine Eye Contact
-evaluation/trial API. This is an explicit PM exception to the local/offline
-constraint for the experiment. It does not change the PRD's production
-requirements, production privacy constraints, or frozen architecture, and
-does not authorize cloud productization.
+> Can GazeFix eventually expose a production-quality Windows camera source
+> that Zoom, Google Meet, and Microsoft Teams can consume as a normal webcam,
+> under the supported Windows product scope?
 
-> Does NVIDIA Maxine Eye Contact produce correction that is materially more
-> natural than GazeFix's frozen geometric baseline and good enough for the
-> Product Owner to consider using in a real video call?
+This authorization covers **desk research only**, independent of the
+correction backend. It must not assume Maxine becomes the product backend.
+The scope, prohibitions, evidence standard, and research outcomes are defined
+in `docs/milestones/virtual-camera-integration-feasibility.md`.
 
-This is research/evaluation execution authority only. It does not admit a
-local/offline replacement candidate or reopen the failed Candidate Admission
-cycle. No replacement Solution Architecture or model implementation from
-that cycle is authorized; no fallback candidate is authorized.
+Research may examine Windows virtual-camera mechanisms, Windows 10 versus
+Windows 11 support, Media Foundation and relevant Microsoft camera APIs,
+installation/registration, user-mode versus driver implications, signing,
+installer implications, permissions, enumeration, resolution/frame-rate/
+pixel-format compatibility, Zoom/Meet/Teams compatibility, in-call camera
+switching, failure/disconnect behavior, materially relevant multi-consumer
+constraints, product risks/blockers, and a future implementation recommendation.
+Primary Microsoft, Zoom, Google, and Teams documentation is required where
+available. Unknowns must remain explicit; desk research is not runtime proof.
 
-## Authorized Phase 1A work
+## Gate state and authorization boundaries
 
-- Evaluation-only scripts and tools outside normal product runtime paths.
-- Deterministic preparation of existing Product Owner evaluation footage.
-- Bounded upload and remote submission of existing PO evaluation clips to
-  the official NVIDIA Maxine Eye Contact hosted evaluation/trial API for
-  research/evaluation.
-- Retrieval and local storage of generated evaluation outputs outside
-  normal product runtime paths; footage and rendered outputs remain
-  uncommitted.
-- Comparison against the frozen geometric baseline, preserving its behavior.
-- Blind comparison tooling and blind PO visual-gate preparation.
-- Scoring manifests, hashes, and audit metadata.
+The Phase 1A visual PASS means only that NVIDIA Maxine Eye Contact has
+demonstrated sufficient visual feasibility to justify further bounded
+investigation. It does not authorize product adoption of Maxine, production
+integration, M4, cloud architecture, virtual-camera implementation, PRD
+changes, commercial acceptance, or realtime acceptance. Existing Phase 1A
+evaluation evidence remains unchanged; this assignment does not rerun or
+extend it. The earlier cloud exception was limited to Phase 1A and supplies
+no authority for this provider-neutral track.
 
-No Phase 1A result is recorded yet. Report evaluation evidence at its true
-verification level under `docs/qa-policy.md`; do not infer visual acceptance
-from successful API execution or engineering completeness.
+The authorization does **not** permit any product or virtual-camera code,
+driver code, technical spike (including an `MFCreateVirtualCamera`
+proof-of-concept), OBS or external virtual-camera SDK integration, Zoom
+plugins, Teams apps, Chrome extensions, Meet-specific code, Maxine
+integration, webcam-to-cloud-to-virtual-camera pipelines, realtime correction,
+M4 or M8 implementation, installer changes, product dependencies, PRD or
+architecture edits, ADR creation, commercial vendor outreach, training,
+fine-tuning, or LivePortrait in any role. Maxine Phase 1B research and
+implementation are not authorized. Frozen references and all existing
+evaluation evidence must remain unchanged. Candidate Admission remains
+closed; no model search, substitution, fallback, or replacement Solution
+Architecture is authorized.
 
-## Phase 1A boundaries
-
-The authorization does **not** permit:
-
-- Maxine product integration, a Maxine `CorrectionEngine`, or a cloud
-  correction provider implementation.
-- Realtime streaming, live-webcam correction, or production cloud
-  architecture.
-- Self-hosted NVIDIA NIM deployment or GPU infrastructure provisioning for
-  production.
-- Virtual camera work, M4, or later-milestone implementation; no
-  staged-processor or pipeline integration, `ProcessedFrame`/
-  `ProcessorOutput` changes, correction metrics in `PipelineMetrics`, or
-  continuity-epoch implementation.
-- Training, fine-tuning, or synthetic training-data development.
-- Another model search, candidate substitution, alternative model, or
-  fallback model.
-- Vendor/OEM outreach, Effects SDK investigation, Casablanca investigation,
-  or Eyesmatch investigation.
-- LivePortrait in any role.
-- Modification or tuning of frozen geometric behavior, frozen architecture,
-  or any frozen reference or document.
-- Speculative production pricing or latency work.
-- Changes to product code or product dependencies. Evaluation tooling stays
-  separate from `gazefix/` and the frozen product `scripts/` and `tests/`;
-  product dependency manifests remain unchanged.
-- Committing API credentials, model assets, webcam footage, or rendered PO
-  outputs.
-
-**No automatic transition follows a Phase 1A visual PASS.** The Product
-Manager must make a separate decision before any realtime/cloud feasibility
-stage. A visual PASS does not grant Candidate Admission, production
-integration authority, or M4 authority.
+**No automatic transition follows a Phase 1A visual PASS or a virtual-camera
+research PASS (including CONDITIONAL PASS).** Any technical spike needs a
+later, explicit Product Manager assignment. Maxine Phase 1B needs its own
+authorization and gate. After Phase 1B there must still be an explicit
+**Product Strategy Gate** before any PRD revision or resumed milestone
+implementation. Research outcomes do not change supported OS scope, adopt a
+backend, reopen M4, begin M8, or grant milestone/product acceptance.
 
 ## LivePortrait is retired
 
@@ -115,18 +108,19 @@ does not authorize LivePortrait reconsideration.
 ## Sources of truth
 
 1. `01-GazeFix-Product-Requirements-Document-v1.1.md` — product scope,
-   constraints, licensing/dependency policy, and milestone gates. The PM's
-   research-only cloud exception is recorded explicitly above and in the
-   closure record; production constraints remain unchanged.
+   constraints, licensing/dependency policy, and milestone gates. Production
+   constraints and Windows 10/11 scope remain unchanged.
 2. `docs/architecture.md`, accepted ADRs in `docs/decisions/`, and
    `docs/milestones/m3-solution-architecture.md` at `m3-architecture-v1.3`
    — frozen architecture and provider-neutral correction boundary.
 3. `docs/milestones/m3-evaluation.md` — M3 `CHANGE APPROACH` gate result.
 4. `docs/milestones/liveportrait-retirement.md` — unchanged retirement record.
 5. `docs/milestones/candidate-admission-closure.md` — completed Candidate
-   Admission decision and the bounded follow-up PM authorization.
+   Admission decision and historical Phase 1A authorization.
 6. `docs/qa-policy.md` — verification depth, truthful reporting, stopping
    rules, and Product Owner interaction budget.
+7. `docs/milestones/virtual-camera-integration-feasibility.md` — current PM
+   desk-research authorization, supplied Phase 1A PASS record, and gate limits.
 
 `docs/milestones/model-feasibility-architecture.md` and
 `docs/milestones/model-feasibility-spike.md` are historical records, not
@@ -135,17 +129,18 @@ work do not override the current prohibitions above.
 
 ## Governance checkpoint and delivery scope
 
-This update descends from `codex/commercial-first-research-recovery` at
-`9fa8530ae4549c63d2293c8e5cebf15791fb2833`, on the governance branch
-`codex/maxine-phase1a-governance`, preserving the active governance lineage.
-The published governance commit is the assignment checkpoint; do not merge
-it into a frozen branch.
+This docs-only update starts from the fetched `origin/codex/m1-assignment`
+at `32836f9df8a222f3847306ca42b2e388e461cd83`, on
+`codex/virtual-camera-feasibility-governance`. That base descends from
+`codex/maxine-phase1a-governance` at
+`95678777642d29912d0806a81f02dc4b11ea884b` and preserves the subsequent Phase 1A
+evaluation commits. It is not based on `main`.
 
 This governance update changes only `Current Assignment.md` and
-`docs/milestones/candidate-admission-closure.md`. Its delivery stops after
-documentation audit, commit, and push. The Phase 1A authorization above is
-for subsequent evaluation work: this governance task must not implement
-evaluation tools, execute models, or call NVIDIA's API.
+`docs/milestones/virtual-camera-integration-feasibility.md`. Delivery stops
+after documentation audit, commit, and push of this new branch; no PR may
+be merged. The desk research is authorized for subsequent work, not executed
+by this governance task. No research outcome is assigned by this update.
 
 ## Frozen repository state
 
