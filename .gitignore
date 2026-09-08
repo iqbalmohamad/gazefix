@@ -19,3 +19,9 @@ spike/liveportrait/upstream/
 # the blind package live under the already-ignored experiments/ tree; only
 # manifests and hashes are committed. NVIDIA's client is fetched locally.
 research/maxine-eye-contact/**/nvidia-client/
+
+# Maxine Phase 1B runtime experiment. Sources, live-produced input, corrected
+# output and timing series live under the already-ignored experiments/ tree;
+# only the harness, its tests and small manifests are committed. NVIDIA's
+# client is fetched locally.
+research/maxine-eye-contact-phase1b/**/nvidia-client/

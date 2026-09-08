@@ -1,0 +1,146 @@
+{
+  "clone_commit": "7ada3461f8eec7ccdb5e4670a46aed4867faac00",
+  "clone_commit_date": "2026-07-15T20:17:55+01:00",
+  "findings": [
+    {
+      "claim": "The payload carried by RedirectGaze is MP4 container bytes, not frames.",
+      "classification": "VERIFIED",
+      "consequence": "A live client cannot send frames. It must produce a container progressively, which is what Stage B tests.",
+      "evidence": "eyecontact.proto documents RedirectGaze as operating 'on mp4 video files' and both oneof media fields are named video_file_data. eye-contact.py reads the input file in 64 KiB chunks with open(path,'rb') and writes every response chunk straight to an output file with no reframing. There is no frame-level message in the contract.",
+      "id": "F1"
+    },
+    {
+      "claim": "The client's --streaming flag changes validation only, never the wire format.",
+      "classification": "VERIFIED",
+      "consequence": "'Streaming mode' is a statement about the input file's layout, not about a different transport. What makes incremental server-side processing possible is moov arriving before the media, nothing else.",
+      "evidence": "grep for 'streaming' across eye-contact/scripts and eye-contact/interfaces finds it only in config.py's argument definition, its dataclass field, its __str__, and validate_eyecontact_config, which calls check_streamable and raises if the MP4 is not moov-first. generate_request_for_inference in eye-contact.py never reads it: the same config message and the same 64 KiB video_file_data chunks go out either way.",
+      "id": "F2"
+    },
+    {
+      "claim": "NVIDIA's own client already reads responses while it is still sending.",
+      "classification": "VERIFIED",
+      "does_not_establish": "That the server emits before EOS. The client's structure permits incremental output; it does not demonstrate it. That is the Stage A question and it is UNKNOWN until measured.",
+      "evidence": "process_request passes a generator to stub.RedirectGaze; gRPC Python drains a request iterator on its own thread while the caller iterates responses. The client calls next(responses) for the config echo and then writes response chunks in a loop.",
+      "id": "F3"
+    },
+    {
+      "claim": "check_streamable accepts a file whose moov box immediately follows ftyp.",
+      "classification": "VERIFIED",
+      "consequence": "A fragmented MP4 \u2014 ftyp, then moov carrying mvex, then moof/mdat pairs \u2014 satisfies this rule and can be produced progressively, whereas a conventional faststart MP4 cannot.",
+      "evidence": "utils/utils.py reads the first 40 bytes, takes the ftyp size, and returns True when the next atom type is b'moov'.",
+      "id": "F4",
+      "note": "The function's docstring promises a (bool, int) tuple and the body returns a bare bool. Harmless for its one caller, recorded because a future reader of NVIDIA's client should not be surprised by it."
+    },
+    {
+      "claim": "Variable frame rate is unsupported; MP4 with H.264 is required, audio optional.",
+      "classification": "VERIFIED",
+      "consequence": "A live capture path must deliver constant frame rate. A dropped-frame camera cannot simply emit an irregular timeline.",
+      "evidence": "eye-contact/README.md prerequisites section.",
+      "id": "F5"
+    },
+    {
+      "claim": "The reference client can exit 0 after a failed inference.",
+      "classification": "VERIFIED",
+      "consequence": "This harness never uses the reference client as a subprocess and never trusts an exit code: it opens the RPC itself and judges a run by the bytes and frames it actually received.",
+      "evidence": "process_request wraps the whole call in 'except Exception as e: print(...)' and returns normally, so a transport failure leaves a truncated or empty output and a zero exit status. Independently reproduced in Phase 1A.",
+      "id": "F6"
+    },
+    {
+      "claim": "Two sample assets ship as Git LFS pointers, not media.",
+      "classification": "VERIFIED",
+      "consequence": "An operator who wants NVIDIA's own known-good streamable source for Stage A must install git-lfs first. These files are covered by the NVIDIA Maxine Sample Data License and are not committed to this repository.",
+      "evidence": "eye-contact/assets/sample_streamable.mp4 and sample_transactional.mp4 are 132-byte LFS pointer files in a plain clone; git-lfs is required to fetch the real ~1.4 MB media.",
+      "id": "F7"
+    },
+    {
+      "claim": "Whether a self-hosted Eye Contact NIM emits corrected output before input EOS.",
+      "classification": "UNKNOWN",
+      "closes_with": "Stage A, run against a real NIM.",
+      "evidence": "No NIM container could be pulled and no endpoint reached from this environment. Nothing in the client sources states the server's emission policy, and the proto's comments describe message shapes rather than timing.",
+      "id": "F8"
+    },
+    {
+      "claim": "Whether the NIM's demuxer accepts a progressively delivered fragmented MP4.",
+      "classification": "UNKNOWN",
+      "closes_with": "Stage B, run against a real NIM.",
+      "evidence": "The NIM's demuxer implementation is not visible in the client sources. A fragmented MP4 satisfies the documented moov-first requirement, but satisfying a client-side check is not acceptance by a server.",
+      "id": "F9"
+    },
+    {
+      "claim": "Hosted developer-preview endpoint availability.",
+      "classification": "NOT APPLICABLE TO PHASE 1B",
+      "evidence": "eye-contact/README.md still documents the preview API against grpc.nvcf.nvidia.com:443 with function id 15c6f1a0-3843-4cde-b5bc-803a4966fbb6, and the Phase 1A record leaves its lifetime unresolved. The Phase 1B route is the self-hosted NIM, so this was not investigated further and no preview measurement is offered as a Phase 1B result.",
+      "id": "F10"
+    }
+  ],
+  "hosts_denied_in_this_environment": {
+    "detail": "Every nvidia.com host and nvcr.io are refused by this container's egress policy with a gateway 403 on CONNECT, so no NVIDIA documentation page, no NGC catalogue entry, no container registry and no endpoint could be reached.",
+    "hosts": [
+      "nvcr.io",
+      "build.nvidia.com",
+      "docs.nvidia.com",
+      "catalog.ngc.nvidia.com",
+      "api.ngc.nvidia.com"
+    ],
+    "observed": "HTTP/1.1 403 Forbidden on CONNECT, connection closed"
+  },
+  "how_read": "Cloned and read in full in the engineering environment. Every claim below cites a file that was actually read; nothing is reconstructed from memory or from a page that could not be fetched.",
+  "record": "NVIDIA Maxine Eye Contact API contract \u2014 first-hand evidence for Phase 1B",
+  "retrieved_from": "https://github.com/NVIDIA-Maxine/nim-clients.git",
+  "retrieved_utc": "2026-09-08",
+  "scope": "RESEARCH/EXPERIMENT ONLY \u2014 NOT AUTHORIZED FOR GAZEFIX PRODUCTION",
+  "service_contract": {
+    "chunk_size_bytes": 65536,
+    "evidence": "VERIFIED \u2014 eyecontact.proto and constants.py, both read in full",
+    "method": "RedirectGaze(stream RedirectGazeRequest) returns (stream RedirectGazeResponse)",
+    "proto_package": "nvidia.maxine.eyecontact.v1",
+    "request_oneof": [
+      "config: RedirectGazeConfig",
+      "video_file_data: bytes"
+    ],
+    "response_oneof": [
+      "config: RedirectGazeConfig",
+      "video_file_data: bytes",
+      "keepalive: google.protobuf.Empty"
+    ],
+    "service": "MaxineEyeContactService"
+  },
+  "source_files": {
+    "README.md": {
+      "bytes": 4535,
+      "sha256": "a2dd8f9f1eb684af321f711f78737b14aa6bfc5269effc39404a7cdd32176a49"
+    },
+    "eye-contact/README.md": {
+      "bytes": 9921,
+      "sha256": "9af5b5825c460d891fe23c91d14921eb4ea0d0126dd8619efbca86275611a5fb"
+    },
+    "eye-contact/protos/linux/compile_protos.sh": {
+      "bytes": 2660,
+      "sha256": "1a19feac65326e6b4a145976b3a8991521d3e3592af93b779447e9164554e1d2"
+    },
+    "eye-contact/protos/proto/nvidia/maxine/eyecontact/v1/eyecontact.proto": {
+      "bytes": 6888,
+      "sha256": "61d473238ec09ff88355809ac47ba692bbb4b4949458bee0a73e1d68d6f32aa7"
+    },
+    "eye-contact/requirements.txt": {
+      "bytes": 50,
+      "sha256": "d817213a1393e48968423f9d35fe28bc8bfa10a869ac0d5498c5ab2a7ef46ede"
+    },
+    "eye-contact/scripts/config.py": {
+      "bytes": 21224,
+      "sha256": "dc93d39ab798aadd23e1bc81bfa73d1a3d44b407f5249e125b9cb27532929fd0"
+    },
+    "eye-contact/scripts/constants.py": {
+      "bytes": 2707,
+      "sha256": "91604b71d84affdd19bed707b2444478176a7aaafd74a54a8e836dfac240acf1"
+    },
+    "eye-contact/scripts/eye-contact.py": {
+      "bytes": 8704,
+      "sha256": "5b441de487a9854e9f9222c0fb3ccbf1941e6efe72079c1017c7321b0aca87ef"
+    },
+    "utils/utils.py": {
+      "bytes": 10264,
+      "sha256": "081f737fa488db0fcc153c782f453638a70badcaccb128bbb19445ce9ef25f5d"
+    }
+  }
+}

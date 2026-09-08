@@ -1,0 +1,385 @@
+"""Stage A and Stage B runners, and the artifacts they leave behind.
+
+Both stages drive the same instrument (:class:`~streamexp.session.RedirectGazeSession`)
+and differ only in where the container bytes come from:
+
+Stage A
+    A completed, known-good streamable MP4, delivered on its own timestamps.
+    Isolates the question "does the service return usable output before it has
+    the whole input?" from every question about producing media live.
+
+Stage B
+    A fragmented MP4 that does not exist when the RPC opens and is manufactured
+    frame by frame while it is in flight. Isolates the question "can the service
+    consume genuinely live-generated media?".
+
+Neither runner decides anything. Each writes what it measured, states each
+determination as ``YES`` / ``NO`` / ``NOT MEASURED``, and stops.
+"""
+
+from __future__ import annotations
+
+import platform
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from . import decode, livesource, proto, source
+from .channel import ChannelSpec, build, call_metadata
+from .clock import RealtimeSchedule
+from .progressive import Layout
+from .session import RedirectGazeSession, SessionResult
+from .timing import Timeline, frame_rows, summarise_ages, write_csv, write_json
+
+
+@dataclass
+class RunOptions:
+    """Everything a stage run needs, and nothing about what it should conclude."""
+
+    channel: ChannelSpec
+    clone_dir: Path
+    workspace: Path
+    label: str
+    source_path: Path | None = None
+    chunk_size: int = proto.DATA_CHUNK_SIZE
+    send_config: bool = True
+    config_params: dict[str, Any] = field(default_factory=dict)
+    encoder: livesource.LiveEncoderConfig = field(default_factory=livesource.LiveEncoderConfig)
+    frame_source: str = "file"
+    """``file``, ``camera`` or ``synthetic`` — recorded in the results."""
+    camera_device: str = ""
+    camera_backend: str = ""
+    max_frames: int | None = None
+    decode_check: bool = True
+
+
+def environment_record(options: RunOptions) -> dict[str, Any]:
+    """Facts about where a measurement was taken. Never inferred, never omitted."""
+    import grpc  # noqa: PLC0415
+
+    return {
+        "client_os": f"{platform.system()} {platform.release()}",
+        "client_platform": platform.platform(),
+        "client_machine": platform.machine(),
+        "client_processor": platform.processor() or "UNKNOWN",
+        "client_python": sys.version.split()[0],
+        "grpcio_version": grpc.__version__,
+        "ffmpeg": decode.tool("ffmpeg") or "NOT PRESENT",
+        "ffprobe": decode.tool("ffprobe") or "NOT PRESENT",
+        "nvidia_client_revision": proto.git_revision(options.clone_dir),
+        "connection": options.channel.describe(),
+        "server_gpu": "NOT MEASURED — supply the serving host's GPU model",
+        "nim_image_and_version": "NOT MEASURED — supply the container image tag",
+        "network_context": "NOT MEASURED — supply the client-to-server network path",
+    }
+
+
+def _determinations(result: SessionResult, stage: str) -> dict[str, str]:
+    layout = result.reader.layout
+    determinations = {
+        "usable_output_before_input_eos": result.output_before_eos(),
+        "output_container_layout": layout.value,
+        "rpc_completed": "NO" if result.error else "YES",
+    }
+    if layout is Layout.MOOV_LAST:
+        determinations["output_indexable_before_eos"] = "NO"
+        determinations["kill_condition_3_whole_file_interface"] = (
+            "OBSERVED — the response placed its moov after the media, so no corrected "
+            "frame could be located until the whole output had arrived"
+        )
+    if stage == "B":
+        determinations["maxine_consumed_live_generated_input"] = (
+            "YES" if (not result.error and result.frames) else
+            ("NO" if result.error else "NOT MEASURED")
+        )
+    return determinations
+
+
+def _write_artifacts(
+    workspace: Path, label: str, payload: dict[str, Any], result: SessionResult
+) -> dict[str, str]:
+    results_dir = workspace / label
+    write_json(results_dir / "summary.json", payload)
+    write_csv(results_dir / "timeline.csv", result.timeline.to_rows())
+    write_csv(results_dir / "frames.csv", frame_rows(result.frames))
+    write_csv(
+        results_dir / "backlog.csv",
+        [{k: v for k, v in sample.items()} for sample in result.backlog_samples],
+    )
+    return {
+        "summary": str(results_dir / "summary.json"),
+        "timeline_csv": str(results_dir / "timeline.csv"),
+        "frames_csv": str(results_dir / "frames.csv"),
+        "backlog_csv": str(results_dir / "backlog.csv"),
+        "corrected_output": str(results_dir / "corrected.mp4"),
+    }
+
+
+def _timing_block(result: SessionResult) -> dict[str, Any]:
+    def ms(name: str) -> Any:
+        value = result.timeline.elapsed(name)
+        return "NOT MEASURED" if value is None else round(value * 1000, 3)
+
+    return {
+        "rpc_start_wall_clock": result.timeline.started_wall,
+        "first_input_bytes_ms": ms("first_input_bytes"),
+        "config_echo_ms": ms("config_echo"),
+        "first_response_ms": ms("first_response"),
+        "first_output_bytes_ms": ms("first_output_bytes"),
+        "first_usable_frame_ms": ms("first_usable_frame"),
+        "input_eos_ms": ms("input_eos"),
+        "rpc_end_ms": ms("rpc_end"),
+    }
+
+
+def _throughput_block(result: SessionResult, duration_s: float | None) -> dict[str, Any]:
+    total = result.timeline.elapsed("rpc_end") or 0.0
+    return {
+        "bytes_sent": result.bytes_sent,
+        "bytes_received": result.bytes_received,
+        "responses": result.responses,
+        "keepalives": result.keepalives,
+        "usable_output_frames": len(result.frames),
+        "output_fps_over_rpc": round(len(result.frames) / total, 3) if total else "NOT MEASURED",
+        "source_duration_s": duration_s if duration_s is not None else "NOT MEASURED",
+        "max_harness_retained_bytes": result.max_reader_buffer_bytes,
+        "note": (
+            "Throughput is reported for completeness only. It is not latency and "
+            "must not be read as one."
+        ),
+    }
+
+
+# -- Stage A -------------------------------------------------------------
+
+
+def run_stage_a(options: RunOptions) -> dict[str, Any]:
+    """Feed a completed streamable MP4 at its own cadence through one RPC."""
+    if options.source_path is None:
+        raise ValueError("Stage A requires --source")
+
+    interfaces = proto.load(options.clone_dir)
+    profile, index = source.probe(options.source_path)
+    workspace = options.workspace
+    output_path = workspace / options.label / "corrected.mp4"
+
+    schedule = RealtimeSchedule()
+    metadata = call_metadata(options.channel)
+    channel = build(options.channel)
+    try:
+        session = RedirectGazeSession(
+            interfaces,
+            interfaces.stub(channel),
+            send_config=options.send_config,
+            config_params=options.config_params,
+            metadata=metadata,
+            output_path=output_path,
+        )
+        units = source.paced_units(options.source_path, index, options.chunk_size)
+        schedule.origin = Timeline().started_monotonic
+        result = session.run(units, schedule)
+    finally:
+        channel.close()
+
+    payload: dict[str, Any] = {
+        "stage": "A",
+        "question": (
+            "Does one continuously-open RedirectGaze RPC return usable corrected "
+            "output before the client has finished sending a realtime-paced input?"
+        ),
+        "harness_version": _version(),
+        "environment": environment_record(options),
+        "proto": {
+            "path": str(interfaces.proto_path),
+            "sha256": interfaces.proto_sha256,
+            "service": "nvidia.maxine.eyecontact.v1.MaxineEyeContactService/RedirectGaze",
+        },
+        "source": profile.describe(),
+        "delivery": {
+            "mode": "realtime-throttled by source presentation timestamps",
+            "chunk_size_bytes": options.chunk_size,
+            "config_message_sent": options.send_config,
+            "config_parameters_sent": options.config_params or "none (NVIDIA defaults)",
+            "schedule": schedule.statistics(),
+            "units_sent": result.units_sent,
+        },
+        "timing_ms_since_rpc_start": _timing_block(result),
+        "determinations": _determinations(result, "A"),
+        "frame_age": summarise_ages(result.frames),
+        "throughput": _throughput_block(result, profile.duration_seconds),
+        "error": result.error or "",
+    }
+    payload["decode_corroboration"] = _corroborate(options, result, workspace)
+    payload["artifacts"] = _write_artifacts(workspace, options.label, payload, result)
+    write_json(workspace / options.label / "summary.json", payload)
+    return payload
+
+
+# -- Stage B -------------------------------------------------------------
+
+
+def run_stage_b(options: RunOptions) -> dict[str, Any]:
+    """Manufacture the container while the RPC is open, and feed it live."""
+    interfaces = proto.load(options.clone_dir)
+    workspace = options.workspace
+    output_path = workspace / options.label / "corrected.mp4"
+    encoder = options.encoder
+
+    if options.frame_source == "camera":
+        if not (options.camera_device and options.camera_backend):
+            raise ValueError("camera frame source requires --camera-device and --camera-backend")
+        frames = livesource.camera_frames(
+            options.camera_device, encoder, options.camera_backend
+        )
+    elif options.frame_source == "file":
+        if options.source_path is None:
+            raise ValueError("file frame source requires --source")
+        frames = livesource.frames_from_video(options.source_path, encoder)
+    else:
+        raise ValueError(f"unknown frame source {options.frame_source!r}")
+
+    if options.max_frames is not None:
+        frames = _take(frames, options.max_frames)
+
+    live = livesource.build_live_source(encoder, frames)
+    schedule = RealtimeSchedule()
+    metadata = call_metadata(options.channel)
+    channel = build(options.channel)
+    fed_at: dict[int, float] = {}
+    try:
+        session = RedirectGazeSession(
+            interfaces,
+            interfaces.stub(channel),
+            send_config=options.send_config,
+            config_params=options.config_params,
+            metadata=metadata,
+            output_path=output_path,
+        )
+        timeline_origin = Timeline().started_monotonic
+        schedule.origin = timeline_origin
+        units = live.units(schedule, fed_at, lambda: timeline_origin)
+        result = session.run(units, schedule, fed_at=fed_at)
+    finally:
+        channel.close()
+
+    encode_ms = live.stats.encode_prepare_ms()
+    payload: dict[str, Any] = {
+        "stage": "B",
+        "question": (
+            "Can the NIM consume a media stream generated incrementally while the "
+            "RPC is open, rather than read from an already-completed MP4?"
+        ),
+        "harness_version": _version(),
+        "environment": environment_record(options),
+        "proto": {
+            "path": str(interfaces.proto_path),
+            "sha256": interfaces.proto_sha256,
+            "service": "nvidia.maxine.eyecontact.v1.MaxineEyeContactService/RedirectGaze",
+        },
+        "what_was_sent_over_the_rpc": {
+            "container": "fragmented MP4 (ftyp + empty moov with mvex, then moof/mdat per frame)",
+            "muxer": _muxer_description(encoder),
+            "video_codec": "H.264 (libx264)",
+            "audio": "none",
+            "moov_precedes_media": True,
+            "completed_input_mp4_existed_before_rpc": False,
+            "frame_source": options.frame_source,
+            "encoder": {
+                "width": encoder.width,
+                "height": encoder.height,
+                "fps": encoder.fps,
+                "gop": encoder.gop,
+                "preset": encoder.preset,
+                "tune": encoder.tune,
+                "fragment_per_frame": encoder.fragment_per_frame,
+                "muxer": encoder.muxer,
+            },
+        },
+        "live_production": {
+            "frames_captured": live.stats.frames_written,
+            "frames_muxed": live.stats.frames_muxed,
+            "frames_muxed_matches_captured":
+                live.stats.frames_muxed == live.stats.frames_written,
+            "container_bytes_produced": live.stats.bytes_produced,
+            "encode_and_mux_ms_p50": _p(encode_ms, 0.50),
+            "encode_and_mux_ms_p95": _p(encode_ms, 0.95),
+            "encoder_stderr": live.stats.encoder_stderr,
+            "schedule": schedule.statistics(),
+        },
+        "timing_ms_since_rpc_start": _timing_block(result),
+        "determinations": _determinations(result, "B"),
+        "frame_age": summarise_ages(result.frames),
+        "throughput": _throughput_block(
+            result,
+            live.stats.frames_written / encoder.fps if live.stats.frames_written else None,
+        ),
+        "error": result.error or "",
+    }
+    payload["decode_corroboration"] = _corroborate(options, result, workspace)
+    payload["artifacts"] = _write_artifacts(workspace, options.label, payload, result)
+    write_json(workspace / options.label / "summary.json", payload)
+    return payload
+
+
+# -- shared helpers ------------------------------------------------------
+
+
+def _corroborate(
+    options: RunOptions, result: SessionResult, workspace: Path
+) -> dict[str, Any]:
+    """Decode what the client actually held when it first called a frame usable."""
+    if not options.decode_check:
+        return {"status": "NOT MEASURED", "detail": "decode check disabled"}
+    if result.output_path is None or result.first_usable_byte_end is None:
+        return {
+            "status": "NOT MEASURED",
+            "detail": "no frame became usable, so there is no prefix to decode",
+        }
+    data = result.output_path.read_bytes()[: result.first_usable_byte_end]
+    check = decode.decode_prefix(data, workspace / options.label / "corroboration",
+                                 "prefix-at-first-usable-frame")
+    return {
+        "status": check.status,
+        "frames_decoded": check.frames_decoded if check.frames_decoded is not None else "UNKNOWN",
+        "prefix_bytes": check.prefix_bytes,
+        "detail": check.detail,
+        "means": (
+            "The bytes the client held at the first-usable instant decode to real "
+            "pictures." if check.status == "VERIFIED" else
+            "The container-level usability criterion was not corroborated by a decoder; "
+            "read every frame age in this run with that in mind."
+        ),
+    }
+
+
+def _muxer_description(encoder: livesource.LiveEncoderConfig) -> str:
+    if encoder.muxer == "inprocess":
+        return (
+            "PyAV libx264 packets muxed in-process by streamexp.fmp4 "
+            "(ftyp + moov/mvex, then one moof/mdat per frame)"
+        )
+    flags = ("+empty_moov+default_base_moof+frag_every_frame"
+             if encoder.fragment_per_frame
+             else "+empty_moov+default_base_moof+frag_keyframe")
+    return f"ffmpeg -f mp4 -movflags {flags}"
+
+
+def _take(iterable, count: int):
+    for i, item in enumerate(iterable):
+        if i >= count:
+            return
+        yield item
+
+
+def _p(values: list[float], fraction: float) -> Any:
+    from .timing import percentile  # noqa: PLC0415 - avoids a cycle at import time
+
+    result = percentile(values, fraction)
+    return "NOT MEASURED" if result is None else round(result, 3)
+
+
+def _version() -> str:
+    from . import VERSION  # noqa: PLC0415
+
+    return VERSION
