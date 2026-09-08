@@ -1,211 +1,148 @@
 # GazeFix — Current Engineering Assignment
 
-**Active assignment: `PRE-M8 VIRTUAL-CAMERA DELIVERY SPIKE` — authorized for a
-future bounded implementation assignment. This update is governance only.**
+**`ACTIVE ENGINEERING ASSIGNMENT: NONE`**
 
-**Status: `PRE-M8 VIRTUAL-CAMERA DELIVERY SPIKE AUTHORIZED`**
+No engineering implementation, research track, or technical spike is active.
+Nothing in this file authorizes work to begin. Any new work requires a
+separate, explicit Product Manager assignment.
 
-**Prior research: `CONDITIONAL PASS`.**
-**`IS A PRE-M8 TECHNICAL SPIKE REQUIRED? YES`**
+**Canonical current program state:
+[`docs/milestones/program-state-2026-09-08.md`](docs/milestones/program-state-2026-09-08.md)
+at branch `program-state-v1`.** Read that document for the authoritative
+current state, the verified frozen-reference table, the retained
+historical/audit branches, and the recorded repository-cleanup classes.
 
-**Spike execution: NOT TESTED. No spike verdict is assigned here.**
+**Updated: 2026-09-08.** This update is documentation-only.
 
-**The original PRD remains authoritative and unchanged. The primary roadmap
-remains paused at the M3 -> M4 boundary. M4 remains BLOCKED. M8 remains UNOPENED.**
+## Current gate state
 
-**`MAXINE PHASE 1A VISUAL GATE: PASS`** — previously supplied PO verdict;
-its provenance and evidence limits remain recorded in
-`docs/milestones/virtual-camera-integration-feasibility.md`.
+| Item | State |
+| --- | --- |
+| M0 / M1 / M2 | `PASS / CLOSED / FROZEN` |
+| M3 geometric | engineering-valid baseline; Product Owner visual verdict `CHANGE APPROACH` — **NOT PASS** |
+| Candidate Admission (commercial pretrained) | `CLOSED / FAIL` — no commercially admissible pretrained path found |
+| LivePortrait | `RETIRED` as implementation authority |
+| **Maxine Phase 1A** | **`MAXINE PHASE 1A VISUAL GATE: PASS`** |
+| **Maxine Phase 1B** | **`MAXINE PHASE 1B: NOT YET AUTHORIZED`** |
+| Windows virtual-camera / conferencing feasibility | `CONDITIONAL PASS` — research evidence only; `IS A PRE-M8 TECHNICAL SPIKE REQUIRED? YES` |
+| **Pre-M8 virtual-camera delivery spike** | **`PRE-M8 VIRTUAL-CAMERA DELIVERY SPIKE: AUTHORIZED BUT DEFERRED / NOT ACTIVE`** |
+| M4 | `BLOCKED` |
+| M8 | `UNOPENED` |
+| PRD | `UNCHANGED` |
+| Canonical architecture baseline | `architecture-v1` — `APPROVED / FROZEN / CANONICAL` |
+| **Active engineering assignment** | **`NONE`** |
 
-**Maxine Phase 1B remains a separate track requiring its own future PM
-authorization and gate. Neither its research nor implementation is authorized here.**
+## What each of the three current decisions means
 
-**Candidate Admission: FAIL — NO COMMERCIALLY ADMISSIBLE PRETRAINED PATH FOUND.**
-The prior local/offline pretrained Candidate Admission cycle remains CLOSED;
-see `docs/milestones/candidate-admission-closure.md`.
+**`MAXINE PHASE 1A VISUAL GATE: PASS`.** NVIDIA Maxine Eye Contact
+demonstrated sufficient visual feasibility to justify continued bounded
+investigation — and nothing further. It establishes no realtime feasibility,
+no streaming feasibility, no production adoption, no product integration, no
+cloud architecture approval, no commercial deployment approval, no M4
+authorization, and no M8 authorization. The verdict's provenance and its
+evidence limitations are preserved unchanged in
+`docs/milestones/virtual-camera-integration-feasibility.md`;
+`docs/milestones/maxine-phase1a-engineering-report.md` and
+`research/maxine-eye-contact/` are unchanged and continue to describe their
+original verification state. No scoring evidence has been altered.
 
-**LivePortrait remains REJECTED — COMMERCIAL/PROVENANCE GATE FAILED.**
+**`MAXINE PHASE 1B: NOT YET AUTHORIZED`.** Phase 1B has not started. It
+requires a separate Product Manager authorization and its own gate. Neither
+its research nor its implementation is authorized, and no Phase 1B assignment
+exists.
 
-**M0 / M1 / M2: PASS / CLOSED / FROZEN.**
+**`PRE-M8 VIRTUAL-CAMERA DELIVERY SPIKE: AUTHORIZED BUT DEFERRED / NOT
+ACTIVE`.** The prior governance authorization of 2026-09-08 remains
+historically valid and is **not withdrawn** — it is **parked**. Its bounded
+scope, prohibitions, evidence requirements and verdict definitions remain
+recorded unchanged in `docs/milestones/virtual-camera-delivery-spike.md`.
+**The spike must not be executed** until a later Product Manager decision
+explicitly reactivates it. No technical-spike implementation is active and
+none exists in the repository; spike execution remains `NOT TESTED` and no
+spike verdict is assigned.
 
-**M3: `CHANGE APPROACH` — NOT PASS** (`docs/milestones/m3-evaluation.md`).
-`m3-geometric-baseline @ f3831b54728a4747c38c064351ec9f48419a2efb` remains
-frozen. **Overall architecture (`architecture-v1`): APPROVED / FROZEN /
-CANONICAL**, unchanged.
+## Prohibited scope while no assignment is active
 
-**Updated: 2026-09-08.**
+Do not implement or execute the virtual-camera delivery spike, begin Maxine
+Phase 1B, write virtual-camera or gaze-correction product code, install or
+register a camera, integrate Maxine, adopt a correction backend, add a neural
+model or cloud inference, change `CorrectionEngine` or the production
+pipeline or product UI, start M4–M7 work, or open M8.
 
-## PM authorization and current delivery boundary
+Do not modify the PRD, `docs/architecture.md`, the accepted ADRs, any frozen
+milestone reference, any research record, or any evaluation or scoring
+evidence. Do not create an ADR, make a Windows 11-only product decision,
+remove Windows 10 support, search for or substitute a model, or reopen
+Candidate Admission.
 
-The Product Manager authorizes **`PRE-M8 VIRTUAL-CAMERA DELIVERY SPIKE`**:
-a disposable feasibility experiment independent of the correction backend.
-The authoritative bounded scope, prohibitions, evidence requirements, and
-verdict definitions are in
-[`docs/milestones/virtual-camera-delivery-spike.md`](docs/milestones/virtual-camera-delivery-spike.md).
+Do not merge any pull request. Do not delete any branch outside a separate,
+PM-authorized cleanup assignment.
 
-This repository assignment is **documentation/governance only**. Do not
-implement or execute the spike, write virtual-camera or product code,
-install/register a camera, begin M8, implement Maxine Phase 1B, modify the
-PRD/architecture/frozen references, alter research or evaluation evidence,
-or merge any PR. The minimal experiment below belongs to a future
-implementation assignment; it is not production implementation authority.
+A **Product Strategy Gate** remains required before any roadmap transition
+that would change the original product requirements. Phase 1A's `PASS`, the
+prior research, and the parked spike authorization each substitute for it in
+no way.
 
-The prior research completed with `CONDITIONAL PASS` and requires a pre-M8
-technical spike, as supplied by the PM's 2026-09-08 request. The inspected
-base contains the earlier research authorization, not a completed report.
-The new spike document records that provenance explicitly. The earlier
-research record remains untouched; no runtime finding is invented here.
-
-## Authorized future spike at a glance
-
-- **Windows 11 build 22000+:** minimal `MFCreateVirtualCamera` /
-  `IMFVirtualCamera` route and minimal custom Media Foundation source where
-  required.
-- **Windows 10:** separate user-mode DirectShow capture-source filter as the
-  first compatibility candidate. A material failure stops that leg and
-  returns to the PM for a mechanism/scope decision. No automatic AVStream,
-  Frame Server, or UMDF/KMDF fallback.
-- **Source:** deterministic moving synthetic frames with visible counter,
-  timestamp, and asymmetric orientation/mirroring markers; optionally
-  unmodified webcam frames. No gaze correction.
-- **Consumers on both OS legs:** current Zoom Workplace desktop, Google Meet
-  in current Chrome, Google Meet in current Edge, and current Microsoft Teams
-  work/school desktop. Record actual OS/build, CPU architecture, client/browser
-  version, test date, camera name, selected media type, and visible playback.
-- **Media:** target 1280×720 at 30 FPS; minimum compatibility formats beginning
-  with NV12 and YUY2 as supported. Measure available fresh-frame cadence,
-  source timestamps, dropped/stale frames, and producer-to-camera delivery
-  delay. Do not infer conferencing-network latency.
-- **Lifecycle:** camera open/close, switch-away/back, video disable/re-enable,
-  producer stop/restart, repeated application open/close, short multi-consumer
-  probes, and webcam unplug/reconnect only for optional passthrough.
-- **Deployment:** local installation/registration, normal-user activation
-  after installation, reboot persistence if applicable, uninstall/cleanup,
-  and normal Windows security settings. No Secure Boot, camera-permission,
-  or signing-enforcement bypass to manufacture PASS.
-
-The future spike must deliver a versioned compatibility matrix using `PASS`,
-`FAIL`, `NOT TESTED`, or `NOT AVAILABLE` for each route, with no silent
-substitution. Basic-delivery PASS requires normal enumeration and selection,
-remotely visible moving synthetic frames with a continuously advancing
-counter, correct orientation/colors, no mandatory advanced capture override,
-no security bypass, and acceptable switch-away/back and producer-restart
-recovery, as detailed in the spike document.
-
-Select exactly one overall verdict after execution: `PASS` (all required
-OS/product routes demonstrate basic delivery), `CONDITIONAL PASS` (viable
-path with a material product/mechanism condition), `FAIL` (demonstrated
-load-bearing integration blocker), or `INCONCLUSIVE` (insufficient execution).
-These are spike verdicts, not new M8 acceptance gates.
-
-## Gate state and prohibited scope
-
-No gaze correction, Maxine integration, neural model, cloud inference,
-`CorrectionEngine` changes, production pipeline or product UI integration,
-M4–M7 work, or M8 production implementation is authorized. No full installer
-or product packaging, Store submission, production driver qualification,
-AVStream/Frame Server/UMDF/KMDF fallback, Zoom plugin, Teams app, browser
-extension, Meet-specific integration, OBS dependency, or external
-virtual-camera SDK integration is authorized.
-
-The PRD, architecture, ADRs, frozen milestone references, research reports,
-and all evaluation evidence remain unchanged. No ADR creation, Windows
-11-only product decision, removal of Windows 10 support, backend adoption,
-model search/substitution/fallback, or reopening Candidate Admission follows.
-
-**No verdict automatically opens M8, changes the PRD, or authorizes another
-mechanism after Windows 10 failure. M4 remains BLOCKED. M8 remains UNOPENED.**
-Existing M8/MVP acceptance requirements are unchanged. This is no Product
-Strategy decision and no roadmap resumption.
-
-Maxine Phase 1B requires separate PM authorization and its own gate. After
-Phase 1B, an explicit **Product Strategy Gate** remains required before any
-PRD revision or resumed milestone implementation where applicable. Neither
-Phase 1A PASS, prior research, nor this spike substitutes for that decision.
-The Phase 1A cloud exception grants no authority for this spike.
-
-## LivePortrait is retired
+## LivePortrait remains retired
 
 LivePortrait remains permanently rejected for this development cycle:
 **`REJECTED — COMMERCIAL/PROVENANCE GATE FAILED`**. It is not a candidate,
-benchmark, teacher, quality oracle, fallback, backup model, comparison target,
-or implementation dependency.
-
-Do not clone it, download its weights, execute it, reproduce it, port its
-algorithm, copy its preprocessing, implement its gaze controls, add its
-dependencies, add a `LivePortraitCorrectionEngine`, or use its outputs as a
-benchmark.
+benchmark, teacher, quality oracle, fallback, backup model, comparison
+target, or implementation dependency. Do not clone it, download its weights,
+execute it, reproduce it, port its algorithm, copy its preprocessing,
+implement its gaze controls, add its dependencies, add a
+`LivePortraitCorrectionEngine`, or use its outputs as a benchmark.
 
 `model-feasibility-architecture-v1` and all LivePortrait documents and commits
 remain **immutable historical audit evidence only**, with no forward
-authority. The retirement decision is unchanged; this spike authorization
-does not authorize LivePortrait reconsideration.
+authority.
+
+## Frozen repository state
+
+The canonical frozen-reference table, with every SHA verified at this
+checkpoint, is in
+[`docs/milestones/program-state-2026-09-08.md`](docs/milestones/program-state-2026-09-08.md)
+§B. Eleven references are frozen — `main`, `milestone-0`, `milestone-1`,
+`milestone-2`, `architecture-v1`, `m3-architecture-v1`, `m3-architecture-v1.1`,
+`m3-architecture-v1.2`, `m3-architecture-v1.3`, `m3-geometric-baseline` and
+`model-feasibility-architecture-v1` — and all eleven verified as matching when
+this checkpoint was taken. Do not advance, rewrite, force-push, or merge into
+any of them.
+
+`program-state-v1` is the **`CANONICAL CURRENT PROGRAM-STATE POINTER`**. It is
+not a replacement for the historical milestone, architecture, or baseline
+frozen references, and it carries no product, architectural, or acceptance
+authority of its own. It is advanced only by a later documentation-only
+program-state consolidation, never by implementation work.
+
+Architecture and amendment review branches, and the other named historical and
+audit branches, are retained review records rather than work branches; they
+are listed individually in §C of the program-state document. Accepted M0 debt
+(`PreparedCameraCloser`'s ambiguous `Thread.start()` bootstrap case in
+`docs/architecture.md`) remains accepted and out of scope.
 
 ## Sources of truth
 
-1. `01-GazeFix-Product-Requirements-Document-v1.1.md` — unchanged product scope,
-   constraints, licensing/dependency policy, and milestone gates, including
-   Windows 10/11 support.
-2. `docs/architecture.md`, accepted ADRs in `docs/decisions/`, and
-   `docs/milestones/m3-solution-architecture.md` at `m3-architecture-v1.3`
-   — frozen architecture and provider-neutral correction boundary.
-3. `docs/milestones/m3-evaluation.md` — M3 `CHANGE APPROACH` gate result.
+1. `01-GazeFix-Product-Requirements-Document-v1.1.md` — unchanged product
+   scope, constraints, licensing/dependency policy, and milestone gates,
+   including Windows 10/11 support.
+2. `docs/architecture.md`, the accepted ADRs in `docs/decisions/`, and
+   `docs/milestones/m3-solution-architecture.md` at `m3-architecture-v1.3` —
+   frozen architecture and the provider-neutral correction boundary.
+3. `docs/milestones/m3-evaluation.md` — the M3 `CHANGE APPROACH` gate result.
 4. `docs/milestones/liveportrait-retirement.md` and
    `docs/milestones/candidate-admission-closure.md` — unchanged decisions.
 5. `docs/qa-policy.md` — truthful verification, proportional checks, stopping
    rules, and Product Owner interaction budget.
-6. `docs/milestones/virtual-camera-integration-feasibility.md` — retained prior
-   research authorization and supplied Phase 1A PASS record, not the current
-   scope pointer or a completed research report.
-7. `docs/milestones/virtual-camera-delivery-spike.md` — current PM spike
-   authorization, PM-supplied prior research outcome, and all scope/gate limits.
+6. `docs/milestones/virtual-camera-integration-feasibility.md` and
+   `docs/milestones/virtual-camera-delivery-spike.md` — the retained research
+   authorization, the Phase 1A verdict provenance and its evidence limits, and
+   the parked spike's bounded scope.
+7. `docs/milestones/program-state-2026-09-08.md` — **the canonical current
+   program state.**
 
-The model-feasibility architecture/spike and other retired records remain
-historical evidence, not forward authority. The present PM authorization
-supersedes the earlier research-only restriction solely for the future
-bounded spike; all unrelated prohibitions and frozen decisions remain.
-
-## Governance checkpoint and delivery scope
-
-Base: fetched `origin/codex/virtual-camera-feasibility-governance` at
-`67e467ee08e958e4a620273272e0c9532e9b62dd`, the latest appropriate governance
-lineage verified before editing. New branch:
-`codex/virtual-camera-delivery-spike-governance`.
-
-The base retains `codex/maxine-phase1a-governance` at
-`95678777642d29912d0806a81f02dc4b11ea884b` and Phase 1A evaluation lineage
-through `32836f9df8a222f3847306ca42b2e388e461cd83`. No history is discarded;
-this branch is not based on `main`. The unrelated original checkout remains
-untouched in its own worktree.
-
-Change only `Current Assignment.md` and
-`docs/milestones/virtual-camera-delivery-spike.md`. Verify frozen references
-before editing and at completion, audit the documentation and exact file
-scope, and commit the docs-only governance update. Do not run the technical
-spike or merge any PR. Product/runtime tests are not applicable to this
-strictly documentation-only change; no runtime or hardware result is claimed.
-
-## Frozen repository state
-
-| Reference | SHA |
-| --- | --- |
-| `main` | `b40d74faef55811d67de258660b6040c7c8dc790` |
-| `milestone-0` | `3b0a2eee8b0fc207875702250955e78173857957` |
-| `milestone-1` | `097c4d69b9e7c7e8a2772445315ccb51a263dca7` |
-| `milestone-2` | `81e06118801c23d2337629fc676d6ad8ac13716a` |
-| `architecture-v1` | `003180d52d39d30a038333541b1b187824714e87` |
-| `m3-architecture-v1` | `a459e6be36122bf10ce707731d5f847007847e96` |
-| `m3-architecture-v1.1` | `00eed0e893b73dcd490f69af8df852a0609ccbaa` |
-| `m3-architecture-v1.2` | `6a64ab7ae55a4c2c3e71f7084b9ed48b51c91b93` |
-| `m3-architecture-v1.3` | `d91d393eb6e3e5f93ee2122bc840f776a55872e5` |
-| `m3-geometric-baseline` | `f3831b54728a4747c38c064351ec9f48419a2efb` |
-| `model-feasibility-architecture-v1` | `d66df8971086f5e0343ad24233aca6afaf505d16` — historical evidence only |
-
-All eleven are frozen: do not advance, rewrite, force-push, or merge into
-them. Architecture and amendment review branches are retained review
-records, not work branches. Accepted M0 debt (`PreparedCameraCloser`'s
-ambiguous `Thread.start()` bootstrap case in `docs/architecture.md`) remains
-accepted and out of scope.
+The model-feasibility architecture and spike records, and other retired
+records, remain historical evidence with no forward authority.
 
 ## Roles
 
