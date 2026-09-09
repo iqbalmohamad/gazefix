@@ -118,7 +118,14 @@ Each run writes `summary.json`, `timeline.csv`, `frames.csv`, `backlog.csv` and
 the corrected output under `experiments/maxine-phase1b/<label>/`.
 
 **Stop after Stage A if it reports `usable_output_before_input_eos: NO`.** That
-is the kill condition, and Stage B is not run.
+is the kill condition, and Stage B is not run. Read
+`failure_attribution.blame` first: a `NOT MEASURED` with `blame: SERVER` means
+the call failed, not that the service cannot stream.
+
+**The source clip must contain a human face.** Eye Contact redirects gaze; given
+a synthetic pattern there is nothing to redirect, and whatever it does then
+cannot be distinguished from a streaming failure. Synthetic media is for the
+mock self-test only.
 
 ### Choosing the muxer for Stage B and C
 

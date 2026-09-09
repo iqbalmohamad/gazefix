@@ -29,9 +29,14 @@ from typing import Any, Sequence
 CHANNEL_OPTIONS: Sequence[tuple[str, Any]] = (
     ("grpc.max_send_message_length", 32 * 1024 * 1024),
     ("grpc.max_receive_message_length", 32 * 1024 * 1024),
-    ("grpc.keepalive_time_ms", 30_000),
-    ("grpc.keepalive_permit_without_calls", 1),
 )
+# Only message-size limits, which widen what is accepted and change nothing on
+# the wire. Deliberately NO HTTP/2 keepalive: NVIDIA's client passes no channel
+# options at all, and a gRPC server's default minimum received-ping interval is
+# five minutes with two strikes before GOAWAY(too_many_pings). A server clears
+# that strike counter only when it writes frames — so 30-second pings would be
+# harmless while the NIM streams and would kill the call precisely when it went
+# quiet, which is the one behaviour Stage A exists to observe.
 
 
 class ChannelError(RuntimeError):
@@ -57,6 +62,27 @@ class ChannelSpec:
             if self.mode == "preview"
             else "none",
         }
+
+
+def wait_until_ready(channel, timeout_s: float = 30.0) -> None:
+    """Block until the channel is actually usable, or raise.
+
+    A TCP connect to the Triton frontend succeeds as soon as the socket is
+    listening, which can precede the model being READY, and nothing re-checks
+    between preflight and the RPC. Establishing the channel first turns a
+    connection race into a setup error with no determination attached, instead
+    of a failed measurement that reads like a verdict on the service.
+    """
+    import grpc  # noqa: PLC0415
+
+    try:
+        grpc.channel_ready_future(channel).result(timeout=timeout_s)
+    except grpc.FutureTimeoutError as exc:
+        raise ChannelError(
+            f"channel did not become ready within {timeout_s:.0f}s. The port "
+            "accepts TCP but no gRPC service answered; check the NIM is serving "
+            "and its model is READY before running a stage."
+        ) from exc
 
 
 def build(spec: ChannelSpec):  # noqa: ANN201 - returns grpc.Channel

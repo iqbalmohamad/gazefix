@@ -86,11 +86,19 @@ def test_the_config_message_is_sent_first_and_echoed(interfaces, clip, tmp_path)
     assert names.index("config_sent") < names.index("config_echo")
 
 
-def test_frame_ages_are_measured_against_when_the_frame_was_fed(interfaces, clip, tmp_path):
+def test_every_frame_gets_an_age_and_none_of_them_is_impossible(interfaces, clip, tmp_path):
+    """Coverage must be complete, not complete-after-dropping-the-awkward-ones.
+
+    Ages used to go missing whenever a fast reply was indexed before the sender
+    had recorded the send instant, which silently narrowed the sample the
+    percentiles were drawn from. The feed instant is now recorded before the
+    write, so every frame is aged and no age can be negative.
+    """
     result = run_against(interfaces, "streaming", clip, tmp_path)
-    ages = [record.age_s for record in result.frames if record.age_s is not None]
+    ages = [record.age_s for record in result.frames]
     assert len(ages) == 30
-    assert all(age >= 0 for age in ages)
+    assert all(age is not None for age in ages), "a frame lost its age"
+    assert all(age >= 0 for age in ages), f"impossible age: {min(ages)}"
     assert max(ages) < 0.5, "a zero-work mock should not add half a second"
 
 

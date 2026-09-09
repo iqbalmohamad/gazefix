@@ -72,6 +72,7 @@ class ProgressiveMp4Reader:
     _next_frame_index: int = 0
     _timescale: int = 0
     _saw_media_before_moov: bool = False
+    _unclassified_cap: int = 8 * 1024 * 1024
 
     # -- feeding ---------------------------------------------------------
 
@@ -86,6 +87,12 @@ class ProgressiveMp4Reader:
 
         if self.layout is Layout.UNKNOWN:
             self._try_read_header(at)
+            if self.layout is Layout.UNKNOWN and len(self._buffer) > self._unclassified_cap:
+                # A container this harness cannot classify must not become the
+                # unbounded queue the experiment forbids. Stop retaining, keep
+                # counting bytes, and let the complete output be analysed offline.
+                self.layout = Layout.MOOV_LAST
+                self._discard_to(self.received)
         elif self.layout is Layout.FRAGMENTED:
             self._scan_fragments(at)
         elif self.layout is Layout.PROGRESSIVE:

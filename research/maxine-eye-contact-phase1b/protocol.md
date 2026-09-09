@@ -57,8 +57,13 @@ finding F9: `UNKNOWN`, and precisely what Stage B asks.
 **Proves or disproves:** that the service returns usable corrected output before
 it has the whole input.
 
-A known-good streamable MP4 is fed through one `RedirectGaze` invocation at the
-cadence of its own presentation timestamps. The bytes of the frame shown at
+A known-good streamable MP4 — H.264, constant frame rate, `moov` before the
+media, and **containing a clearly visible human face** — is fed through one
+`RedirectGaze` invocation at the cadence of its own presentation timestamps.
+The face is not optional: Eye Contact redirects gaze, so given a synthetic
+pattern there is nothing to redirect, and whatever the service does then could
+not be distinguished from a streaming failure. Synthetic media belongs to the
+mock self-test only. The bytes of the frame shown at
 t = 1.4 s are not handed to the RPC before 1.4 s of feeding has elapsed, because
 a camera could not have produced them earlier. `ftyp` and `moov` are the one
 exception and go out immediately: in a live fragmented stream the initialisation

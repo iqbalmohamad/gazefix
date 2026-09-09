@@ -87,6 +87,10 @@ class VideoTrackIndex:
     samples: list[Sample] = field(default_factory=list)
     width: int = 0
     height: int = 0
+    codec: str = ""
+    """Sample-entry 4CC, e.g. ``avc1``/``avc3`` for H.264, ``hvc1``/``hev1`` for HEVC."""
+    durations: list[int] = field(default_factory=list)
+    """Per-sample decode durations from ``stts``, in timescale ticks."""
 
     def frame_count(self) -> int:
         return len(self.samples)
@@ -100,10 +104,18 @@ class VideoTrackIndex:
         """
         if len(self.samples) < 2:
             return None
-        deltas = {
-            self.samples[i + 1].pts_ticks - self.samples[i].pts_ticks
-            for i in range(len(self.samples) - 1)
-        }
+        if self.durations:
+            # Decode durations, not composition-time differences. A file with
+            # B-frames has non-monotonic PTS in decode order, so differencing
+            # PTS would report ordinary constant-rate material as variable and
+            # trigger a spurious VFR warning about the one thing the NIM refuses.
+            # The final sample's duration is allowed to differ; it routinely does.
+            deltas = set(self.durations[:-1]) or {self.durations[-1]}
+        else:
+            deltas = {
+                self.samples[i + 1].pts_ticks - self.samples[i].pts_ticks
+                for i in range(len(self.samples) - 1)
+            }
         if len(deltas) != 1:
             return None
         delta = deltas.pop()
@@ -297,19 +309,26 @@ def _sample_offsets(chunk_offsets: Sequence[int], stsc: Sequence[tuple[int, int]
     return offsets
 
 
-def _visual_dimensions(data: bytes, stbl: Atom) -> tuple[int, int]:
+def _visual_sample_entry(data: bytes, stbl: Atom) -> tuple[str, int, int]:
+    """Return ``(codec_4cc, width, height)`` from the first sample description.
+
+    The 4CC matters as much as the size: the NIM accepts H.264 only, and an
+    HEVC clip can be faststart-remuxed so it passes every other check the
+    harness makes.
+    """
     stsd = find_atom(data, "stsd", stbl.body_offset, stbl.end)
     if stsd is None:
-        return 0, 0
+        return "", 0, 0
     _, _, pos = _parse_full_box(data, stsd)
     entry_count = struct.unpack_from(">I", data, pos)[0]
     if entry_count < 1:
-        return 0, 0
+        return "", 0, 0
     entry = pos + 4
+    codec = data[entry + 4 : entry + 8].decode("latin-1")
     # VisualSampleEntry: 8 byte box header + 6 reserved + 2 index + 16 predefined
     # then 2-byte width and 2-byte height.
     width, height = struct.unpack_from(">HH", data, entry + 8 + 24)
-    return width, height
+    return codec, width, height
 
 
 def index_video_track(data: bytes, moov: Atom | None = None) -> VideoTrackIndex:
@@ -361,8 +380,9 @@ def index_video_track(data: bytes, moov: Atom | None = None) -> VideoTrackIndex:
 
         if not sizes:
             # A fragmented file carries an empty sample table by design.
-            width, height = _visual_dimensions(data, stbl)
-            return VideoTrackIndex(timescale=timescale, width=width, height=height)
+            codec, width, height = _visual_sample_entry(data, stbl)
+            return VideoTrackIndex(timescale=timescale, width=width, height=height,
+                                   codec=codec)
 
         stsc_atom = find_atom(data, "stsc", stbl.body_offset, stbl.end)
         if stsc_atom is None:
@@ -379,8 +399,10 @@ def index_video_track(data: bytes, moov: Atom | None = None) -> VideoTrackIndex:
             samples.append(Sample(i, offsets[i], size, decode_time + offset_ticks, timescale))
             decode_time += deltas[i] if i < len(deltas) else (deltas[-1] if deltas else 0)
 
-        width, height = _visual_dimensions(data, stbl)
-        return VideoTrackIndex(timescale=timescale, samples=samples, width=width, height=height)
+        codec, width, height = _visual_sample_entry(data, stbl)
+        return VideoTrackIndex(timescale=timescale, samples=samples, width=width,
+                               height=height, codec=codec,
+                               durations=deltas[: len(sizes)])
 
     raise Mp4Error("no video track in moov")
 

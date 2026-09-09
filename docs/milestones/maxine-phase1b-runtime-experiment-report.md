@@ -383,3 +383,173 @@ and the one route that could close them is one provisioning step away.
 
 Nothing beyond Phase 1B follows from this report. No M4, no virtual-camera work,
 no PRD revision, no product architecture, no ADR, and no milestone transition.
+
+
+---
+
+# Continuation — 2026-09-09: real NIM provisioned, execution still blocked here
+
+**`PHASE 1B RUNTIME EXPERIMENT — INCONCLUSIVE (UNCHANGED)`**
+
+The Product Owner has provisioned a real self-hosted NIM on a GCP VM
+(`nvcr.io/nim/nvidia/maxine-eye-contact:1.4.0`, digest
+`sha256:96abb52a2e1069cc2ab39f142a9847ab945caaa74b3b2da6490d6deae1726b4b`,
+NVIDIA L4, driver 595.91.07, CUDA 13.2, compute-capability 8.9 profile, Triton
+model `GazeRedirectionKey68` v1 READY, gRPC on 8001, health `SERVING`).
+
+**Stage A and Stage B were still not executed, because this engineering session
+does not run on that VM.** Verified, not assumed:
+
+| Check | Result |
+| --- | --- |
+| `nvidia-smi`, `/dev/nvidia*` | absent |
+| `localhost:8001` | `ConnectionRefusedError` — nothing listening |
+| Any listening port at all | none |
+| `gcloud`, `gsutil`, SSH keys | absent |
+| GCE metadata server (`169.254.169.254`) | unreachable — this is not a GCE instance |
+
+The NIM is deliberately not exposed publicly, so there is no route from here.
+The run must be performed on the VM; `research/maxine-eye-contact-phase1b/RUNBOOK.md`
+now carries the exact command sequence for it.
+
+## What this session did instead
+
+The harness had never met anything but an echo mock. Before spending a one-shot
+run on borrowed GPU time, it was reviewed adversarially and rehearsed against
+mocks that behave the way a real NIM plausibly might. **Nine defects were found
+and fixed, four of which would have produced a confidently wrong answer.**
+
+Every fix below was verified by rehearsal, not by inspection alone. None of these
+rehearsals is a Maxine measurement.
+
+### Would have caused a FALSE FAIL — reporting `NO` when the truth was otherwise
+
+1. **A mid-stream non-OK gRPC status fabricated an `input_eos` event.** The
+   sender marked EOS in a bare `finally`, which also runs on the `GeneratorExit`
+   gRPC injects when it abandons the call. `output_before_eos()` then compared
+   against a moment the client never reached and returned `NO`. A NIM answering
+   `RESOURCE_EXHAUSTED` because its single L4 instance was busy would have been
+   recorded as "Maxine cannot stream". Now: `input_aborted` is marked instead,
+   and the determination is `NOT MEASURED`. Rehearsed against servers aborting
+   with `RESOURCE_EXHAUSTED` and `INVALID_ARGUMENT` — both now yield
+   `NOT MEASURED` with the status preserved verbatim.
+
+2. **Stage B's determination had the same flaw**, and additionally required the
+   *output* to be indexable. A NIM that consumed the live-generated container
+   and returned valid corrected bytes in a `moov`-last layout would have been
+   recorded as not having consumed it. Stage B now answers from the input side,
+   distinguishes a refusal (`INVALID_ARGUMENT`, `FAILED_PRECONDITION`, …) from a
+   transient end (`RESOURCE_EXHAUSTED` → `NOT MEASURED`), and reports output
+   indexability separately.
+
+3. **Stage B never validated its source at all.** Stage A's guards did not apply
+   to it, and `frames_from_video` sent ffmpeg's stderr to `/dev/null`, so an
+   unreadable file produced a clean-looking zero-frame run indistinguishable
+   from a service that accepted the stream and returned nothing. Both stages now
+   share the guards, and the decoder's reason is surfaced.
+
+4. **Pacing broke on any source with B-frames.** `paced_units` assigned each
+   byte range the raw per-sample PTS while walking in decode order; with
+   B-frames PTS is non-monotonic there, so deadlines were already in the past
+   and the realtime schedule Stage A depends on collapsed. Measured on a real
+   B-frame clip the delta set was `[-1024, -512, 512, 1024, 1536, 2048]`.
+   Release is now the running maximum of PTS — the instant a live encoder could
+   actually have produced those bytes. The same bug made `nominal_fps()` report
+   ordinary constant-rate material as variable, which would have raised a
+   spurious VFR warning about the one thing the NIM refuses; frame rate now
+   comes from `stts` decode durations (`30.0` where it previously read `None`).
+
+### Would have produced misleading or missing evidence
+
+5. **A `NO` came with no evidence about what the service returned.** Rehearsed
+   with a NIM emitting a `moov`-last output: the harness correctly said `NO` but
+   recorded `decode_corroboration: NOT MEASURED` beside 3.8 MB of received
+   video, leaving "works but batches" and "returned garbage" indistinguishable.
+   The complete output is now decoded and its frame count compared against the
+   source, and the reason nothing was usable is stated (`MOOV_LAST` vs a parser
+   fault vs no sample completing) rather than assumed.
+
+6. **Frame-age percentiles were computed from a silent subset.** A corrected
+   frame recorded before the sender had noted the matching source frame's send
+   instant simply lost its age. Rehearsed with a re-encoded output: **21 of 120
+   frames were aged while the summary reported 120 output frames.** The race is
+   now eliminated at source (the feed instant is recorded before the write, not
+   after), ages are reconciled after the run, coverage is reported as
+   `age_coverage`, and a negative age — physically impossible — is counted and
+   flagged rather than averaged in.
+
+7. **`backlog.csv` was empty exactly when backlog mattered.** Sampling happened
+   inside the response loop, so a service that accepted the stream and returned
+   nothing produced no rows at all. Sampling is now clock-driven: the same
+   rehearsal now records 8 rows showing 3,347,475 bytes outstanding against
+   silence.
+
+8. **ffmpeg's stderr was blank exactly when it was the only evidence.** On an
+   abnormal end, `live.units()` was never finalised, so the encoder was unreaped
+   and its stderr unread — the one artifact separating "the NIM rejected our
+   container" from "our encoder produced a broken one". The producer is now
+   closed explicitly.
+
+9. **The default Stage B path dropped its last frame.** `-fflags +nobuffer`
+   caused ffmpeg to emit N-1 fragments for N frames (measured: 29/30, 89/90),
+   which would have shown as a permanent output/input mismatch casting doubt on
+   a genuine PASS. It bought nothing on a rawvideo pipe. Removing it fixed the
+   frame count **and** cut the ffmpeg path's client-side latency from **73.4 ms
+   to 42.2 ms p50**.
+
+### Smaller hardening
+
+- No HTTP/2 keepalive pings on the channel. NVIDIA's client sends none, and a
+  gRPC server's default minimum ping interval is five minutes with two strikes
+  before `GOAWAY(too_many_pings)` — harmless while the NIM streams, fatal
+  precisely when it goes quiet, which is what Stage A must observe.
+- `grpc.channel_ready_future` before the RPC: a TCP connect succeeds as soon as
+  Triton's socket listens, which can precede the model being READY.
+- H.264-only gate on the Stage A source (an HEVC clip remuxed `+faststart`
+  passed every previous check), and a Git-LFS-pointer check that names the
+  problem instead of failing obscurely.
+- A source whose realtime duration would not fit inside the RPC deadline is
+  refused, naming the `--rpc-timeout` that would be needed.
+- `SourceUnsuitable` reaches the operator as `SOURCE UNSUITABLE — this is a
+  statement about the file, not about Maxine` with exit code 3, not a traceback.
+- A `failure_attribution.blame` field on every run: `NONE` / `SERVER` /
+  `HARNESS` / `HARNESS PARSER` / `OPERATOR`, with `grpc_status` and
+  `grpc_details` preserved as structured fields.
+- The server's config echo is captured. The summary previously claimed "none
+  (NVIDIA defaults)" while an **empty** `RedirectGazeConfig` was in fact sent;
+  it now says exactly what went on the wire and offers `--no-config`.
+- Retention is capped while the container layout is unclassified, so an
+  unfamiliar response cannot become the unbounded queue the experiment forbids.
+- **The source must contain a human face.** The documentation previously said
+  "any other clip works if it is streamable" and pointed at synthetic material.
+  Eye Contact redirects gaze; given no face there is nothing to redirect, and
+  whatever it does then would be indistinguishable from a streaming failure.
+
+## Verification of this session's work
+
+| Check | Result |
+| --- | --- |
+| Automated tests | **101 passed** (was 74), 3 consecutive runs, no flakiness |
+| `pyflakes` | clean |
+| Harness self-test | **PASS**, 12/12 assertions |
+| Age coverage, all four self-test runs | `90/90`, correspondence `1:1`, zero impossible ages |
+| Harness client-side floor, re-measured | ffmpeg muxer **42.2 ms** p50, in-process **7.5 ms** p50 |
+
+`NOT MEASURED` still applies to every Maxine quantity. Nothing in this section
+is evidence about Maxine; it is evidence that the instrument will not lie about
+Maxine.
+
+## Status and recommendation, unchanged in substance
+
+**`PHASE 1B RUNTIME EXPERIMENT — INCONCLUSIVE`**
+
+`REALTIME TECHNICAL FEASIBILITY: UNKNOWN`.
+`CURRENT PRD LATENCY COMPLIANCE: NOT MEASURED`. The PRD is unchanged.
+
+**`RETURN TO PM — ADDITIONAL EVIDENCE REQUIRED`** — the evidence being a Stage A
+and Stage B run executed **on the GCP VM**, which this session cannot reach. The
+commands are in `RUNBOOK.md`; Stage A answers the load-bearing question in about
+ten seconds of media.
+
+Stage C is not run and is not authorized by anything here. No M4, no
+virtual-camera work, no PRD revision, no architecture, no ADR.

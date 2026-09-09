@@ -35,6 +35,7 @@ class SourceProfile:
     layout: str
     streamable: bool
     fragmented: bool
+    codec: str
     width: int
     height: int
     frame_count: int
@@ -49,6 +50,7 @@ class SourceProfile:
             "top_level_atoms": self.layout,
             "streamable_moov_first": self.streamable,
             "fragmented": self.fragmented,
+            "video_codec_4cc": self.codec or "UNKNOWN",
             "width": self.width,
             "height": self.height,
             "frame_count": self.frame_count,
@@ -57,11 +59,35 @@ class SourceProfile:
         }
 
 
+class SourceUnsuitable(RuntimeError):
+    """The source file cannot answer the question, and the service is not at fault.
+
+    Raised before the RPC is opened. Every message says what is wrong with the
+    *file*, because a run that dies on bad input must never be mistaken for
+    evidence about Maxine.
+    """
+
+
 def probe(path: Path) -> tuple[SourceProfile, mp4.VideoTrackIndex]:
     """Index a source file and report what the container actually says."""
+    if not path.is_file():
+        raise SourceUnsuitable(f"{path} does not exist")
     data = path.read_bytes()
+    if data.startswith(b"version https://git-lfs"):
+        raise SourceUnsuitable(
+            f"{path} is a {len(data)}-byte Git LFS pointer, not video. Run "
+            "'git lfs install && git lfs pull' inside the clone that holds it."
+        )
+    if len(data) < 8 or data[4:8] != b"ftyp":
+        raise SourceUnsuitable(
+            f"{path} does not begin with an MP4 'ftyp' box ({len(data)} bytes). "
+            "The NIM accepts MP4 with H.264 only."
+        )
     layout = mp4.inspect_layout(data)
-    index = mp4.index_video_track(data)
+    try:
+        index = mp4.index_video_track(data)
+    except mp4.Mp4Error as exc:
+        raise SourceUnsuitable(f"{path} has no indexable video track: {exc}") from exc
     fps = index.nominal_fps()
     duration = None
     if index.samples and fps:
@@ -73,6 +99,7 @@ def probe(path: Path) -> tuple[SourceProfile, mp4.VideoTrackIndex]:
         layout=",".join(layout.atoms),
         streamable=layout.moov_first,
         fragmented=layout.fragmented,
+        codec=index.codec,
         width=index.width,
         height=index.height,
         frame_count=index.frame_count(),
@@ -101,12 +128,18 @@ def paced_units(
     if first_media_offset > 0:
         boundaries.append((0, first_media_offset, 0.0, None))
     position = first_media_offset
+    latest_pts = 0.0
     for sample in samples:
+        # Running maximum: a live encoder could not have produced these bytes
+        # before the newest picture among them was captured. For B-frame
+        # material the raw PTS goes backwards in decode order, and using it
+        # directly would set deadlines already in the past.
+        latest_pts = max(latest_pts, sample.pts_seconds)
         if sample.end > position:
-            boundaries.append((position, sample.end, sample.pts_seconds, sample.index))
+            boundaries.append((position, sample.end, latest_pts, sample.index))
             position = sample.end
     if position < len(data):
-        boundaries.append((position, len(data), samples[-1].pts_seconds, None))
+        boundaries.append((position, len(data), latest_pts, None))
 
     for start, end, media_time, frame_index in boundaries:
         offset = start

@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from streamexp import livesource, preflight, proto  # noqa: E402
+from streamexp import livesource, preflight, proto, source  # noqa: E402
 from streamexp.channel import ChannelSpec  # noqa: E402
 from streamexp.stages import RunOptions, run_stage_a, run_stage_b  # noqa: E402
 
@@ -65,6 +65,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="operator attests a self-hosted Eye Contact NIM serves --target")
     parser.add_argument("--no-decode-check", action="store_true",
                         help="skip decoding the prefix that was called usable")
+    parser.add_argument("--rpc-timeout", type=float, default=600.0,
+                        help="deadline in seconds for the whole RedirectGaze call; "
+                             "0 disables it (default: %(default)s)")
     parser.add_argument("--no-config", action="store_true",
                         help="do not send the initial RedirectGazeConfig message")
 
@@ -128,6 +131,7 @@ def make_options(args: argparse.Namespace, label: str) -> RunOptions:
         camera_backend=args.camera_backend,
         max_frames=args.max_frames,
         decode_check=not args.no_decode_check,
+        rpc_timeout_s=args.rpc_timeout or None,
     )
 
 
@@ -170,7 +174,18 @@ def command_stage(args: argparse.Namespace, stage: str) -> int:
     label = args.label or f"stage-{stage.lower()}"
     options = make_options(args, label)
     runner = run_stage_a if stage == "A" else run_stage_b
-    payload = runner(options)
+    try:
+        payload = runner(options)
+    except source.SourceUnsuitable as exc:
+        print(
+            "\nSOURCE UNSUITABLE — this is a statement about the file, not about "
+            f"Maxine:\n\n{exc}\n",
+            file=sys.stderr,
+        )
+        return 3
+    except livesource.LiveSourceError as exc:
+        print(f"\nLIVE SOURCE PROBLEM — not a service result:\n\n{exc}\n", file=sys.stderr)
+        return 3
     print(json.dumps(payload, indent=2))
     return 0 if not payload["error"] else 1
 

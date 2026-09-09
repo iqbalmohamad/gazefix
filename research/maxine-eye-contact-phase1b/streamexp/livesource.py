@@ -94,8 +94,12 @@ class LiveEncoderConfig:
         movflags = "+empty_moov+default_base_moof"
         movflags += "+frag_every_frame" if self.fragment_per_frame else "+frag_keyframe"
         args = [
+            # No "-fflags +nobuffer" here. It buys nothing on a rawvideo pipe,
+            # which has no demuxer buffering to skip, and measurably costs the
+            # LAST frame: with it ffmpeg emits N-1 fragments for N frames, which
+            # showed up as a permanent output/input frame-count mismatch and
+            # would have cast doubt on an otherwise good Stage B result.
             ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-            "-fflags", "+nobuffer",
             "-f", "rawvideo",
             "-pix_fmt", self.pixel_format,
             "-s", f"{self.width}x{self.height}",
@@ -396,14 +400,16 @@ def frames_from_video(path: Path, config: LiveEncoderConfig,
         "-r", str(config.fps),
         "pipe:1",
     ]
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert process.stdout is not None
     size = config.frame_bytes
+    produced = 0
     try:
         while True:
             buffer = process.stdout.read(size)
             if not buffer or len(buffer) < size:
-                return
+                break
+            produced += 1
             yield buffer
     finally:
         try:
@@ -415,6 +421,15 @@ def frames_from_video(path: Path, config: LiveEncoderConfig,
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:  # pragma: no cover - defensive
             process.kill()
+        if produced == 0:
+            # Silence here used to look exactly like a service that accepted the
+            # stream and returned nothing. It is the decoder refusing the file,
+            # and its reason is the only thing that says so.
+            detail = (process.stderr.read() or b"").decode("utf-8", "replace")[:2000]
+            raise LiveSourceError(
+                f"no frames could be decoded from {path}. This is a source problem, "
+                f"not a service result. ffmpeg said: {detail.strip() or '(nothing)'}"
+            )
 
 
 def camera_frames(device: str, config: LiveEncoderConfig, input_format: str,

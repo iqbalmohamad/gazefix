@@ -108,11 +108,82 @@ def percentile(values: Sequence[float], fraction: float) -> float | None:
     return ordered[rank - 1]
 
 
-def summarise_ages(records: Sequence[FrameRecord]) -> dict[str, Any]:
-    ages = [r.age_s for r in records if r.age_s is not None]
+def summarise_ages(
+    records: Sequence[FrameRecord], source_frames: int | None = None
+) -> dict[str, Any]:
+    """Summarise corrected-frame age, and say plainly how much it covers.
+
+    Two things are reported alongside the percentiles because leaving them out
+    would let the headline number be read as more than it is:
+
+    ``age_coverage``
+        The fraction of corrected frames an age could be computed for. A p50
+        drawn from a sixth of the stream is not the stream's p50, and a reader
+        who sees only a percentile has no way to know that.
+
+    ``frames_usable_before_their_source_was_fed``
+        Frames whose age came out **negative** — the corrected frame appeared
+        before the client had finished sending the frame it supposedly
+        corrects. That is physically impossible for a real service, so it is
+        evidence that output frame *n* is not the correction of input frame
+        *n*: the 1:1, in-order correspondence this harness assumes has broken.
+        Such frames are excluded from the percentiles and counted here instead
+        of being quietly dropped.
+    """
+    total = len(records)
+    measurable = [r.age_s for r in records if r.age_s is not None]
+    negative = [age for age in measurable if age < 0]
+    ages = [age for age in measurable if age >= 0]
+
+    short_output = source_frames is not None and total != source_frames
+    integrity = {
+        "output_frames": total,
+        "source_frames": source_frames if source_frames is not None else "NOT MEASURED",
+        "frames_with_age": len(ages),
+        "age_coverage": (
+            "NOT MEASURED" if total == 0 else f"{len(ages)}/{total}"
+        ),
+        "frames_usable_before_their_source_was_fed": len(negative),
+        # The sender records a frame's feed instant before handing its bytes to
+        # gRPC, so the harness cannot manufacture a negative age by racing its
+        # own threads. Magnitude is still reported, because how early a frame
+        # arrived says how badly correspondence has slipped.
+        "most_negative_age_ms": (
+            round(min(negative) * 1000, 3) if negative else None
+        ),
+        # Complete coverage of the frames that came back is not the same as
+        # complete coverage of the stream. A response that is short by ten
+        # frames can still age every frame it contains, and reporting that as
+        # intact would let a real discrepancy pass as a clean run.
+        "correspondence_intact": (
+            len(negative) == 0 and len(ages) == total and not short_output
+        ),
+    }
+    if short_output:
+        integrity["count_warning"] = (
+            f"{total} corrected frames came back for {source_frames} source frames. "
+            "Per-frame ages assume corrected frame n corrects source frame n; with a "
+            "differing count that assumption is unproven and the percentiles below "
+            "should not be quoted as the stream's latency."
+        )
+    if total and len(ages) < total:
+        integrity["coverage_warning"] = (
+            f"Only {len(ages)} of {total} corrected frames could be aged. The "
+            "percentiles below describe those frames and not the whole stream."
+        )
+    if negative:
+        integrity["correspondence_warning"] = (
+            f"{len(negative)} corrected frames became usable before the client had "
+            f"even begun sending the source frame of the same index (worst "
+            f"{min(negative) * 1000:.3f} ms). No service can correct a frame it has "
+            "not received, so output frame n is not the correction of input frame n: "
+            "per-frame ages below cannot be trusted, and the run should be repeated "
+            "before any latency claim is made."
+        )
+
     if not ages:
         return {
-            "frames_with_age": 0,
+            **integrity,
             "p50_frame_age_ms": "NOT MEASURED",
             "p95_frame_age_ms": "NOT MEASURED",
             "p99_frame_age_ms": "NOT MEASURED",
@@ -120,7 +191,7 @@ def summarise_ages(records: Sequence[FrameRecord]) -> dict[str, Any]:
             "age_growth_ms_per_frame": "NOT MEASURED",
         }
     return {
-        "frames_with_age": len(ages),
+        **integrity,
         "p50_frame_age_ms": round(percentile(ages, 0.50) * 1000, 3),
         "p95_frame_age_ms": round(percentile(ages, 0.95) * 1000, 3),
         "p99_frame_age_ms": round(percentile(ages, 0.99) * 1000, 3),
