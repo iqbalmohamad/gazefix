@@ -316,7 +316,13 @@ ffprobe/ffmpeg.
 | --- | --- |
 | `cutoff_time_ms` / `cumulative_bytes` | exactly what the client held when it stopped sending |
 | `first_chunk_at_or_after_eos` | the first chunk that did *not* beat EOS, so no window is left unobserved |
-| `frames_decoded`, `decode_status` | `VERIFIED` (>=1 frame) → **YES**; `EMPTY` (a decoder looked and found none) → **NO**; `AMBIGUOUS` (the decoder could not run) → **NOT MEASURED** |
+| `frames_decoded`, `decode_status` | `VERIFIED` (>=1 frame) → **YES**; `EMPTY` (a decoder recognised the container, walked it to EOF and found no frame) → **NO**; `AMBIGUOUS` (the input was not recognised, or no decoder could run) → **NOT MEASURED** |
+
+`EMPTY` and `AMBIGUOUS` are deliberately different. A truncated MP4 carrying
+only `ftyp` and `moov` is *recognised* — ffprobe names the codec and the frame
+size, warns the file is partial, enumerates to EOF and finds nothing. That is a
+determinate zero. Bytes ffprobe cannot parse at all are `AMBIGUOUS`: "I cannot
+read this" is never recorded as "there is nothing here".
 
 `AMBIGUOUS` never becomes a `NO`. If ffprobe/ffmpeg are missing or fail, the run
 answers nothing and must be repeated with working tools.
@@ -377,6 +383,27 @@ frames is refused outright now, but if it ever reads zero the answer is about
 the source, not the service. And `live_production.frame_source_error` must be
 empty; if it is not, ffmpeg could not decode the clip and nothing about the NIM
 was measured.
+
+## 9b. Re-deciding a finished run offline
+
+Decoder semantics improve; a completed run should not have to be repeated to
+benefit. This re-evaluates a run directory with no NIM, no network and no GPU:
+
+```bash
+.venv-maxine1b/bin/python research/maxine-eye-contact-phase1b/run.py \
+  reanalyze-stage-a --run-dir experiments/maxine-phase1b/stage-a-real-nim-v2
+```
+
+It reads `summary.json`, `corrected.mp4`, `pre_eos_corrected.mp4` and
+`response_chunks.csv`; re-derives the pre-EOS boundary from the chunk log;
+re-cuts the prefix into `pre_eos_corrected.reanalysis.mp4`; and re-examines both
+the prefix and the complete output. It writes `reanalysis.json` and **leaves
+`summary.json` and the original prefix byte-for-byte untouched**, recording the
+original's SHA-256 so an amended answer is always traceable.
+
+RPC timing is carried forward verbatim and never recomputed — those are
+measurements of events that already happened. `not_recomputed` lists exactly
+what was left alone, and `determination.changed` says whether the answer moved.
 
 ## 10. What to hand back
 

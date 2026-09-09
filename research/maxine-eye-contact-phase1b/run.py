@@ -6,6 +6,7 @@ RESEARCH/EXPERIMENT ONLY — NOT AUTHORIZED FOR GAZEFIX PRODUCTION.
     python research/maxine-eye-contact-phase1b/run.py preflight
     python research/maxine-eye-contact-phase1b/run.py stage-a --source clip.mp4
     python research/maxine-eye-contact-phase1b/run.py stage-b --source clip.mp4
+    python research/maxine-eye-contact-phase1b/run.py reanalyze-stage-a --run-dir <dir>
     python research/maxine-eye-contact-phase1b/run.py selftest
 
 ``selftest`` runs both stages against a local mock that speaks NVIDIA's compiled
@@ -37,7 +38,12 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("command",
-                        choices=["preflight", "stage-a", "stage-b", "mock", "selftest"])
+                        choices=["preflight", "stage-a", "stage-b", "mock", "selftest",
+                                 "reanalyze-stage-a"])
+    parser.add_argument("--run-dir", type=Path,
+                        help="reanalyze-stage-a: a completed Stage A run directory. "
+                             "Recomputes only decoder-backed fields, offline, and "
+                             "leaves the original summary.json untouched.")
     parser.add_argument("--target", default="127.0.0.1:8001",
                         help="host:port of the Eye Contact NIM (default: %(default)s)")
     parser.add_argument("--mode", default="insecure",
@@ -198,6 +204,29 @@ def command_stage(args: argparse.Namespace, stage: str) -> int:
     return 0 if not payload["error"] else 1
 
 
+def command_reanalyze(args: argparse.Namespace) -> int:
+    from streamexp import reanalyze  # noqa: PLC0415
+
+    if args.run_dir is None:
+        print("reanalyze-stage-a requires --run-dir", file=sys.stderr)
+        return 2
+    try:
+        path, payload = reanalyze.write_reanalysis(args.run_dir)
+    except reanalyze.ReanalysisError as exc:
+        print(f"\nCANNOT RE-ANALYSE: {exc}\n", file=sys.stderr)
+        return 3
+    print(json.dumps(payload, indent=2))
+    determination = payload["determination"]
+    print(
+        f"\nusable_output_before_input_eos: {determination['reanalysed']}"
+        f"  (was {determination['original']})\n"
+        f"written: {path}\n"
+        "the original summary.json is unchanged",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def command_mock(args: argparse.Namespace) -> int:
     from streamexp import mockserver  # noqa: PLC0415
 
@@ -243,6 +272,8 @@ def main(argv: list[str] | None = None) -> int:
         return command_stage(args, "A")
     if args.command == "stage-b":
         return command_stage(args, "B")
+    if args.command == "reanalyze-stage-a":
+        return command_reanalyze(args)
     if args.command == "mock":
         return command_mock(args)
     return command_selftest(args)

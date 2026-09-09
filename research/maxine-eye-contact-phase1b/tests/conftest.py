@@ -124,3 +124,41 @@ def ffmpeg() -> str:
     if binary is None:
         pytest.skip("ffmpeg is not on PATH")
     return binary
+
+
+@pytest.fixture(scope="session")
+def real_clip(ffmpeg: str, tmp_path_factory) -> Path:
+    """A genuinely encoded H.264 faststart MP4.
+
+    The hand-built fixtures above carry an ``avc1`` sample entry but no real
+    bitstream, so a decoder rejects them outright — which is now correctly
+    reported as AMBIGUOUS rather than as zero frames. Tests about what a decoder
+    *sees* therefore need real media.
+    """
+    import subprocess
+
+    path = tmp_path_factory.mktemp("media") / "real.mp4"
+    subprocess.run(
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc2=size=128x96:rate=30", "-t", "1",
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+         "-g", "30", "-movflags", "+faststart", str(path)],
+        check=True, capture_output=True, timeout=180,
+    )
+    return path
+
+
+@pytest.fixture(scope="session")
+def metadata_only_prefix(real_clip: Path, tmp_path_factory) -> Path:
+    """The head of a real clip: ftyp and moov, but no media payload.
+
+    This is the shape of the 1367 bytes the first real Stage A run held when it
+    finished sending — a container a decoder can describe but not decode a
+    single frame from.
+    """
+    data = real_clip.read_bytes()
+    cut = data.find(b"mdat")
+    assert cut > 0, "the fixture clip has no mdat box"
+    path = tmp_path_factory.mktemp("media") / "prefix.mp4"
+    path.write_bytes(data[: cut + 4])
+    return path

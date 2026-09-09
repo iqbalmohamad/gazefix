@@ -97,18 +97,22 @@ def test_the_boundary_is_the_last_of_many_chunks():
 # -- the decoder-backed determination ------------------------------------
 
 
-def test_zero_decodable_frames_before_eos_is_NO(tmp_path: Path, ffmpeg):
-    """A prefix that carries stream metadata but no complete frame."""
+def test_zero_decodable_frames_before_eos_is_NO(
+    tmp_path: Path, real_clip: Path, metadata_only_prefix: Path
+):
+    """A prefix carrying stream metadata but no complete frame — the real case."""
     complete = tmp_path / "corrected.mp4"
-    complete.write_bytes(build_progressive_mp4([4000] * 20))
-    result = result_with([(1968.5, 1367), (8035.4, 60_000)], output=complete)
+    complete.write_bytes(real_clip.read_bytes())
+    head = metadata_only_prefix.stat().st_size
+    result = result_with([(1968.5, head), (8035.4, 60_000)], output=complete)
 
     evidence = _pre_eos_evidence(options_for(tmp_path), result, tmp_path)
-    assert evidence["cumulative_bytes"] == 1367
+    assert evidence["cumulative_bytes"] == head
+    assert evidence["ffprobe_stream_detected"] is True
     assert evidence["frames_decoded"] == 0
     assert evidence["decode_status"] == "EMPTY"
     assert evidence["determination"] == "NO"
-    assert Path(evidence["artifact"]).stat().st_size == 1367
+    assert Path(evidence["artifact"]).stat().st_size == head
 
 
 def test_at_least_one_decodable_frame_before_eos_is_YES(tmp_path: Path, ffmpeg):
@@ -212,16 +216,29 @@ def test_agreement_leaves_the_parser_numbers_alone():
     assert "parser_quarantined" not in frame_age
 
 
-def test_the_audit_counts_the_complete_output_with_a_decoder(tmp_path: Path, ffmpeg):
+def test_the_audit_counts_the_complete_output_with_a_decoder(
+    tmp_path: Path, real_clip: Path
+):
     complete = tmp_path / "corrected.mp4"
-    complete.write_bytes(build_progressive_mp4([4000] * 12))
+    complete.write_bytes(real_clip.read_bytes())
     result = result_with([(1000.0, complete.stat().st_size)], output=complete)
     result.frames = []  # the parser located nothing; the decoder is the authority
     audit = _full_output_evidence(result)
+    assert audit["decoder_frames"] >= 1
     assert audit["parser_frames"] == 0
-    assert audit["agreement"] in ("AGREE", "DISAGREE")
-    if audit["agreement"] == "DISAGREE":
-        assert audit["parser_trusted"] is False
+    assert audit["agreement"] == "DISAGREE"
+    assert audit["parser_trusted"] is False
+
+
+def test_unrecognisable_output_is_never_counted_as_zero_frames(tmp_path: Path):
+    """A container a decoder cannot read leaves the parser unaudited, not vindicated."""
+    complete = tmp_path / "corrected.mp4"
+    complete.write_bytes(build_progressive_mp4([4000] * 12))
+    result = result_with([(1000.0, complete.stat().st_size)], output=complete)
+    result.frames = []
+    audit = _full_output_evidence(result)
+    assert audit["agreement"] == "NOT MEASURED"
+    assert audit["parser_trusted"] is False
 
 
 def test_an_unauditable_output_never_counts_as_agreement(tmp_path: Path, monkeypatch):

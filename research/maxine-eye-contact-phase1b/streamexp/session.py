@@ -34,6 +34,36 @@ from .progressive import FrameEvent, Layout, ProgressiveMp4Reader
 from .timing import FrameRecord, Timeline, monotonic
 
 
+def select_boundary(
+    rows: Sequence[dict[str, float]], t_ms: float
+) -> tuple[int, float | None]:
+    """Cumulative output bytes as of the last chunk that arrived before ``t_ms``.
+
+    Returns ``(cumulative_bytes, arrival_t_ms)``; ``(0, None)`` when no media had
+    arrived by then. Strictly before, not at-or-before: a chunk landing in the
+    same instant as EOS cannot be claimed to have preceded it.
+    """
+    cumulative = 0
+    arrival: float | None = None
+    for row in rows:
+        if float(row["t_ms"]) < t_ms:
+            cumulative = int(row["cumulative_bytes"])
+            arrival = float(row["t_ms"])
+        else:
+            break
+    return cumulative, arrival
+
+
+def first_at_or_after(
+    rows: Sequence[dict[str, float]], t_ms: float
+) -> dict[str, float] | None:
+    """The first media chunk that did **not** beat ``t_ms``."""
+    for row in rows:
+        if float(row["t_ms"]) >= t_ms:
+            return row
+    return None
+
+
 @dataclass(frozen=True)
 class SendUnit:
     """One paced write to the RPC.
@@ -120,28 +150,12 @@ class SessionResult:
         return None if event is None else event.at
 
     def bytes_strictly_before(self, t_ms: float) -> tuple[int, float | None]:
-        """Cumulative output bytes as of the last chunk that arrived before ``t_ms``.
-
-        Returns ``(cumulative_bytes, arrival_t_ms)``; ``(0, None)`` when no media
-        had arrived by then. Strictly before, not at-or-before: a chunk landing
-        in the same instant as EOS cannot be claimed to have preceded it.
-        """
-        cumulative = 0
-        arrival: float | None = None
-        for row in self.response_chunks:
-            if row["t_ms"] < t_ms:
-                cumulative = int(row["cumulative_bytes"])
-                arrival = float(row["t_ms"])
-            else:
-                break
-        return cumulative, arrival
+        """See :func:`select_boundary`."""
+        return select_boundary(self.response_chunks, t_ms)
 
     def first_chunk_at_or_after(self, t_ms: float) -> dict[str, float] | None:
-        """The first media chunk that did **not** beat ``t_ms``."""
-        for row in self.response_chunks:
-            if row["t_ms"] >= t_ms:
-                return row
-        return None
+        """See :func:`first_at_or_after`."""
+        return first_at_or_after(self.response_chunks, t_ms)
 
     def output_before_eos(self) -> str:
         """``YES`` / ``NO`` / ``NOT MEASURED`` for Stage A's kill condition.
