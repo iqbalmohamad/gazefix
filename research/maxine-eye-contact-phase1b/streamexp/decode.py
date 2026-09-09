@@ -32,6 +32,111 @@ class DecodeCheck:
     prefix_bytes: int
 
 
+@dataclass(frozen=True)
+class MediaExamination:
+    """What an external decoder made of a byte range.
+
+    The distinction between ``EMPTY`` and ``AMBIGUOUS`` is the whole point of
+    this type. ``EMPTY`` means a decoder ran, looked, and found no complete
+    frame — a determinate finding. ``AMBIGUOUS`` means the examination itself
+    did not happen or could not be trusted. Only the first may be read as
+    evidence that no usable output existed; collapsing the two would turn a
+    missing ffprobe into a Stage A ``NO``.
+    """
+
+    status: str
+    """``VERIFIED`` (>=1 frame) / ``EMPTY`` (0 frames, determinate) / ``AMBIGUOUS``."""
+    stream_detected: bool
+    frames_decoded: int | None
+    bytes_examined: int
+    detail: str
+
+    @property
+    def determinate(self) -> bool:
+        return self.status in ("VERIFIED", "EMPTY")
+
+
+def examine(path: Path) -> MediaExamination:
+    """Ask ffprobe and ffmpeg what is actually decodable in ``path``.
+
+    Never the custom MP4 parser: this is the independent check the parser is
+    measured against, so it must share none of its assumptions.
+    """
+    size = path.stat().st_size if path.is_file() else 0
+    ffprobe, ffmpeg = tool("ffprobe"), tool("ffmpeg")
+    if ffprobe is None and ffmpeg is None:
+        return MediaExamination(
+            "AMBIGUOUS", False, None, size,
+            "neither ffprobe nor ffmpeg is on PATH; no independent examination was made",
+        )
+    if size == 0:
+        return MediaExamination("EMPTY", False, 0, 0, "the file is empty")
+
+    stream_detected = False
+    frames: int | None = None
+    notes: list[str] = []
+
+    if ffprobe is not None:
+        try:
+            result = subprocess.run(
+                [
+                    ffprobe, "-v", "error", "-count_frames", "-select_streams", "v:0",
+                    "-show_entries", "stream=codec_name,width,height,nb_read_frames",
+                    "-of", "json", str(path),
+                ],
+                capture_output=True, text=True, timeout=300,
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            notes.append(f"ffprobe could not run: {type(exc).__name__}: {exc}")
+        else:
+            if result.returncode == 0:
+                try:
+                    streams = json.loads(result.stdout).get("streams", [])
+                except ValueError:
+                    streams = []
+                if streams:
+                    stream_detected = True
+                    raw = streams[0].get("nb_read_frames")
+                    if raw not in (None, "N/A"):
+                        try:
+                            frames = int(raw)
+                        except (TypeError, ValueError):
+                            pass
+                    notes.append(
+                        f"ffprobe: {streams[0].get('codec_name', '?')} "
+                        f"{streams[0].get('width', '?')}x{streams[0].get('height', '?')}, "
+                        f"nb_read_frames={raw}"
+                    )
+                else:
+                    notes.append("ffprobe: no video stream found")
+            else:
+                notes.append(
+                    "ffprobe rejected the input: "
+                    + ((result.stderr or "").strip()[:200] or f"exit {result.returncode}")
+                )
+
+    if frames is None and ffmpeg is not None:
+        counted = _frames_from_ffmpeg_stats(ffmpeg, path)
+        if counted is None:
+            notes.append("ffmpeg produced no parsable frame count")
+        else:
+            frames = counted
+            notes.append(f"ffmpeg decoded {counted} frames")
+
+    detail = "; ".join(notes) or "no decoder output"
+    if frames is None:
+        # A decoder ran and rejected the bytes outright: that is a determinate
+        # "nothing decodable here", not a tool failure.
+        if not stream_detected and any(
+            "rejected the input" in n or "no video stream" in n for n in notes
+        ):
+            return MediaExamination("EMPTY", False, 0, size, detail)
+        return MediaExamination("AMBIGUOUS", stream_detected, None, size, detail)
+    if frames >= 1:
+        return MediaExamination("VERIFIED", True, frames, size, detail)
+    return MediaExamination("EMPTY", stream_detected, 0, size, detail)
+
+
 def tool(name: str) -> str | None:
     return shutil.which(name)
 

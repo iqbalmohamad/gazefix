@@ -71,6 +71,16 @@ class SessionResult:
     schedule_statistics: dict[str, Any] = field(default_factory=dict)
     max_reader_buffer_bytes: int = 0
     backlog_samples: list[dict[str, float]] = field(default_factory=list)
+    response_chunks: list[dict[str, float]] = field(default_factory=list)
+    """Every non-empty media response, at full resolution.
+
+    One row per chunk — arrival instant, size, and cumulative bytes after it —
+    recorded as the chunk is consumed. This is deliberately independent of
+    :attr:`backlog_samples`: that series is taken on a 500 ms clock, and a
+    determination about what had arrived by input EOS cannot be read off a
+    half-second grid. The last row strictly before EOS is what selects the
+    prefix Stage A's answer is decoded from.
+    """
     sender_error: str | None = None
     """A failure raised by the client's own request generator."""
     grpc_status: str | None = None
@@ -108,6 +118,30 @@ class SessionResult:
     def first_usable_frame_at(self) -> float | None:
         event = self.timeline.first("first_usable_frame")
         return None if event is None else event.at
+
+    def bytes_strictly_before(self, t_ms: float) -> tuple[int, float | None]:
+        """Cumulative output bytes as of the last chunk that arrived before ``t_ms``.
+
+        Returns ``(cumulative_bytes, arrival_t_ms)``; ``(0, None)`` when no media
+        had arrived by then. Strictly before, not at-or-before: a chunk landing
+        in the same instant as EOS cannot be claimed to have preceded it.
+        """
+        cumulative = 0
+        arrival: float | None = None
+        for row in self.response_chunks:
+            if row["t_ms"] < t_ms:
+                cumulative = int(row["cumulative_bytes"])
+                arrival = float(row["t_ms"])
+            else:
+                break
+        return cumulative, arrival
+
+    def first_chunk_at_or_after(self, t_ms: float) -> dict[str, float] | None:
+        """The first media chunk that did **not** beat ``t_ms``."""
+        for row in self.response_chunks:
+            if row["t_ms"] >= t_ms:
+                return row
+        return None
 
     def output_before_eos(self) -> str:
         """``YES`` / ``NO`` / ``NOT MEASURED`` for Stage A's kill condition.
@@ -381,6 +415,13 @@ class RedirectGazeSession:
             if result.bytes_received == 0:
                 timeline.mark("first_output_bytes", at=now, bytes=len(chunk))
             result.bytes_received += len(chunk)
+            result.response_chunks.append(
+                {
+                    "t_ms": round((now - timeline.started_monotonic) * 1000, 4),
+                    "bytes": len(chunk),
+                    "cumulative_bytes": result.bytes_received,
+                }
+            )
             if sink is not None:
                 sink.write(chunk)
 

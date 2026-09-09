@@ -148,12 +148,18 @@ def _write_artifacts(
         results_dir / "backlog.csv",
         [{k: v for k, v in sample.items()} for sample in result.backlog_samples],
     )
+    write_csv(
+        results_dir / "response_chunks.csv",
+        [{k: v for k, v in row.items()} for row in result.response_chunks],
+    )
     return {
         "summary": str(results_dir / "summary.json"),
         "timeline_csv": str(results_dir / "timeline.csv"),
         "frames_csv": str(results_dir / "frames.csv"),
         "backlog_csv": str(results_dir / "backlog.csv"),
+        "response_chunks_csv": str(results_dir / "response_chunks.csv"),
         "corrected_output": str(results_dir / "corrected.mp4"),
+        "pre_eos_output": str(results_dir / "pre_eos_corrected.mp4"),
     }
 
 
@@ -226,6 +232,23 @@ def run_stage_a(options: RunOptions) -> dict[str, Any]:
     finally:
         channel.close()
 
+    pre_eos = _pre_eos_evidence(options, result, workspace)
+    audit = _full_output_evidence(result)
+    determinations = _determinations(result, "A", profile.frame_count)
+    frame_age = summarise_ages(result.frames, profile.frame_count)
+
+    # The load-bearing answer comes from a decoder examining the exact pre-EOS
+    # prefix, not from the custom parser. The parser's own view is kept beside
+    # it, labelled, because a disagreement between them is itself information.
+    determinations["usable_output_before_input_eos_parser_view"] = (
+        determinations["usable_output_before_input_eos"] + " (advisory, parser-derived)"
+    )
+    determinations["usable_output_before_input_eos"] = pre_eos["determination"]
+    determinations["usable_output_before_input_eos_basis"] = (
+        "independent decoder on the exact pre-EOS prefix"
+    )
+    _quarantine_parser_metrics(frame_age, determinations, audit)
+
     payload: dict[str, Any] = {
         "stage": "A",
         "question": (
@@ -261,8 +284,10 @@ def run_stage_a(options: RunOptions) -> dict[str, Any]:
             "units_sent": result.units_sent,
         },
         "timing_ms_since_rpc_start": _timing_block(result),
-        "determinations": _determinations(result, "A", profile.frame_count),
-        "frame_age": summarise_ages(result.frames, profile.frame_count),
+        "determinations": determinations,
+        "pre_eos_evidence": pre_eos,
+        "full_output_audit": audit,
+        "frame_age": frame_age,
         "throughput": _throughput_block(result, profile.duration_seconds),
         "error": result.error or "",
         "failure_attribution": _attribution(result),
@@ -360,6 +385,11 @@ def run_stage_b(options: RunOptions) -> dict[str, Any]:
             or "the live source produced no frames, so there is nothing to answer with"
         )
 
+    audit = _full_output_evidence(result)
+    determinations = _determinations(result, "B", live.stats.frames_written)
+    frame_age = summarise_ages(result.frames, live.stats.frames_written)
+    _quarantine_parser_metrics(frame_age, determinations, audit)
+
     encode_ms = live.stats.encode_prepare_ms()
     payload: dict[str, Any] = {
         "stage": "B",
@@ -408,8 +438,9 @@ def run_stage_b(options: RunOptions) -> dict[str, Any]:
             "schedule": schedule.statistics(),
         },
         "timing_ms_since_rpc_start": _timing_block(result),
-        "determinations": _determinations(result, "B", live.stats.frames_written),
-        "frame_age": summarise_ages(result.frames, live.stats.frames_written),
+        "determinations": determinations,
+        "full_output_audit": audit,
+        "frame_age": frame_age,
         "throughput": _throughput_block(
             result,
             live.stats.frames_written / encoder.fps if live.stats.frames_written else None,
@@ -426,6 +457,170 @@ def run_stage_b(options: RunOptions) -> dict[str, Any]:
 
 
 # -- shared helpers ------------------------------------------------------
+
+
+def _pre_eos_evidence(
+    options: RunOptions, result: SessionResult, workspace: Path
+) -> dict[str, Any]:
+    """Decode exactly what the client held at the instant input EOS was reached.
+
+    This is Stage A's load-bearing evidence, and it deliberately does not use
+    the custom MP4 parser. The prefix boundary comes from the full-resolution
+    response-chunk log — the cumulative byte count of the last media chunk that
+    arrived *strictly before* EOS — so there is no half-second sampling window
+    in which output could have appeared unobserved.
+    """
+    eos_s = result.timeline.elapsed("input_eos")
+    if eos_s is None:
+        return {
+            "determination": "NOT MEASURED",
+            "reason": "input EOS was never reached, so there is no boundary to cut at",
+            "cutoff_time_ms": "NOT MEASURED",
+            "cumulative_bytes": "NOT MEASURED",
+            "ffprobe_stream_detected": "NOT MEASURED",
+            "frames_decoded": "NOT MEASURED",
+            "decode_status": "NOT MEASURED",
+        }
+
+    eos_ms = eos_s * 1000
+    cumulative, arrival_ms = result.bytes_strictly_before(eos_ms)
+    next_chunk = result.first_chunk_at_or_after(eos_ms)
+
+    common = {
+        "input_eos_ms": round(eos_ms, 4),
+        "cutoff_time_ms": arrival_ms if arrival_ms is not None else "NONE — no media arrived before EOS",
+        "cumulative_bytes": cumulative,
+        "first_chunk_at_or_after_eos": next_chunk or "none",
+        "gap_to_eos_ms": (round(eos_ms - arrival_ms, 4) if arrival_ms is not None else "NOT MEASURED"),
+        "media_chunks_before_eos": sum(1 for r in result.response_chunks if r["t_ms"] < eos_ms),
+        "boundary_source": "per-chunk response log, not the 500 ms backlog sampler",
+    }
+
+    if cumulative == 0:
+        return {
+            **common,
+            "determination": "NO",
+            "reason": (
+                "no media byte at all had arrived when the client finished sending. "
+                "No decoder is needed to conclude that no corrected frame was usable."
+            ),
+            "ffprobe_stream_detected": False,
+            "frames_decoded": 0,
+            "decode_status": "NOT ATTEMPTED — there were no bytes to examine",
+        }
+
+    if result.output_path is None or not result.output_path.is_file():
+        return {
+            **common,
+            "determination": "NOT MEASURED",
+            "reason": "the corrected output was not saved, so the prefix cannot be rebuilt",
+            "ffprobe_stream_detected": "NOT MEASURED",
+            "frames_decoded": "NOT MEASURED",
+            "decode_status": "NOT MEASURED",
+        }
+
+    directory = workspace / options.label
+    directory.mkdir(parents=True, exist_ok=True)
+    prefix_path = directory / "pre_eos_corrected.mp4"
+    prefix_path.write_bytes(result.output_path.read_bytes()[:cumulative])
+    exam = decode.examine(prefix_path)
+
+    if exam.status == "VERIFIED":
+        determination, reason = "YES", (
+            f"{exam.frames_decoded} corrected frame(s) decode from the exact bytes the "
+            "client held before it finished sending."
+        )
+    elif exam.status == "EMPTY":
+        determination, reason = "NO", (
+            "an independent decoder examined the exact pre-EOS prefix and found no "
+            "complete frame in it."
+        )
+    else:
+        determination, reason = "NOT MEASURED", (
+            "the independent decoder could not examine the prefix, so nothing follows "
+            "about the service. A tool failure is not a NO."
+        )
+
+    return {
+        **common,
+        "determination": determination,
+        "reason": reason,
+        "ffprobe_stream_detected": exam.stream_detected,
+        "frames_decoded": exam.frames_decoded if exam.frames_decoded is not None else "UNKNOWN",
+        "decode_status": exam.status,
+        "decoder_detail": exam.detail,
+        "artifact": str(prefix_path),
+    }
+
+
+def _full_output_evidence(result: SessionResult) -> dict[str, Any]:
+    """Count the complete corrected output with a decoder, and audit the parser.
+
+    The first real run reported 586 corrected frames for an output independently
+    proven to contain 240. Until that is understood, the parser's counts are
+    audited against a decoder on every run, and anything derived from them is
+    withdrawn when the two disagree.
+    """
+    parser_frames = len(result.frames)
+    if result.output_path is None or not result.output_path.is_file():
+        return {
+            "decoder_frames": "NOT MEASURED",
+            "parser_frames": parser_frames,
+            "agreement": "NOT MEASURED",
+            "parser_trusted": False,
+            "note": "no corrected output was saved, so the parser could not be audited",
+        }
+    exam = decode.examine(result.output_path)
+    if not exam.determinate or exam.frames_decoded is None:
+        return {
+            "decoder_frames": "NOT MEASURED",
+            "parser_frames": parser_frames,
+            "agreement": "NOT MEASURED",
+            "parser_trusted": False,
+            "decode_status": exam.status,
+            "decoder_detail": exam.detail,
+            "note": (
+                "the decoder could not count the complete output, so the parser's "
+                "count is unaudited and nothing derived from it is reported as measured"
+            ),
+        }
+    agree = exam.frames_decoded == parser_frames
+    return {
+        "decoder_frames": exam.frames_decoded,
+        "parser_frames": parser_frames,
+        "agreement": "AGREE" if agree else "DISAGREE",
+        "parser_trusted": agree,
+        "decode_status": exam.status,
+        "decoder_detail": exam.detail,
+        "note": (
+            "the progressive parser's frame count matches an independent decoder"
+            if agree else
+            f"the progressive parser counted {parser_frames} frames where a decoder "
+            f"counted {exam.frames_decoded}. The parser is miscounting this container; "
+            "its correspondence and per-frame ages are withdrawn for this run."
+        ),
+    }
+
+
+def _quarantine_parser_metrics(
+    frame_age: dict[str, Any], determinations: dict[str, Any], audit: dict[str, Any]
+) -> None:
+    """Withdraw parser-derived numbers when a decoder contradicts the parser."""
+    if audit.get("parser_trusted"):
+        return
+    for key in (
+        "p50_frame_age_ms", "p95_frame_age_ms", "p99_frame_age_ms",
+        "max_frame_age_ms", "age_growth_ms_per_frame",
+    ):
+        if key in frame_age:
+            frame_age[key] = "INVALID — parser quarantined"
+    frame_age["parser_quarantined"] = True
+    frame_age["quarantine_reason"] = audit.get("note", "parser count unaudited")
+    frame_age["correspondence_intact"] = "NOT MEASURED"
+    determinations["output_input_frame_correspondence"] = (
+        "NOT MEASURED — the progressive parser's frame count is contradicted by an "
+        "independent decoder, so per-frame correspondence cannot be asserted"
+    )
 
 
 def _corroborate(

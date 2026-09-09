@@ -304,6 +304,35 @@ on the right thing.
 | `blame: OPERATOR` | Interrupted | Not a result |
 | `kill_condition_3_whole_file_interface: NOT MEASURED` | This harness could not classify the response container | **Not** a streaming verdict. The full output is saved — analyse it offline |
 
+### Stage A's answer now comes from a decoder, not from the parser
+
+Read `pre_eos_evidence` first. It reconstructs `pre_eos_corrected.mp4` from the
+exact cumulative byte count of the last media chunk that arrived **strictly
+before** `input_eos`, taken from the full-resolution `response_chunks.csv` —
+never from the 500 ms `backlog.csv` grid — and hands that prefix to
+ffprobe/ffmpeg.
+
+| Field | What it settles |
+| --- | --- |
+| `cutoff_time_ms` / `cumulative_bytes` | exactly what the client held when it stopped sending |
+| `first_chunk_at_or_after_eos` | the first chunk that did *not* beat EOS, so no window is left unobserved |
+| `frames_decoded`, `decode_status` | `VERIFIED` (>=1 frame) → **YES**; `EMPTY` (a decoder looked and found none) → **NO**; `AMBIGUOUS` (the decoder could not run) → **NOT MEASURED** |
+
+`AMBIGUOUS` never becomes a `NO`. If ffprobe/ffmpeg are missing or fail, the run
+answers nothing and must be repeated with working tools.
+
+`determinations.usable_output_before_input_eos_parser_view` is kept beside the
+real answer as advisory only. A disagreement between the two is worth reporting.
+
+### The progressive parser is audited on every run
+
+`full_output_audit` counts the complete `corrected.mp4` with a decoder and
+compares it with the parser. On `DISAGREE`, every parser-derived number —
+frame-age percentiles and correspondence — is replaced with
+`INVALID — parser quarantined` / `NOT MEASURED`, because the first real run
+reported 586 corrected frames for an output independently proven to contain 240.
+Do not quote a quarantined percentile.
+
 Two integrity fields decide whether the latency numbers mean anything:
 
 - `frame_age.age_coverage` — how many corrected frames an age could be computed
@@ -356,7 +385,9 @@ tar czf phase1b-real-nim.tgz experiments/maxine-phase1b/stage-*-real-nim
 ```
 
 Each run directory holds `summary.json`, `timeline.csv`, `frames.csv`,
-`backlog.csv` and the corrected output. The corrected `.mp4` need not be shared
+`backlog.csv`, `response_chunks.csv` (every media chunk with its exact arrival
+time), the corrected output, and `pre_eos_corrected.mp4` — the exact prefix
+Stage A's answer was decoded from. The corrected `.mp4` need not be shared
 if the PO prefers not to; everything load-bearing is in `summary.json`.
 
 Also record what only the VM knows, which every summary currently carries as
