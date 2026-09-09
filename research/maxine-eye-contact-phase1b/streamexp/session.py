@@ -71,6 +71,8 @@ class SessionResult:
     schedule_statistics: dict[str, Any] = field(default_factory=dict)
     max_reader_buffer_bytes: int = 0
     backlog_samples: list[dict[str, float]] = field(default_factory=list)
+    sender_error: str | None = None
+    """A failure raised by the client's own request generator."""
     grpc_status: str | None = None
     """The server's gRPC status code name, when the call ended non-OK."""
     grpc_details: str | None = None
@@ -128,6 +130,11 @@ class SessionResult:
         if first is not None:
             return "YES" if (eos is None or first < eos) else "NO"
         if self.error or self.sender_incomplete:
+            return "NOT MEASURED"
+        if self.reader_error or self.reader.classification_error:
+            # The transport succeeded; this harness simply could not locate a
+            # frame in what came back. That is a limitation here, not a
+            # statement that the service withholds output until EOS.
             return "NOT MEASURED"
         if eos is None:
             return "NOT MEASURED"
@@ -286,6 +293,7 @@ class RedirectGazeSession:
             result.sender_incomplete = True
         if sender_error:
             detail = f"sender: {type(sender_error[0]).__name__}: {sender_error[0]}"
+            result.sender_error = detail
             timeline.mark("sender_error", error=detail)
             result.error = detail if result.error is None else f"{detail} | rpc: {result.error}"
 

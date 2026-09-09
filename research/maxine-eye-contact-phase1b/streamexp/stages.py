@@ -92,6 +92,13 @@ def _determinations(
             "OBSERVED — the response placed its moov after the media, so no corrected "
             "frame could be located until the whole output had arrived"
         )
+    elif layout is Layout.UNCLASSIFIED:
+        determinations["output_indexable_before_eos"] = "NOT MEASURED"
+        determinations["kill_condition_3_whole_file_interface"] = (
+            "NOT MEASURED — this harness could not classify the response container. "
+            "That is a limitation here, not an observation about the service; "
+            "analyse the saved output offline before concluding anything."
+        )
     if stage == "B":
         determinations["maxine_consumed_live_generated_input"] = _consumed_live_input(result)
         determinations["output_indexable_by_this_harness"] = (
@@ -288,6 +295,16 @@ def run_stage_b(options: RunOptions) -> dict[str, Any]:
         # stream and returned no frames.
         source_profile, _index = source.probe(options.source_path)
         _check_stage_b_source(source_profile)
+        planned = options.max_frames or source_profile.frame_count
+        planned_seconds = planned / max(1, encoder.fps)
+        if options.rpc_timeout_s and planned_seconds > 0.8 * options.rpc_timeout_s:
+            raise source.SourceUnsuitable(
+                f"Stage B would feed {planned} frames at {encoder.fps} FPS "
+                f"({planned_seconds:.0f}s of realtime capture), which leaves no room "
+                f"inside the {options.rpc_timeout_s:.0f}s RPC deadline for the "
+                "server's tail. Use --max-frames to shorten the run or "
+                f"--rpc-timeout {planned_seconds * 3:.0f} to widen the deadline."
+            )
 
     if options.frame_source == "camera":
         if not (options.camera_device and options.camera_backend):
@@ -334,6 +351,15 @@ def run_stage_b(options: RunOptions) -> dict[str, Any]:
     finally:
         channel.close()
 
+    if live.stats.frames_written == 0:
+        # ffmpeg still emits a valid init segment for a track with no samples and
+        # exits 0, so nothing else fails: the run would otherwise report a
+        # confident answer built on no video at all.
+        raise livesource.LiveSourceError(
+            live.stats.frame_source_error
+            or "the live source produced no frames, so there is nothing to answer with"
+        )
+
     encode_ms = live.stats.encode_prepare_ms()
     payload: dict[str, Any] = {
         "stage": "B",
@@ -377,6 +403,8 @@ def run_stage_b(options: RunOptions) -> dict[str, Any]:
             "encode_and_mux_ms_p50": _p(encode_ms, 0.50),
             "encode_and_mux_ms_p95": _p(encode_ms, 0.95),
             "encoder_stderr": live.stats.encoder_stderr,
+            "frame_source_error": live.stats.frame_source_error or "",
+            "outbound_index_error": live.stats.outbound_index_error or "",
             "schedule": schedule.statistics(),
         },
         "timing_ms_since_rpc_start": _timing_block(result),
@@ -440,7 +468,13 @@ def _corroborate(
         )
         # Why nothing was usable matters. Only one of these reasons is a
         # statement about the service.
-        if result.reader_error:
+        if result.reader.layout is Layout.UNCLASSIFIED:
+            why = (
+                "this harness could not classify the response container "
+                f"({result.reader.classification_error}), so no frame could be "
+                "located. That is a harness limitation, not a service result."
+            )
+        elif result.reader_error:
             why = (
                 "this harness could not parse the response container "
                 f"({result.reader_error}), so no frame could be located. That is a "
@@ -591,6 +625,11 @@ def _attribution(result: SessionResult) -> dict[str, Any]:
     """
     if result.interrupted:
         blame = "OPERATOR — the run was interrupted; this is not a result"
+    elif result.sender_error:
+        blame = (
+            "CLIENT/HARNESS — the sender failed before the server could answer: "
+            f"{result.sender_error}"
+        )
     elif result.sender_incomplete:
         blame = "HARNESS — the sender never finished; the record is incomplete"
     elif result.grpc_status == "DEADLINE_EXCEEDED":
@@ -615,6 +654,8 @@ def _attribution(result: SessionResult) -> dict[str, Any]:
         "grpc_status": result.grpc_status or "",
         "grpc_details": result.grpc_details or "",
         "reader_error": result.reader_error or "",
+        "sender_error": result.sender_error or "",
+        "classification_error": result.reader.classification_error or "",
         "interrupted": result.interrupted,
     }
 

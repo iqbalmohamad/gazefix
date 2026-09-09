@@ -73,9 +73,19 @@ class LiveEncoderConfig:
     """Encoder settings for the live path.
 
     The defaults are the low-latency ones a real capture path would use:
-    ``ultrafast``/``zerolatency`` so encoding never becomes the bottleneck being
-    measured, and one fragment per frame so a corrected frame is never withheld
-    waiting for a group of pictures to close.
+    ``zerolatency`` so encoding never becomes the bottleneck being measured, and
+    one fragment per frame so a corrected frame is never withheld waiting for a
+    group of pictures to close.
+
+    The preset is ``superfast`` rather than ``ultrafast`` deliberately. Measured
+    with these exact flags, ``ultrafast`` emits **H.264 Constrained Baseline**
+    (CAVLC, no CABAC) while every other preset emits **High** with no B-frames.
+    Stage B is meant to vary one thing against Stage A — the container — and an
+    ultrafast bitstream would vary the coded profile too. If the NIM then
+    refused the stream for a bitstream reason it would be recorded as a refusal
+    of the progressively-delivered container, which is the wrong conclusion
+    about the wrong thing. ``--x264-preset`` exists so the confound can be
+    varied deliberately rather than silently.
     """
 
     width: int = 1280
@@ -83,7 +93,7 @@ class LiveEncoderConfig:
     fps: int = 30
     pixel_format: str = "bgr24"
     gop: int = 30
-    preset: str = "ultrafast"
+    preset: str = "superfast"
     tune: str = "zerolatency"
     bitrate: str | None = None
     fragment_per_frame: bool = True
@@ -138,6 +148,9 @@ class LiveRunStats:
     muxed_at: dict[int, float] = field(default_factory=dict)
     encoder_stderr: str = ""
     frames_muxed: int = 0
+    frame_source_error: str | None = None
+    """Why the raw-frame producer stopped, when it stopped early."""
+    outbound_index_error: str | None = None
 
     def encode_prepare_ms(self) -> list[float]:
         """Per-frame milliseconds from capture to the frame's bytes being sendable."""
@@ -209,7 +222,15 @@ class LiveFragmentedMp4Source:
                     break
                 now = monotonic()
                 self.stats.bytes_produced += len(chunk)
-                completed = outbound.feed(chunk, now)
+                try:
+                    completed = outbound.feed(chunk, now)
+                except Exception as exc:  # noqa: BLE001 - indexing our own output
+                    # The bytes still go to the NIM and Stage B's acceptance
+                    # question is still answered; only the per-frame ages are
+                    # lost. Aborting the RPC over it would throw away the answer.
+                    completed = []
+                    if self.stats.outbound_index_error is None:
+                        self.stats.outbound_index_error = f"{type(exc).__name__}: {exc}"
                 indices: list[int] = []
                 for event in completed:
                     self.stats.muxed_at[event.index] = now - rpc_origin()
@@ -255,8 +276,11 @@ class LiveFragmentedMp4Source:
                 process.stdin.flush()
                 self.stats.frames_written = index + 1
                 index += 1
-        except (BrokenPipeError, LiveSourceError):
-            pass
+        except (BrokenPipeError, LiveSourceError) as exc:
+            # Never silent. frames_from_video raises with the decoder's own
+            # explanation, and swallowing it left a zero-frame run looking
+            # like a clean one.
+            self.stats.frame_source_error = f"{type(exc).__name__}: {exc}"
         finally:
             try:
                 process.stdin.close()

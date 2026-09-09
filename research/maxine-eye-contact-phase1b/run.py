@@ -81,6 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
     live.add_argument("--fps", type=int, default=30)
     live.add_argument("--gop", type=int, default=30)
     live.add_argument("--max-frames", type=int, default=None)
+    live.add_argument("--x264-preset", default="superfast",
+                     help="libx264 preset. 'ultrafast' emits Constrained Baseline; "
+                          "every other preset emits High. Vary this before recording "
+                          "a Stage B kill condition (default: %(default)s)")
+    live.add_argument("--x264-tune", default="zerolatency",
+                     help="libx264 tune (default: %(default)s)")
     live.add_argument("--frag-keyframe", action="store_true",
                      help="fragment per keyframe instead of per frame")
     live.add_argument("--muxer", default="ffmpeg", choices=["ffmpeg", "inprocess"],
@@ -125,6 +131,8 @@ def make_options(args: argparse.Namespace, label: str) -> RunOptions:
             gop=args.gop,
             fragment_per_frame=not args.frag_keyframe,
             muxer=args.muxer,
+            preset=args.x264_preset,
+            tune=args.x264_tune,
         ),
         frame_source=args.frame_source,
         camera_device=args.camera_device,

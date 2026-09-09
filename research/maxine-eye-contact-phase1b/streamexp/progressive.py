@@ -39,6 +39,14 @@ class Layout(str, Enum):
     PROGRESSIVE = "MOOV_FIRST_NON_FRAGMENTED"
     FRAGMENTED = "MOOV_FIRST_FRAGMENTED"
     MOOV_LAST = "MOOV_LAST_NOT_INDEXABLE_BEFORE_EOS"
+    UNCLASSIFIED = "UNCLASSIFIED_BY_THIS_HARNESS"
+    """The parser could not make sense of the container.
+
+    Deliberately distinct from :attr:`MOOV_LAST`. Giving up on an unfamiliar
+    response and calling it moov-last would turn a limitation of this harness
+    into an affirmative observation about the service's output layout — and
+    that observation is one of the experiment's kill conditions.
+    """
 
 
 @dataclass(frozen=True)
@@ -64,6 +72,7 @@ class ProgressiveMp4Reader:
     width: int = 0
     height: int = 0
     nominal_fps: float | None = None
+    classification_error: str | None = None
 
     _buffer: bytearray = field(default_factory=bytearray, repr=False)
     _buffer_base: int = 0
@@ -91,7 +100,11 @@ class ProgressiveMp4Reader:
                 # A container this harness cannot classify must not become the
                 # unbounded queue the experiment forbids. Stop retaining, keep
                 # counting bytes, and let the complete output be analysed offline.
-                self.layout = Layout.MOOV_LAST
+                self.layout = Layout.UNCLASSIFIED
+                self.classification_error = (
+                    f"could not classify the container within "
+                    f"{self._unclassified_cap} bytes"
+                )
                 self._discard_to(self.received)
         elif self.layout is Layout.FRAGMENTED:
             self._scan_fragments(at)
@@ -100,8 +113,8 @@ class ProgressiveMp4Reader:
             # needed again, only the count of bytes seen.
             self._discard_to(self.received)
 
-        if self.layout is Layout.MOOV_LAST:
-            # Nothing is indexable until EOS; hold no payload.
+        if self.layout in (Layout.MOOV_LAST, Layout.UNCLASSIFIED):
+            # Nothing is indexable; hold no payload.
             self._discard_to(self.received)
             return []
 

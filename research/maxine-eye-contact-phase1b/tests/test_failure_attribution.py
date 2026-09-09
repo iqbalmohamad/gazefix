@@ -187,3 +187,118 @@ def test_a_non_h264_source_is_refused_before_the_run(tmp_path: Path):
 
     with pytest.raises(source.SourceUnsuitable, match="not H.264"):
         _check_stage_a_source(profile)
+
+
+# -- gaps found by the completeness critic ------------------------------
+
+
+def test_an_unclassifiable_container_is_not_reported_as_moov_last():
+    """Giving up on parsing must not become an observation about the service.
+
+    The 'cannot classify' fallback exists to bound retention. Reusing MOOV_LAST
+    for it turned a harness limitation into kill condition 3 OBSERVED.
+    """
+    from streamexp.progressive import Layout, ProgressiveMp4Reader
+    from streamexp.stages import _determinations
+
+    reader = ProgressiveMp4Reader()
+    reader._unclassified_cap = 512
+    reader.feed(b"\x00\x00\x00\x08free" + b"\xff" * 2000, 0.0)
+    assert reader.layout is Layout.UNCLASSIFIED
+    assert reader.classification_error
+
+    result = SessionResult(timeline=Timeline(), reader=reader)
+    determinations = _determinations(result, "A", 10)
+    assert determinations["kill_condition_3_whole_file_interface"].startswith("NOT MEASURED")
+    assert determinations["output_indexable_before_eos"] == "NOT MEASURED"
+
+
+def test_a_parser_fault_is_not_a_hard_no():
+    result = _bare_result()
+    result.timeline.mark("input_eos")
+    result.reader_error = "Mp4Error: box 'zzzz' declares size 3"
+    assert result.output_before_eos() == "NOT MEASURED"
+
+
+def test_an_unclassified_container_is_not_a_hard_no():
+    from streamexp.progressive import Layout, ProgressiveMp4Reader
+
+    reader = ProgressiveMp4Reader()
+    reader.layout = Layout.UNCLASSIFIED
+    reader.classification_error = "gave up"
+    result = SessionResult(timeline=Timeline(), reader=reader)
+    result.timeline.mark("input_eos")
+    assert result.output_before_eos() == "NOT MEASURED"
+
+
+def test_a_sender_failure_is_blamed_on_the_client_not_the_server():
+    """The field built to prevent misattribution was itself misattributing."""
+    result = _bare_result()
+    result.sender_error = "sender: RuntimeError: camera vanished"
+    result.error = result.sender_error
+    result.grpc_status = "UNKNOWN"
+    attribution = _attribution(result)
+    assert attribution["blame"].startswith("CLIENT/HARNESS")
+    assert "camera vanished" in attribution["blame"]
+    assert attribution["sender_error"]
+
+
+def test_stage_b_refuses_a_run_that_produced_no_frames(interfaces, nvidia_clone, tmp_path):
+    """ffmpeg emits a valid init segment for an empty track and exits 0, so a
+    zero-frame run used to report a confident YES built on no video at all."""
+    from streamexp import livesource, mockserver
+    from streamexp.stages import RunOptions, run_stage_b
+
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(build_progressive_mp4([900] * 30))
+
+    server, port = mockserver.serve(interfaces, mockserver.MockConfig(mode="streaming"))
+    try:
+        with pytest.raises(livesource.LiveSourceError, match="no frames"):
+            run_stage_b(
+                RunOptions(
+                    channel=__import__(
+                        "streamexp.channel", fromlist=["ChannelSpec"]
+                    ).ChannelSpec(target=f"127.0.0.1:{port}", mode="insecure"),
+                    clone_dir=nvidia_clone,
+                    workspace=tmp_path,
+                    label="zero",
+                    source_path=clip,
+                    encoder=livesource.LiveEncoderConfig(width=64, height=48, fps=30),
+                    max_frames=0,
+                )
+            )
+    finally:
+        server.stop(0).wait()
+
+
+def test_the_default_preset_does_not_change_the_h264_profile():
+    """ultrafast emits Constrained Baseline; every other preset emits High.
+
+    Stage B is meant to vary the container against Stage A, not the coded
+    bitstream profile as well.
+    """
+    from streamexp.livesource import LiveEncoderConfig
+
+    assert LiveEncoderConfig().preset != "ultrafast"
+
+
+def test_stage_b_refuses_a_run_longer_than_its_own_deadline(nvidia_clone, tmp_path: Path):
+    from streamexp import livesource
+    from streamexp.channel import ChannelSpec
+    from streamexp.stages import RunOptions, run_stage_b
+
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(build_progressive_mp4([900] * 300))
+    with pytest.raises(source.SourceUnsuitable, match="--max-frames"):
+        run_stage_b(
+            RunOptions(
+                channel=ChannelSpec(target="127.0.0.1:1", mode="insecure"),
+                clone_dir=nvidia_clone,
+                workspace=tmp_path,
+                label="long",
+                source_path=clip,
+                encoder=livesource.LiveEncoderConfig(width=64, height=48, fps=30),
+                rpc_timeout_s=2.0,
+            )
+        )

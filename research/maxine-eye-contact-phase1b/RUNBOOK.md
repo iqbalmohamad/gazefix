@@ -300,7 +300,9 @@ on the right thing.
 | `blame: SERVER — ... status X`, `before_eos: NOT MEASURED` | The call failed; the streaming question was never answered | Read `grpc_details`. `RESOURCE_EXHAUSTED` → retry; `INVALID_ARGUMENT` → the NIM rejected the input |
 | `blame: HARNESS — ... deadline` | Our own `--rpc-timeout` fired | Re-run with a larger `--rpc-timeout` |
 | `blame: HARNESS PARSER` | Transport worked, our indexer did not | The full output is saved; analyse it offline. Not a service failure |
+| `blame: CLIENT/HARNESS` | Our own sender failed before the server answered | Not a service result; read `failure_attribution.sender_error` |
 | `blame: OPERATOR` | Interrupted | Not a result |
+| `kill_condition_3_whole_file_interface: NOT MEASURED` | This harness could not classify the response container | **Not** a streaming verdict. The full output is saved — analyse it offline |
 
 Two integrity fields decide whether the latency numbers mean anything:
 
@@ -324,9 +326,28 @@ each is a different container shape, not a different API:
 ... run.py stage-b ... --muxer inprocess --label stage-b-inprocess
 ```
 
-If all three are rejected with the same status, that is the Stage B kill
+Then vary the **bitstream**, which is a different variable from the container:
+
+```bash
+# High profile is the default; ultrafast would emit Constrained Baseline
+... run.py stage-b ... --x264-preset veryfast --label stage-b-veryfast
+```
+
+That fourth attempt matters. Stage A sends NVIDIA's own file, so if Stage B is
+refused for a reason to do with the coded stream rather than the container, the
+first three attempts would all carry the same bitstream and the refusal would be
+recorded against the wrong variable.
+
+If all four are rejected with the same status, that is the Stage B kill
 condition. Record the server's status and details verbatim — the harness already
 captures both — and stop. Do not invent another NVIDIA API.
+
+**Before recording any Stage B result, check two fields.**
+`live_production.frames_captured` must be non-zero — a run that produced no
+frames is refused outright now, but if it ever reads zero the answer is about
+the source, not the service. And `live_production.frame_source_error` must be
+empty; if it is not, ffmpeg could not decode the clip and nothing about the NIM
+was measured.
 
 ## 10. What to hand back
 

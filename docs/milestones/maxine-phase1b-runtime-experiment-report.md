@@ -525,15 +525,70 @@ rehearsals is a Maxine measurement.
   Eye Contact redirects gaze; given no face there is nothing to redirect, and
   whatever it does then would be indistinguishable from a streaming failure.
 
+### A second round, from the completeness critic
+
+The adversarial review completed after the first round of fixes had already
+landed. **Forty-four of forty-four verifiers returned "not real"** — almost all
+of them because the finding had been fixed while the review was still running
+and the verifier was reading the superseded commit. That is not evidence of a
+clean harness, and it is not reported as such; it is corroboration that the
+first round landed. One finding was refuted on its merits rather than on
+staleness: sending an empty `RedirectGazeConfig` was judged harmless, which is
+why that default was left alone and documented instead of changed on a guess.
+
+The completeness critic then found seven gaps the six review dimensions had
+missed, **four of them created by this session's own fixes**. Two were blockers,
+both reproduced before being fixed:
+
+10. **A Stage B run that produced zero frames answered `YES` anyway.** Three
+    things interlocked: `_write_frames` swallowed the very `LiveSourceError`
+    added earlier in this session, ffmpeg still emits a valid 778-byte init
+    segment for a track with no samples and exits 0, and the determination was
+    built unconditionally. Reproduced: `maxine_consumed_live_generated_input:
+    YES`, `blame: NONE`, `error: ""`, with `frames_muxed_matches_captured: true`
+    (0 == 0) actively reassuring the reader. Against the real NIM the mirror
+    case is worse — an init segment describing no samples would draw
+    `INVALID_ARGUMENT`, which the RUNBOOK reads as the Stage B kill condition.
+    A zero-frame run is now refused outright, with the decoder's own reason.
+
+11. **Stage B varied the H.264 profile as well as the container.** Measured with
+    the harness's exact flags, `-preset ultrafast` emits **Constrained Baseline**
+    while every other preset emits **High**. Stage A sends NVIDIA's file
+    unchanged, so Stage B was varying two things at once, and no flag could
+    isolate them — the RUNBOOK's three remediation attempts all held the same
+    bitstream. A refusal for a bitstream reason would have been recorded as a
+    refusal of the progressively-delivered container: a designed path to
+    retiring the technology on an unisolated variable. The default is now
+    `superfast` (High profile, still no B-frames, no lookahead, latency cost
+    within noise), `--x264-preset`/`--x264-tune` are exposed, and RUNBOOK §9
+    gains a fourth attempt that varies the bitstream deliberately.
+
+12. **The "cannot classify this container" fallback claimed kill condition 3.**
+    The 8 MiB retention cap added earlier this session set `layout = MOOV_LAST`
+    purely to stop buffering, and `_determinations` then asserted
+    `kill_condition_3_whole_file_interface: OBSERVED — the response placed its
+    moov after the media`. Since this parser has never seen a Maxine container,
+    an unfamiliar box shape would have been reported as an observed kill
+    condition. There is now a distinct `UNCLASSIFIED_BY_THIS_HARNESS` layout
+    that reports `NOT MEASURED` and says the limitation is ours.
+
+13. **Stage A returned a hard `NO` when a parser fault was the only reason
+    nothing was located**, `_attribution` blamed the **server** for a
+    client-side sender failure, a parse fault on our *own* outbound container
+    aborted the Stage B RPC, and Stage B lacked Stage A's deadline-versus-
+    duration guard. All four fixed.
+
 ## Verification of this session's work
 
 | Check | Result |
 | --- | --- |
-| Automated tests | **101 passed** (was 74), 3 consecutive runs, no flakiness |
+| Automated tests | **108 passed** (was 74), repeated runs, no flakiness |
 | `pyflakes` | clean |
 | Harness self-test | **PASS**, 12/12 assertions |
 | Age coverage, all four self-test runs | `90/90`, correspondence `1:1`, zero impossible ages |
-| Harness client-side floor, re-measured | ffmpeg muxer **42.2 ms** p50, in-process **7.5 ms** p50 |
+| Harness client-side floor, re-measured | ffmpeg muxer **44.7 ms** p50, in-process **8.5 ms** p50 |
+| Stage B bitstream | H.264 **High**, 1280x720 (was Constrained Baseline) |
+| Adversarial review | 51 agents, 6 dimensions, 44 verifiers, 1 completeness critic |
 
 `NOT MEASURED` still applies to every Maxine quantity. Nothing in this section
 is evidence about Maxine; it is evidence that the instrument will not lie about
